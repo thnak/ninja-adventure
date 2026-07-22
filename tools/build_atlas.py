@@ -61,12 +61,7 @@ MANIFEST = [
     ("TerrainAsh",       "NLogic",   6,  0),
     # --- overlays (transparent, drawn over the base layer) ---
     # Ninja Adventure's trees are two tiles as well: canopy on top of trunk.
-    ("TreeTop",          "NTree",    5,  3),
-    ("Tree",             "NTree",    5,  4),
-    # A second species, picked per tile by hash — one repeated sprite makes a forest read as a
-    # stamped grid.
-    ("TreeTopPine",      "NTree",    1,  3),
-    ("TreePine",         "NTree",    1,  4),
+    # Trees are NOT here — they are 2x3 multi-tile sprites, see BIG_MANIFEST.
     # --- crops: stage 0-1 use the seedling, 2 the growing plant, 3 the ripe per-kind sprite ---
     ("CropSeedling",     "RL", 44, 23),
     ("CropGrowing",      "RL", 44, 24),
@@ -92,6 +87,17 @@ MANIFEST = [
     # Where a wave comes out of. One tile, self-contained, unmistakably "things arrive here".
     ("SpawnCamp",        "RL", 50,  9),
     # NOTE: creatures and the player are NOT here — they are animation sheets, see ANIM_MANIFEST.
+]
+
+# --- Multi-tile sprites ------------------------------------------------------
+# Ninja Adventure's trees are 2 tiles WIDE and 3 TALL. Slicing a single 16x16 out of one is exactly
+# the "cut with the wrong margin" artefact it looks like: you get the left half of a canopy sitting
+# on grass. These are packed as one contiguous region and drawn as a single quad, anchored so the
+# trunk sits on its own tile and the canopy overhangs the tiles above.
+BIG_MANIFEST = [
+    # (name, sheet, col, row, tiles wide, tiles tall)
+    ("TreeBroad", "NTree", 5, 2, 2, 3),
+    ("TreePine",  "NTree", 1, 2, 2, 3),
 ]
 
 COLS = 8  # atlas width in cells; keeps the texture small and squarish
@@ -206,6 +212,24 @@ def main() -> int:
         anims.append((name, PAD, anim_y + PAD, acols, arows))
         anim_y += block_h
 
+    # --- multi-tile sprites, stacked below the animations ------------------------------------
+    bigs = []
+    for name, key_sheet, col, row, wt, ht in BIG_MANIFEST:
+        sheet, stride = sheets[key_sheet]
+        region = sheet.crop((col * stride, row * stride, (col + wt) * stride, (row + ht) * stride))
+        bw, bh = wt * TILE, ht * TILE
+        block = Image.new("RGBA", (bw + 2 * PAD, bh + 2 * PAD), (0, 0, 0, 0))
+        block.paste(region, (PAD, PAD))
+        new_h = anim_y + bh + 2 * PAD
+        if new_h > atlas.height or bw + 2 * PAD > atlas.width:
+            grown = Image.new("RGBA", (max(bw + 2 * PAD, atlas.width), max(new_h, atlas.height)),
+                              (0, 0, 0, 0))
+            grown.paste(atlas, (0, 0))
+            atlas = grown
+        atlas.paste(block, (0, anim_y))
+        bigs.append((name, PAD, anim_y + PAD, wt, ht))
+        anim_y += bh + 2 * PAD
+
     out_png = ROOT / "assets" / "atlas.png"
     atlas.save(out_png)
 
@@ -285,12 +309,40 @@ def main() -> int:
         "                     static_cast<std::int16_t>(s.y + r * (kAtlasTile + 2))};",
         "}",
         "",
+        "// --- Multi-tile sprites --------------------------------------------------------------",
+        "// Drawn as ONE quad spanning `w` x `h` tiles, anchored so the bottom-centre sits on the",
+        "// owning tile — a tree's trunk is on its tile and the canopy overhangs the ones above.",
+        "struct AtlasBig {",
+        "    std::int16_t x;",
+        "    std::int16_t y;",
+        "    std::uint8_t w;  // tiles wide",
+        "    std::uint8_t h;  // tiles tall",
+        "};",
+        "",
+        "enum class Big : std::uint8_t {",
+    ]
+    lines += [f"    k{name}," for name, _, _, _, _ in bigs]
+    lines += [
+        "    kCount,",
+        "};",
+        "",
+        "inline constexpr AtlasBig kAtlasBigs[static_cast<int>(Big::kCount)] = {",
+    ]
+    lines += [f"    {{{x}, {y}, {w}, {h}}},  // k{name}" for name, x, y, w, h in bigs]
+    lines += [
+        "};",
+        "",
+        "[[nodiscard]] inline constexpr const AtlasBig& big_of(Big b) noexcept {",
+        "    return kAtlasBigs[static_cast<int>(b)];",
+        "}",
+        "",
         "}  // namespace mmo",
         "",
     ]
     header.write_text("\n".join(lines))
 
-    print(f"{out_png}  {atlas.width}x{atlas.height}  ({len(entries)} tiles, {len(anims)} anims)")
+    print(f"{out_png}  {atlas.width}x{atlas.height}  "
+          f"({len(entries)} tiles, {len(anims)} anims, {len(bigs)} big)")
     print(f"{header}")
     return 0
 

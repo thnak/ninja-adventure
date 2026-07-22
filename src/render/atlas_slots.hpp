@@ -25,10 +25,6 @@ enum class Slot : std::uint8_t {
     kTerrainSnow,
     kTerrainMarsh,
     kTerrainAsh,
-    kTreeTop,
-    kTree,
-    kTreeTopPine,
-    kTreePine,
     kCropSeedling,
     kCropGrowing,
     kCropWheatRipe,
@@ -54,23 +50,19 @@ inline constexpr AtlasRect kAtlasRects[static_cast<int>(Slot::kCount)] = {
     {91, 1},  // kTerrainSnow
     {109, 1},  // kTerrainMarsh
     {127, 1},  // kTerrainAsh
-    {1, 19},  // kTreeTop
-    {19, 19},  // kTree
-    {37, 19},  // kTreeTopPine
-    {55, 19},  // kTreePine
-    {73, 19},  // kCropSeedling
-    {91, 19},  // kCropGrowing
-    {109, 19},  // kCropWheatRipe
-    {127, 19},  // kCropCarrotRipe
-    {1, 37},  // kCropPumpkinRipe
-    {19, 37},  // kBuildHearth
-    {37, 37},  // kBuildWall
-    {55, 37},  // kBuildWallRun
-    {73, 37},  // kBuildTurret
-    {91, 37},  // kBuildPlot
-    {109, 37},  // kBuildFence
-    {127, 37},  // kBuildFencePost
-    {1, 55},  // kSpawnCamp
+    {1, 19},  // kCropSeedling
+    {19, 19},  // kCropGrowing
+    {37, 19},  // kCropWheatRipe
+    {55, 19},  // kCropCarrotRipe
+    {73, 19},  // kCropPumpkinRipe
+    {91, 19},  // kBuildHearth
+    {109, 19},  // kBuildWall
+    {127, 19},  // kBuildWallRun
+    {1, 37},  // kBuildTurret
+    {19, 37},  // kBuildPlot
+    {37, 37},  // kBuildFence
+    {55, 37},  // kBuildFencePost
+    {73, 37},  // kSpawnCamp
 };
 
 [[nodiscard]] inline constexpr AtlasRect rect_of(Slot s) noexcept {
@@ -100,12 +92,12 @@ enum class Anim : std::uint8_t {
 };
 
 inline constexpr AtlasAnim kAtlasAnims[static_cast<int>(Anim::kCount)] = {
-    {1, 73, 4, 4},  // kPlayer
-    {1, 145, 4, 4},  // kMobSlime
-    {1, 217, 4, 4},  // kMobSpider
-    {1, 289, 4, 4},  // kMobSpirit
-    {1, 361, 2, 1},  // kChicken
-    {1, 379, 2, 1},  // kCow
+    {1, 55, 4, 4},  // kPlayer
+    {1, 127, 4, 4},  // kMobSlime
+    {1, 199, 4, 4},  // kMobSpider
+    {1, 271, 4, 4},  // kMobSpirit
+    {1, 343, 2, 1},  // kChicken
+    {1, 361, 2, 1},  // kCow
 };
 
 [[nodiscard]] inline constexpr const AtlasAnim& anim_of(Anim a) noexcept {
@@ -120,6 +112,31 @@ inline constexpr AtlasAnim kAtlasAnims[static_cast<int>(Anim::kCount)] = {
     const int r = (frame % s.rows + s.rows) % s.rows;
     return AtlasRect{static_cast<std::int16_t>(s.x + c * (kAtlasTile + 2)),
                      static_cast<std::int16_t>(s.y + r * (kAtlasTile + 2))};
+}
+
+// --- Multi-tile sprites --------------------------------------------------------------
+// Drawn as ONE quad spanning `w` x `h` tiles, anchored so the bottom-centre sits on the
+// owning tile — a tree's trunk is on its tile and the canopy overhangs the ones above.
+struct AtlasBig {
+    std::int16_t x;
+    std::int16_t y;
+    std::uint8_t w;  // tiles wide
+    std::uint8_t h;  // tiles tall
+};
+
+enum class Big : std::uint8_t {
+    kTreeBroad,
+    kTreePine,
+    kCount,
+};
+
+inline constexpr AtlasBig kAtlasBigs[static_cast<int>(Big::kCount)] = {
+    {1, 379, 2, 3},  // kTreeBroad
+    {1, 429, 2, 3},  // kTreePine
+};
+
+[[nodiscard]] inline constexpr const AtlasBig& big_of(Big b) noexcept {
+    return kAtlasBigs[static_cast<int>(b)];
 }
 
 }  // namespace mmo

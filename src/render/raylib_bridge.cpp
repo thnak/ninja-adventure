@@ -122,6 +122,21 @@ struct RaylibBridge::Impl {
         DrawTexturePro(atlas, src, dst, Vector2{size * 0.5f, size * 0.5f}, 0.0f, tint);
     }
 
+    // A multi-tile sprite, anchored bottom-centre on tile (tx,ty): the trunk sits on its own tile
+    // and the canopy overhangs the tiles above.
+    void big(Big b, int tx, int ty, Color tint = WHITE) const {
+        if (!atlas_ok) return;
+        const AtlasBig& s = big_of(b);
+        const Rectangle src{static_cast<float>(s.x), static_cast<float>(s.y),
+                            static_cast<float>(s.w * kAtlasTile),
+                            static_cast<float>(s.h * kAtlasTile)};
+        const float w = static_cast<float>(s.w * kTilePx);
+        const float h = static_cast<float>(s.h * kTilePx);
+        const Rectangle dst{(static_cast<float>(tx) + 0.5f) * kTilePx,
+                            static_cast<float>(ty + 1) * kTilePx, w, h};
+        DrawTexturePro(atlas, src, dst, Vector2{w * 0.5f, h}, 0.0f, tint);
+    }
+
     // A full tile at its grid position.
     void tile(Slot s, int tx, int ty, Color tint = WHITE, int variant = 0,
               float rotation = 0.0f) const {
@@ -270,11 +285,12 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                     }
                     // Low bit picks the species, high bit mirrors it: four visually distinct trees
                     // out of two sprites.
+                    // Only draw a tree on tiles where it is the LEFT of its 2-wide footprint, so
+                    // a run of tree tiles becomes a row of whole trees rather than overlapping
+                    // half-trees.
+                    if (((gx + gy) & 1) != 0) continue;
                     const int tv = tile_variant(c.map, gx, gy);
-                    const bool pine = (tv & 1) != 0;
-                    const int mirror = (tv >> 1) & 1;
-                    im.tile(pine ? Slot::kTreeTopPine : Slot::kTreeTop, gx, gy - 1, WHITE, mirror);
-                    im.tile(pine ? Slot::kTreePine : Slot::kTree, gx, gy, WHITE, mirror);
+                    im.big((tv & 1) ? Big::kTreePine : Big::kTreeBroad, gx, gy);
                 }
             }
 
@@ -364,8 +380,17 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
     const Vector2 mw = GetScreenToWorld2D(GetMousePosition(), im.camera);
     const int ctx = static_cast<int>(mw.x) / kTilePx;
     const int cty = static_cast<int>(mw.y) / kTilePx;
-    im.tile(slot_of(im.selected), ctx, cty, Color{255, 255, 255, 110});
-    DrawRectangleLines(ctx * kTilePx, cty * kTilePx, kTilePx, kTilePx, Color{255, 255, 255, 180});
+    // Only preview when the cursor is somewhere the player is NOT standing. Previously the ghost
+    // building was drawn unconditionally, which meant a translucent wall was permanently stuck to
+    // the character — most obvious in screenshots, where the mouse sits at screen centre, i.e.
+    // exactly on the player.
+    const int ptx = static_cast<int>(player.x);
+    const int pty = static_cast<int>(player.y);
+    if (ctx != ptx || cty != pty) {
+        im.tile(slot_of(im.selected), ctx, cty, Color{255, 255, 255, 100});
+        DrawRectangleLines(ctx * kTilePx, cty * kTilePx, kTilePx, kTilePx,
+                           Color{255, 255, 255, 150});
+    }
 
     // --- Player ----------------------------------------------------------------------------------
     DrawEllipse(static_cast<int>(player.x * kTilePx), static_cast<int>(player.y * kTilePx + 7),

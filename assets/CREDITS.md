@@ -38,9 +38,17 @@ has to be touched regardless.
 Adventure. **Still Kenney: buildings** — wall, turret, fence, hearth, plot — and the crop sprites.
 
 Fill tiles were located by *scanning* every sheet for low-variance (flat) tiles and matching mean
-colour against the terrain palette, rather than by eyeballing five hundred tiles per sheet. The one
-tile picked by eye instead, `TilesetTowers (0,0)`, turned out to be a tower roof rather than a tree
-and looked exactly like what it was.
+colour against the terrain palette, rather than by eyeballing five hundred tiles per sheet.
+
+**Trees are 2 tiles wide and 3 tall in this pack.** Two separate mistakes came from not checking
+that: first `TilesetTowers (0,0)` was picked as a tree and is actually a tower roof; then the right
+sheet was used but sliced to a single 16x16, which takes the *left half* of a canopy and renders it
+sitting on grass. Both look exactly like a bad crop, which is what they were. The packer now has a
+`BIG_MANIFEST` for multi-tile sprites: the region is packed contiguously and drawn as one quad,
+anchored bottom-centre so the trunk sits on its own tile and the canopy overhangs the tiles above.
+
+Before adding a sprite, check whether it is self-contained in one tile — the check is whether all
+four 1px borders are transparent.
 
 Ninja Adventure ships a complete 16x16 tileset family that covers everything Kenney was doing here:
 
