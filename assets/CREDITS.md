@@ -50,6 +50,16 @@ anchored bottom-centre so the trunk sits on its own tile and the canopy overhang
 Before adding a sprite, check whether it is self-contained in one tile — the check is whether all
 four 1px borders are transparent.
 
+**The buildings are still Kenney, and migrating them is not a one-line manifest swap.** Attempted
+and reverted: Ninja Adventure's fence (`TilesetElement` 11-13,2) is a horizontal 3-piece run that is
+**2 tiles tall** — rail on top, base below. Taking only the top tile renders a thin stick, which
+looked worse than what it replaced. Same class of problem as the trees, and it needs the same
+answer: a `BIG_MANIFEST` entry plus an autotile pass that knows about run ends, not just middles.
+
+The wall and turret are in the same position. `TilesetHouse` (759 tiles) and `TilesetTowers` (144,
+all `object_part` slices of 2x2 landmark towers) have no single-tile wall or turret at all — every
+candidate is part of a larger structure. This is a real piece of work, not a pick.
+
 Ninja Adventure ships a complete 16x16 tileset family that covers everything Kenney was doing here:
 
 | Need | Ninja Adventure tileset |
