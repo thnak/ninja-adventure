@@ -49,6 +49,28 @@ namespace {
     return Slot::kTerrainGrass;
 }
 
+// --- Tree placement -------------------------------------------------------------------------------
+// Trees in this pack are 2 tiles WIDE and 3 TALL, but terrain is per-tile, so a run of tree tiles
+// has to be resolved into whole trees. The first attempt drew one wherever `(gx + gy)` was even —
+// that is a CHECKERBOARD, not a left-edge test, so trees landed diagonally on top of each other and
+// every other tree tile drew nothing at all. That is the overlapping-and-sliced look.
+//
+// A tile is an anchor iff it is a tree and an EVEN number of trees precede it in its row, so a run
+// of N tree tiles yields floor(N/2) non-overlapping trees. Terrain is a pure function, so this can
+// be asked about any tile without a chunk view — including tiles just off-screen, which is what
+// stops canopies being clipped at the view edge.
+[[nodiscard]] bool tree_at(std::uint16_t map, int x, int y) {
+    if (x < 0 || y < 0 || x >= kMapTiles || y >= kMapTiles) return false;
+    return terrain_of(kWorldSeed, map, x, y) == Terrain::kTree;
+}
+
+[[nodiscard]] bool tree_anchor(std::uint16_t map, int x, int y) {
+    if (!tree_at(map, x, y)) return false;
+    int run = 0;
+    while (run < 64 && tree_at(map, x - 1 - run, y)) ++run;
+    return (run % 2) == 0;
+}
+
 [[nodiscard]] Anim anim_of(MobKind k) {
     switch (k) {
         case MobKind::kSlime: return Anim::kMobSlime;
@@ -281,32 +303,6 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                     im.tile(base, gx, gy, WHITE, v & 3);
                 }
             }
-            // Trees, top-down within the chunk so a nearer tree's canopy overlaps the one behind it.
-            for (int ly = 0; ly < kChunkTiles; ++ly) {
-                const int gy = base_y + ly;
-                if (gy < min_ty - 1 || gy > max_ty) continue;
-                for (int lx = 0; lx < kChunkTiles; ++lx) {
-                    const int gx = base_x + lx;
-                    if (gx < min_tx || gx > max_tx) continue;
-                    if (static_cast<Terrain>(v->terrain[ly * kChunkTiles + lx]) != Terrain::kTree) {
-                        continue;
-                    }
-                    // Low bit picks the species, high bit mirrors it: four visually distinct trees
-                    // out of two sprites.
-                    // Only draw a tree on tiles where it is the LEFT of its 2-wide footprint, so
-                    // a run of tree tiles becomes a row of whole trees rather than overlapping
-                    // half-trees.
-                    if (((gx + gy) & 1) != 0) continue;
-                    const int tv = tile_variant(c.map, gx, gy);
-                    im.big((tv & 1) ? Big::kTreePine : Big::kTreeBroad, gx, gy);
-                }
-            }
-
-            // Chunk border — the demo's most important visual. Each outlined square is one actor,
-            // and once the world is distributed each will be labelled with the node hosting it.
-            DrawRectangleLines(base_x * kTilePx, base_y * kTilePx, kChunkTiles * kTilePx,
-                               kChunkTiles * kTilePx, Color{255, 255, 255, 40});
-
             for (const Crop& cr : v->crops) {
                 // Size tracks growth: a seedling is drawn at 45% of a tile, a ripe crop fills it.
                 const float ratio = 0.45f + 0.55f * (static_cast<float>(cr.stage) /
@@ -371,6 +367,17 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                         m.y * kTilePx, kTilePx * 1.0f);
                 ++drawn_mobs;
             }
+        }
+    }
+
+    // --- Trees ------------------------------------------------------------------------------------
+    // One pass over the whole visible rect rather than per chunk, EXPANDED by the sprite footprint
+    // (2 wide, 3 tall) so a tree anchored just off-screen still paints the canopy that reaches into
+    // view. Row order is top-down, so a nearer tree's canopy overlaps the one behind it.
+    for (int gy = min_ty; gy <= max_ty + 3; ++gy) {
+        for (int gx = min_tx - 2; gx <= max_tx; ++gx) {
+            if (!tree_anchor(player.map, gx, gy)) continue;
+            im.big((tile_variant(player.map, gx, gy) & 1) ? Big::kTreePine : Big::kTreeBroad, gx, gy);
         }
     }
 
