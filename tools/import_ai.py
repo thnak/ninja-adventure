@@ -145,7 +145,23 @@ def tile_size(bw, bh, tiles_tall):
     return w, h
 
 
-def convert(img, mask, box, tiles_tall):
+def belongs(labels, ids, x, y):
+    """Is this full-res pixel part of the wanted component?
+
+    Tested with a 3x3 dilation in label space because the label grid is DETECT_SCALE times coarser
+    than the image; without it the sprite's outermost pixels fall in cells the coarse mask rounded
+    to background and the silhouette gets shaved.
+    """
+    lx, ly = x // DETECT_SCALE, y // DETECT_SCALE
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if 0 <= ly + dy < len(labels) and 0 <= lx + dx < len(labels[0]):
+                if labels[ly + dy][lx + dx] in ids:
+                    return True
+    return False
+
+
+def convert(img, mask, labels, box, ids, tiles_tall, ncolours):
     """Crop, cut, downsample and palette-lock one building. See the four rules in the docstring."""
     x0, y0, x1, y1 = box
     crop = img.crop((x0, y0, x1 + 1, y1 + 1))
@@ -154,12 +170,17 @@ def convert(img, mask, box, tiles_tall):
     ap = a.load()
     for y in range(crop.height):
         for x in range(crop.width):
-            if mask[y0 + y][x0 + x]:
+            if mask[y0 + y][x0 + x] and belongs(labels, ids, x0 + x, y0 + y):
                 ap[x, y] = 255
 
     w, h = tile_size(crop.width, crop.height, tiles_tall)
     small = crop.resize((w, h), Image.BOX)        # rule 2: area average, no ringing
     amask = a.resize((w, h), Image.BOX)
+    # Collapse to a handful of source colours BEFORE snapping. Snapping a noisy 4x reduction
+    # one pixel at a time scatters neighbouring pixels onto different palette entries and the
+    # roof reads as static; median cut makes whole regions agree first. The pack's own houses
+    # carry 5-12 colours, so this is also what "on style" means numerically.
+    small = small.quantize(colors=ncolours, method=Image.MEDIANCUT).convert("RGB")
 
     out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     sp, mp = small.load(), amask.load()
@@ -190,13 +211,16 @@ def main():
     ap.add_argument("--tiles-tall", type=int, default=3)
     ap.add_argument("--prefix", default="ai_house")
     ap.add_argument("--scale", type=int, default=4)
+    ap.add_argument("--colours", type=int, default=12,
+                    help="median-cut target before the palette snap; the pack uses 5-12")
     ap.add_argument("--report", action="store_true", help="list detections and stop")
     args = ap.parse_args()
 
     img = Image.open(args.sheet).convert("RGB")
     bg = background_of(img)
     small = img.resize((img.width // DETECT_SCALE, img.height // DETECT_SCALE), Image.BOX)
-    rows = shelve(merge_stacked(components(foreground_mask(small, bg), small.width, small.height)))
+    boxes, labels = components(foreground_mask(small, bg), small.width, small.height)
+    rows = shelve(merge_stacked(boxes))
 
     print(f"background {bg}   detected {sum(len(r) for r in rows)} components "
           f"in {len(rows)} rows")
@@ -214,10 +238,10 @@ def main():
     for r, row in enumerate(rows):
         if r < args.skip_rows:
             continue
-        for i, (x0, y0, x1, y1, _) in enumerate(row):
+        for i, (x0, y0, x1, y1, _, ids) in enumerate(row):
             box = (x0 * DETECT_SCALE, y0 * DETECT_SCALE,
                    (x1 + 1) * DETECT_SCALE - 1, (y1 + 1) * DETECT_SCALE - 1)
-            sprite = convert(img, full_mask, box, args.tiles_tall)
+            sprite = convert(img, full_mask, labels, box, ids, args.tiles_tall, args.colours)
             name = f"{args.prefix}_{r - args.skip_rows + 1}{chr(ord('a') + i)}"
             sprite.save(out / f"{name}.png")
             px = list(sprite.get_flattened_data())

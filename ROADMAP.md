@@ -87,7 +87,7 @@ Dựng sân khấu thật, trước khi tune bất cứ thứ gì lên trên nó
 | Thống nhất art: **địa hình + cây** sang Ninja Adventure | ✅ 9 loại địa hình, cây 2 mảnh mọc trên nền đúng vòng |
 | **Thế giới đầu tiên 100% Ninja Adventure** | ✅ không còn ô Kenney nào trong world |
 | Ảnh từng quần xã (`--ring N`) | ✅ `docs/biomes/` |
-| **Worldgen đặt làng / cứ điểm / đường** | ✅ 49 làng, 23 cứ điểm, 493 công trình, `src/world/worldgen.hpp` |
+| **Worldgen đặt làng / cứ điểm / đường** | ✅ 51 làng, 27 cứ điểm, 522 công trình, `src/world/worldgen.hpp` |
 | **Gỡ nông trại khởi đầu + tường/tháp/rào đặt-từng-ô** | ✅ `BuildKind` còn 2 giá trị |
 | **Lớp không khí**: lá bay / mưa / tuyết theo vòng | ✅ 0 state, 0 message |
 | **BFS đa nguồn** (tới làng gần nhất) | ✅ một lượt quét, không phải một field mỗi làng |
@@ -99,7 +99,7 @@ Dựng sân khấu thật, trước khi tune bất cứ thứ gì lên trên nó
 | Mỏ / cổng | ⬜ đẩy sang P4 — cả hai cần hạ tầng instance |
 
 **Xong khi:** ✅ sinh một thế giới mới, đi từ tâm ra rìa và **thấy được** độ khó tăng dần
-(22 → 12 → 5 → 9 → 1 làng, 1 → 4 → 4 → 6 → 8 cứ điểm); làng nằm ở chỗ hợp lý; không vùng nào bị
+(22 → 13 → 5 → 9 → 2 làng, và cứ điểm dày lên ở rìa); làng nằm ở chỗ hợp lý; không vùng nào bị
 cứ điểm bóp nghẹt.
 
 ### Ba thứ đo được rồi mới sửa, đáng ghi lại

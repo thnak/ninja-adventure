@@ -12,7 +12,7 @@ are villages, joined by roads. Walk until you find one. Built on the
 | [ARCHITECTURE.md](ARCHITECTURE.md) | technical plan (§0 = design errors being corrected) |
 | [ROADMAP.md](ROADMAP.md) | phased plan, P0 → P9 |
 
-> **P0 and P1 are done.** The world now generates itself: **49 villages, 23 strongholds and 493
+> **P0 and P1 are done.** The world now generates itself: **51 villages, 27 strongholds and 522
 > buildings** across a 1024×1024 overworld, joined by roads, with difficulty radiating outward from
 > the middle. The first world is **entirely Ninja Adventure art** — no Kenney tiles left in it.
 > Next is [P2](ROADMAP.md): the player, and combat.
@@ -22,7 +22,7 @@ are villages, joined by roads. Walk until you find one. Built on the
 <sub>The whole 1024×1024 overworld, exported by `mmo_worldmap`. White crosses are villages (bigger =
 higher tier), red are strongholds, cyan is where a new player wakes up. Difficulty radiates out from
 the centre: Meadow, Forest, Wetland (swamp west / desert east), Snow, Wasteland — and so does
-loneliness, 22 → 12 → 5 → 9 → 1 villages against 1 → 4 → 4 → 6 → 8 strongholds.</sub>
+loneliness, 22 → 13 → 5 → 9 → 2 villages against 4 → 7 → 2 → 6 → 8 strongholds.</sub>
 
 ![village](docs/shot_village.png)
 
@@ -71,7 +71,7 @@ cmake --build build -j4 --target mmo_client
 taskset -c 0-3 ./build/mmo_client
 
 # Verify the renderer without a display: fast-forwards and writes one frame
-xvfb-run -a ./build/mmo_client --shot 20 village.png --village 26
+xvfb-run -a ./build/mmo_client --shot 20 village.png --village 25
 
 # Export the whole overworld as a PNG, with ring/terrain/settlement statistics
 ./build/mmo_worldmap --rings --out worldmap.png

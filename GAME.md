@@ -532,8 +532,8 @@ Cũng hợp tông chill: bạn bắt đầu bằng một chuyến đi bộ, khô
 
 ### Đã làm (P1)
 
-Thế giới hiện sinh ra **49 làng, 23 cứ điểm, 493 công trình**. Người chơi tỉnh dậy cách làng gần
-nhất khoảng **30 ô** — đủ xa để việc đầu tiên game bảo bạn làm là *đi và nhìn quanh*, đủ gần để
+Thế giới hiện sinh ra **51 làng, 27 cứ điểm, 522 công trình**. Người chơi tỉnh dậy cách làng gần
+nhất khoảng **39 ô** — đủ xa để việc đầu tiên game bảo bạn làm là *đi và nhìn quanh*, đủ gần để
 việc đi bộ vẫn có nghĩa. Túi đồ khởi đầu là 40 gỗ / 25 đá / 12 hạt: đủ nhóm một bếp lửa và cuốc vài
 ô đất khi đã tới nơi, **cố ý không đủ để sống một mình**.
 

@@ -459,7 +459,7 @@ Bước 9 vẫn giữ — nhưng giờ nó gần như luôn đạt ngay lần đ
 Thứ tự thực tế hơi khác bản phác ở trên, và lý do đáng ghi lại:
 
 ```
-1. chọn chỗ làng   lưới jitter ô 112 ô, 9x9 = 81 ứng viên   → ~49 làng
+1. chọn chỗ làng   lưới jitter ô 112 ô, 9x9 = 81 ứng viên   → ~51 làng
 2. đường           nối mỗi làng với 2 làng gần nhất
 3. dựng làng       quảng trường (kPath) rồi nhà quanh nó
 4. cứ điểm         lưới jitter ô 124; bỏ nếu quá gần làng
