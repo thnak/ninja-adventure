@@ -32,11 +32,12 @@ inline constexpr int kChunkCount = kMapCount * kChunksPerMap;
 
 enum class MapId : std::uint16_t { kHomeValley = 0, kDarkForest = 1, kCrystalCaves = 2 };
 
-// The farm sits at the centre of the home map, so every rim chunk is roughly equidistant and a wave
-// converges from all sides instead of forming a single queue. Its tilled apron is part of the
-// terrain *function* (below), not an edit applied afterwards — see `terrain_of`.
-inline constexpr int kCoreTx = kMapTiles / 2;
-inline constexpr int kCoreTy = kMapTiles / 2;
+// Where a new player is dropped: the centre of the map, which is also the easiest ring. The tilled
+// apron there is part of the terrain *function* (below), not an edit applied afterwards — see
+// `terrain_of`. Once world generation lands (ROADMAP P1) this becomes "the starting village", and
+// these constants go away.
+inline constexpr int kHomeTx = kMapTiles / 2;
+inline constexpr int kHomeTy = kMapTiles / 2;
 inline constexpr int kFarmRadius = 6;
 
 // --- Terrain -------------------------------------------------------------------------------------
@@ -57,7 +58,12 @@ enum class Terrain : std::uint8_t {
 enum class MobKind : std::uint8_t { kSlime = 0, kSpider = 1, kGhost = 2 };
 enum class CropKind : std::uint8_t { kWheat = 0, kCarrot = 1, kPumpkin = 2 };
 enum class BuildKind : std::uint8_t {
-    kCore = 0,
+    // The player's home fire. It marks where you live and where you respawn, and in the snow rings
+    // it is what keeps crops alive. It is NOT a thing whose destruction ends anything — losing it
+    // costs you a rebuild and a respawn point, nothing more. (It replaced a `kCore` that the whole
+    // world had to defend; see ARCHITECTURE.md §0 S2 for why that was the wrong shape once you can
+    // build anywhere and villages exist.)
+    kHearth = 0,
     kWall = 1,
     kTurret = 2,
     kPlot = 3,
@@ -93,6 +99,17 @@ struct MobStats {
     return {30, 1.2f, 4};
 }
 
+// Which way a creature is facing. The order matches the COLUMN order of the Ninja Adventure walk
+// sheets so the renderer can pass it straight through as an atlas column — see atlas_slots.hpp.
+enum class Facing : std::uint8_t { kDown = 0, kUp = 1, kLeft = 2, kRight = 3 };
+
+// Facing from a movement vector. Whichever axis dominates wins, which is what reads correctly for
+// a 4-direction sprite set moving diagonally.
+[[nodiscard]] inline Facing facing_of(float dx, float dy) noexcept {
+    if (std::abs(dx) > std::abs(dy)) return dx < 0.0f ? Facing::kLeft : Facing::kRight;
+    return dy < 0.0f ? Facing::kUp : Facing::kDown;
+}
+
 // A mob lives in map-global tile space. Its owning chunk is derived, never stored — so migration is
 // "recompute the owner and forward", with no field to forget to update.
 struct Mob {
@@ -102,6 +119,7 @@ struct Mob {
     std::int16_t hp = 0;
     MobKind kind = MobKind::kSlime;
     std::uint8_t attack_cd = 0;  // ticks until this mob may strike again
+    Facing facing = Facing::kDown;
 };
 
 struct Crop {
@@ -135,7 +153,7 @@ struct Building {
 
 [[nodiscard]] inline constexpr std::int16_t base_hp_of(BuildKind k) noexcept {
     switch (k) {
-        case BuildKind::kCore: return 1000;
+        case BuildKind::kHearth: return 400;
         case BuildKind::kWall: return 200;
         case BuildKind::kTurret: return 120;
         case BuildKind::kPlot: return 20;
@@ -290,8 +308,8 @@ private:
     // stamping it over a generated chunk afterwards) is what keeps the function total: a chunk
     // querying a tile just across its border gets the same answer the owning chunk would give.
     if (map == static_cast<std::uint16_t>(MapId::kHomeValley)) {
-        const int dx = gx - kCoreTx;
-        const int dy = gy - kCoreTy;
+        const int dx = gx - kHomeTx;
+        const int dy = gy - kHomeTy;
         if (dx >= -kFarmRadius && dx <= kFarmRadius && dy >= -kFarmRadius && dy <= kFarmRadius) {
             return Terrain::kDirt;
         }

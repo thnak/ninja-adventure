@@ -27,18 +27,18 @@ namespace {
     return Slot::kTerrainGrass;
 }
 
-[[nodiscard]] Slot slot_of(MobKind k) {
+[[nodiscard]] Anim anim_of(MobKind k) {
     switch (k) {
-        case MobKind::kSlime: return Slot::kMobSlime;
-        case MobKind::kSpider: return Slot::kMobSpider;
-        case MobKind::kGhost: return Slot::kMobGhost;
+        case MobKind::kSlime: return Anim::kMobSlime;
+        case MobKind::kSpider: return Anim::kMobSpider;
+        case MobKind::kGhost: return Anim::kMobSpirit;
     }
-    return Slot::kMobSlime;
+    return Anim::kMobSlime;
 }
 
 [[nodiscard]] Slot slot_of(BuildKind k) {
     switch (k) {
-        case BuildKind::kCore: return Slot::kBuildCore;
+        case BuildKind::kHearth: return Slot::kBuildHearth;
         case BuildKind::kWall: return Slot::kBuildWall;
         case BuildKind::kTurret: return Slot::kBuildTurret;
         case BuildKind::kPlot: return Slot::kBuildPlot;
@@ -60,9 +60,6 @@ namespace {
     return Slot::kCropWheatRipe;
 }
 
-constexpr const char* kBuildNames[] = {"Core", "Wall", "Turret", "Plot", "Fence"};
-constexpr const char* kItemNames[] = {"wood", "stone", "seed", "produce"};
-
 }  // namespace
 
 struct RaylibBridge::Impl {
@@ -72,6 +69,8 @@ struct RaylibBridge::Impl {
     BuildKind selected = BuildKind::kWall;
     Texture2D atlas{};
     bool atlas_ok = false;
+    int last_chunks = 0;
+    int last_mobs = 0;
     std::vector<std::pair<int, int>> camps;
 
     // One sprite, scaled from the atlas' 16px cell to whatever world size the caller wants.
@@ -89,6 +88,18 @@ struct RaylibBridge::Impl {
         // Origin at the sprite centre so `rotation` spins in place rather than about a corner.
         const Rectangle dst{cx, cy, size, size};
         DrawTexturePro(atlas, src, dst, Vector2{size * 0.5f, size * 0.5f}, rotation, tint);
+    }
+
+    // One frame of an animation sheet. `dir` is a `Facing`, `frame` a free-running counter — both
+    // are wrapped inside `anim_frame`, so a two-facing animal can be handed a four-way facing.
+    void anim(Anim a, int dir, int frame, float cx, float cy, float size,
+              Color tint = WHITE) const {
+        if (!atlas_ok) return;
+        const AtlasRect r = anim_frame(a, dir, frame);
+        const float t = static_cast<float>(kAtlasTile);
+        const Rectangle src{static_cast<float>(r.x), static_cast<float>(r.y), t, t};
+        const Rectangle dst{cx, cy, size, size};
+        DrawTexturePro(atlas, src, dst, Vector2{size * 0.5f, size * 0.5f}, 0.0f, tint);
     }
 
     // A full tile at its grid position.
@@ -303,7 +314,11 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                 // sprites reading as decals lying on the ground.
                 DrawEllipse(static_cast<int>(m.x * kTilePx), static_cast<int>(m.y * kTilePx + 6),
                             kTilePx * 0.28f, kTilePx * 0.14f, Color{0, 0, 0, 70});
-                im.sprite(slot_of(m.kind), m.x * kTilePx, m.y * kTilePx, kTilePx * 0.9f);
+                // Offsetting the frame by the mob id keeps a whole wave from stepping in unison,
+                // which reads as one organism rather than a crowd.
+                const int frame = static_cast<int>((v->tick / 3 + m.id) & 0xFF);
+                im.anim(anim_of(m.kind), static_cast<int>(m.facing), frame, m.x * kTilePx,
+                        m.y * kTilePx, kTilePx * 1.0f);
                 ++drawn_mobs;
             }
         }
@@ -329,47 +344,32 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
     // --- Player ----------------------------------------------------------------------------------
     DrawEllipse(static_cast<int>(player.x * kTilePx), static_cast<int>(player.y * kTilePx + 7),
                 kTilePx * 0.30f, kTilePx * 0.15f, Color{0, 0, 0, 80});
-    im.sprite(Slot::kPlayer, player.x * kTilePx, player.y * kTilePx, kTilePx * 1.05f);
+    // `steps` is the authoritative move counter from PlayerActor, not a local frame timer — so the
+    // walk cycle stays in step with the simulation rather than with this client's frame rate.
+    im.anim(Anim::kPlayer, static_cast<int>(player.facing), static_cast<int>(player.steps / 4),
+            player.x * kTilePx, player.y * kTilePx, kTilePx * 1.1f);
 
     // Night tint: one screen-space overlay over the finished world, rather than a darkened colour
     // per tile. Drawn inside the 2D camera would scale it with zoom, so it goes after EndMode2D.
     EndMode2D();
     if (night) DrawRectangle(0, 0, im.width, im.height, Color{20, 24, 80, 90});
 
-    // --- HUD ---------------------------------------------------------------------------------------
-    const int wave = static_cast<int>(status.wave.load(std::memory_order_relaxed));
-    const int killed = static_cast<int>(status.mobs_killed.load(std::memory_order_relaxed));
-    const int migrations = static_cast<int>(status.migrations.load(std::memory_order_relaxed));
-    const int core_hp = std::max(0, static_cast<int>(status.core_hp.load(std::memory_order_relaxed)));
-    const double secs = static_cast<double>(status.world_ms.load(std::memory_order_relaxed)) / 1000.0;
-
-    DrawRectangle(0, 0, im.width, 84, Color{0, 0, 0, 150});
-    DrawText(TextFormat("%s  t=%.0fs   wave %d   core %d", night ? "NIGHT" : "DAY", secs, wave,
-                        core_hp),
-             12, 10, 20, night ? Color{200, 200, 255, 255} : Color{255, 240, 180, 255});
-    DrawText(TextFormat("mobs on screen %d   killed %d   CHUNK MIGRATIONS %d", drawn_mobs, killed,
-                        migrations),
-             12, 34, 16, Color{200, 220, 200, 255});
-    DrawText(TextFormat("chunk actors drawn %d   fps %d", drawn_chunks, GetFPS()), 12, 54, 16,
-             Color{160, 180, 200, 255});
-
-    // Inventory + controls
-    int y = im.height - 92;
-    DrawRectangle(0, y - 8, im.width, 100, Color{0, 0, 0, 150});
-    for (int i = 0; i < kItemKinds; ++i) {
-        DrawText(TextFormat("%s %d", kItemNames[i], player.items[i]), 12 + i * 120, y, 16,
-                 Color{230, 230, 230, 255});
-    }
-    DrawText(TextFormat("build: %s   [1] wall  [2] turret  [3] plot  [4] fence",
-                        kBuildNames[static_cast<int>(im.selected)]),
-             12, y + 24, 16, Color{230, 210, 160, 255});
-    DrawText("WASD move  LMB build  RMB plant  E harvest  T till  U upgrade  wheel zoom", 12,
-             y + 46, 16, Color{180, 190, 200, 255});
+    // NO HUD HERE. The world renderer draws the world; the shell (src/ui/screens.cpp) draws
+    // everything a player reads. Keeping them apart is what let the engine counters move off the
+    // play area and into the F3 overlay without touching a line of world-drawing code.
+    //
+    // The two counts the debug overlay wants are stashed for `drawn_chunks()` / `drawn_mobs()`.
+    im.last_chunks = drawn_chunks;
+    im.last_mobs = drawn_mobs;
 }
 
 void RaylibBridge::set_camps(const std::vector<std::pair<int, int>>& camps) {
     impl_->camps = camps;
 }
+
+BuildKind RaylibBridge::selected_build() const { return impl_->selected; }
+int RaylibBridge::drawn_chunks() const { return impl_->last_chunks; }
+int RaylibBridge::drawn_mobs() const { return impl_->last_mobs; }
 
 void RaylibBridge::end_frame() { EndDrawing(); }
 

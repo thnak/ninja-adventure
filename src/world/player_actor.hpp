@@ -54,6 +54,10 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         // (planting on water, building on water), which is the property that actually matters.
         x_ = std::clamp(x_ + m.dx, 0.0f, static_cast<float>(kMapTiles) - 1.0f);
         y_ = std::clamp(y_ + m.dy, 0.0f, static_cast<float>(kMapTiles) - 1.0f);
+        if (m.dx != 0.0f || m.dy != 0.0f) {
+            facing_ = facing_of(m.dx, m.dy);
+            ++steps_;  // drives the walk animation; the renderer never sees raw positions over time
+        }
     }
 
     void handle(const GrantItems& g) noexcept {
@@ -87,6 +91,8 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         v.x = x_;
         v.y = y_;
         v.hp = hp_;
+        v.facing = facing_;
+        v.steps = steps_;
         for (int i = 0; i < kItemKinds; ++i) v.items[i] = items_[i];
         return v;
     }
@@ -106,6 +112,8 @@ private:
     float x_ = 0.0f;
     float y_ = 0.0f;
     std::int16_t hp_ = kPlayerMaxHp;
+    Facing facing_ = Facing::kDown;
+    std::uint32_t steps_ = 0;
     std::int32_t items_[kItemKinds] = {};
 };
 
@@ -121,7 +129,7 @@ struct BuildCost {
         case BuildKind::kWall: return {ItemKind::kWood, 5};
         case BuildKind::kTurret: return {ItemKind::kStone, 12};
         case BuildKind::kPlot: return {ItemKind::kWood, 2};
-        case BuildKind::kCore: return {ItemKind::kStone, 0};
+        case BuildKind::kHearth: return {ItemKind::kStone, 20};
         case BuildKind::kCount: break;
     }
     return {ItemKind::kWood, 1};

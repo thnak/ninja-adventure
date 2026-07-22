@@ -51,8 +51,10 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
     WorldStatus* status = nullptr;
     quark::ActorRef<PlayerActor> player{};
     const FlowField* flow = nullptr;  // read-only, never written after bring-up (see flow_field.hpp)
-    float core_x = 0.0f;  // where the mobs march: the map's Core building
-    float core_y = 0.0f;
+    // Fallback target when a mob is somewhere the flow field does not cover. Once world generation
+    // lands this becomes "the nearest settlement"; today it is the map centre.
+    float home_x = 0.0f;
+    float home_y = 0.0f;
 
     // ================================ handlers ====================================================
 
@@ -308,7 +310,7 @@ private:
             const auto st = stats_of(m.kind);
 
             // Heading: follow the flow field downhill if this tile is on it, otherwise fall back
-            // to steering straight at the core (an unreachable pocket, or no field built).
+            // to steering straight at home (an unreachable pocket, or no field built).
             float dx = 0.0f;
             float dy = 0.0f;
             int fx = 0;
@@ -318,8 +320,8 @@ private:
                 dx = static_cast<float>(fx);
                 dy = static_cast<float>(fy);
             } else {
-                dx = core_x - m.x;
-                dy = core_y - m.y;
+                dx = home_x - m.x;
+                dy = home_y - m.y;
             }
             const float len = std::sqrt(dx * dx + dy * dy);
             if (len > 0.001f) {
@@ -356,6 +358,9 @@ private:
                 continue;  // terrain-boxed instead; the jittered heading will differ next tick
             }
 
+            // Facing is derived from the step actually taken, not the step intended — a mob
+            // sliding along a wall should face where it is going.
+            m.facing = facing_of(nx - m.x, ny - m.y);
             m.x = nx;
             m.y = ny;
 
@@ -396,9 +401,6 @@ private:
                 if (b.tx != tx || b.ty != ty || !blocks_movement(b.kind)) continue;
                 b.hp = static_cast<std::int16_t>(b.hp - damage);
                 m.attack_cd = 5;
-                if (b.kind == BuildKind::kCore && status != nullptr) {
-                    status->core_hp.store(std::max<std::int32_t>(0, b.hp), std::memory_order_relaxed);
-                }
                 if (b.hp <= 0) buildings_.erase(buildings_.begin() + static_cast<std::ptrdiff_t>(i));
                 return;
             }

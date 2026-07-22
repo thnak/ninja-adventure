@@ -129,10 +129,6 @@ struct ReportKills {
     std::uint32_t killed = 0;
 };
 
-struct ReportCoreDamage {
-    std::int32_t core_hp = 0;
-};
-
 struct ReportMigration {
     std::uint32_t count = 0;
 };

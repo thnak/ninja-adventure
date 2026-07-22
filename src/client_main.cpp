@@ -16,6 +16,8 @@
 #include <vector>
 
 #include "render/raylib_bridge.hpp"
+#include "ui/audio.hpp"
+#include "ui/screens.hpp"
 #include "world/world.hpp"
 
 using namespace mmo;
@@ -26,13 +28,16 @@ int main(int argc, char** argv) {
     // path gets verified without a display.
     int shot_seconds = 0;
     const char* shot_path = nullptr;
-    int look_camp = -1;  // --camp N: point the camera at spawn camp N instead of the farm
+    int look_camp = -1;            // --camp N: point the camera at spawn camp N instead of the farm
+    const char* shot_screen = nullptr;  // --screen NAME: force a shell screen for the screenshot
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--shot") == 0 && i + 2 < argc) {
             shot_seconds = std::atoi(argv[i + 1]);
             shot_path = argv[i + 2];
         } else if (std::strcmp(argv[i], "--camp") == 0 && i + 1 < argc) {
             look_camp = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--screen") == 0 && i + 1 < argc) {
+            shot_screen = argv[i + 1];  // menu | journal | paused — for verifying the shell
         }
     }
 
@@ -56,6 +61,21 @@ int main(int argc, char** argv) {
     PlayerView player = world.player_view();
     float since_player_sync = 0.0f;
 
+    // The shell owns which screen is up. In `--shot` mode it starts straight in the world so the
+    // screenshot is of the game, not of a menu.
+    ui::Audio audio;
+    audio.start_music();
+
+    ui::ShellState shell;
+    if (shot_path != nullptr) {
+        shell.screen = ui::Screen::kPlaying;
+        if (shot_screen != nullptr) {
+            if (std::strcmp(shot_screen, "menu") == 0) shell.screen = ui::Screen::kMainMenu;
+            else if (std::strcmp(shot_screen, "journal") == 0) shell.screen = ui::Screen::kJournal;
+            else if (std::strcmp(shot_screen, "paused") == 0) shell.screen = ui::Screen::kPaused;
+        }
+    }
+
     // Unattended mode: fast-forward, then seed a farm so the frame actually exercises every sprite
     // (crops at all four growth stages, walls, turrets, the core, mobs mid-siege) instead of showing
     // an empty field. Crops are back-dated by staggered amounts so one row spans seedling to ripe.
@@ -71,36 +91,36 @@ int main(int argc, char** argv) {
                 const auto kind = static_cast<CropKind>(row % 3);
                 // Age spans 0 .. full grow time across the row, so all four stages are on screen.
                 const std::int64_t age = (grow_ms_of(kind) * col) / 7;
-                world.plant(map, static_cast<std::uint16_t>(kCoreTx - 4 + col),
-                            static_cast<std::uint16_t>(kCoreTy + 2 + row), kind, now - age);
+                world.plant(map, static_cast<std::uint16_t>(kHomeTx - 4 + col),
+                            static_cast<std::uint16_t>(kHomeTy + 2 + row), kind, now - age);
             }
         }
         // A bracket around the core rather than a bare line: it exercises horizontal runs, vertical
         // runs and corners, which is exactly what the wall autotiling has to get right.
         for (int dx = -5; dx <= 5; ++dx) {
-            world.build_at(map, static_cast<std::uint16_t>(kCoreTx + dx),
-                           static_cast<std::uint16_t>(kCoreTy - 3), BuildKind::kWall);
+            world.build_at(map, static_cast<std::uint16_t>(kHomeTx + dx),
+                           static_cast<std::uint16_t>(kHomeTy - 3), BuildKind::kWall);
         }
         for (int dy = -2; dy <= 2; ++dy) {
-            world.build_at(map, static_cast<std::uint16_t>(kCoreTx - 5),
-                           static_cast<std::uint16_t>(kCoreTy + dy), BuildKind::kWall);
-            world.build_at(map, static_cast<std::uint16_t>(kCoreTx + 5),
-                           static_cast<std::uint16_t>(kCoreTy + dy), BuildKind::kWall);
+            world.build_at(map, static_cast<std::uint16_t>(kHomeTx - 5),
+                           static_cast<std::uint16_t>(kHomeTy + dy), BuildKind::kWall);
+            world.build_at(map, static_cast<std::uint16_t>(kHomeTx + 5),
+                           static_cast<std::uint16_t>(kHomeTy + dy), BuildKind::kWall);
         }
         for (int dx = -4; dx <= 4; dx += 4) {
-            world.build_at(map, static_cast<std::uint16_t>(kCoreTx + dx),
-                           static_cast<std::uint16_t>(kCoreTy - 1), BuildKind::kTurret);
+            world.build_at(map, static_cast<std::uint16_t>(kHomeTx + dx),
+                           static_cast<std::uint16_t>(kHomeTy - 1), BuildKind::kTurret);
         }
         // Fence the flanks and upgrade one turret, so the demo frame shows every defensive system.
         for (int dy = -2; dy <= 3; ++dy) {
-            world.build_at(map, static_cast<std::uint16_t>(kCoreTx - 7),
-                           static_cast<std::uint16_t>(kCoreTy + dy), BuildKind::kFence);
-            world.build_at(map, static_cast<std::uint16_t>(kCoreTx + 7),
-                           static_cast<std::uint16_t>(kCoreTy + dy), BuildKind::kFence);
+            world.build_at(map, static_cast<std::uint16_t>(kHomeTx - 7),
+                           static_cast<std::uint16_t>(kHomeTy + dy), BuildKind::kFence);
+            world.build_at(map, static_cast<std::uint16_t>(kHomeTx + 7),
+                           static_cast<std::uint16_t>(kHomeTy + dy), BuildKind::kFence);
         }
         for (std::uint8_t lvl = 1; lvl < kMaxLevel; ++lvl) {
-            world.upgrade(map, static_cast<std::uint16_t>(kCoreTx),
-                          static_cast<std::uint16_t>(kCoreTy - 1), BuildKind::kTurret, lvl);
+            world.upgrade(map, static_cast<std::uint16_t>(kHomeTx),
+                          static_cast<std::uint16_t>(kHomeTy - 1), BuildKind::kTurret, lvl);
         }
         for (int i = 0; i < 20; ++i) world.step(kTickMs);  // let the chunks tick and publish
         world.sync_world();
@@ -124,14 +144,21 @@ int main(int argc, char** argv) {
         const float dt = std::min(bridge.frame_time(), 0.25f);
 
         // --- input becomes messages ---------------------------------------------------------------
-        const InputFrame in = bridge.poll_input(player);
+        // The shell gets first refusal. When a menu is open it returns true and the world sees no
+        // input at all — otherwise walking around behind the pause menu would still work.
+        audio.update();
+        const bool shell_took_input = ui::handle_shell_keys(shell);
+        const InputFrame in =
+            shell_took_input ? InputFrame{} : bridge.poll_input(player);
         if (in.quit) break;
 
         if (in.move_x != 0.0f || in.move_y != 0.0f) {
             world.move_player(in.move_x * kPlayerSpeed * dt, in.move_y * kPlayerSpeed * dt);
         }
         if (in.build) {
-            world.build_at(player.map, in.cursor_tx, in.cursor_ty, in.build_kind);
+            if (world.build_at(player.map, in.cursor_tx, in.cursor_ty, in.build_kind)) {
+                audio.play(ui::Sfx::kBuild);
+            }
         }
         if (in.plant) {
             world.plant(player.map, in.cursor_tx, in.cursor_ty, CropKind::kWheat,
@@ -139,9 +166,10 @@ int main(int argc, char** argv) {
         }
         if (in.harvest) {
             world.harvest(player.map, in.cursor_tx, in.cursor_ty);
+            audio.play(ui::Sfx::kHarvest);
         }
         if (in.till) {
-            world.till(player.map, in.cursor_tx, in.cursor_ty);
+            if (world.till(player.map, in.cursor_tx, in.cursor_ty)) audio.play(ui::Sfx::kBuild);
         }
         if (in.upgrade) {
             // The client has to look up what is standing on the tile, because the upgrade price
@@ -161,9 +189,14 @@ int main(int argc, char** argv) {
         }
 
         // --- advance the world ---------------------------------------------------------------------
+        // Note the world advances in EVERY screen except the main menu. Pausing the menu but not
+        // the world is deliberate: the world is shared, and it cannot stop because one player
+        // opened their journal.
+        if (shell.screen == ui::Screen::kMainMenu) accumulator = 0.0f;
         accumulator += dt;
         int steps = 0;
-        while (accumulator >= kStepSec && steps < kMaxStepsPerFrame) {
+        while (shell.screen != ui::Screen::kMainMenu && accumulator >= kStepSec &&
+               steps < kMaxStepsPerFrame) {
             world.step(kTickMs);
             accumulator -= kStepSec;
             ++steps;
@@ -183,7 +216,16 @@ int main(int argc, char** argv) {
         world.status().mobs_alive.store(count_mobs(world.bus()), std::memory_order_relaxed);
 
         bridge.draw(world.bus(), world.status(), player);
+
+        shell.selected_hotbar = static_cast<int>(bridge.selected_build()) - 1;
+        if (shell.selected_hotbar < 0) shell.selected_hotbar = 0;
+        const ui::Action act = ui::draw(shell, world.status(), player);
+        if (shell.debug_overlay) {
+            ui::draw_debug_overlay(world.status(), player, bridge.drawn_chunks(),
+                                   bridge.drawn_mobs());
+        }
         bridge.end_frame();
+        if (act == ui::Action::kQuit) break;
 
         if (shot_path != nullptr && ++frames >= 3) {  // let the swap chain settle
             bridge.screenshot(shot_path);

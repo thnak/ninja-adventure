@@ -53,6 +53,15 @@ public:
 
     [[nodiscard]] float frame_time() const;
 
+    // What the last `draw` actually put on screen. Read by the F3 debug overlay, which lives in the
+    // UI shell rather than here.
+    [[nodiscard]] int drawn_chunks() const;
+    [[nodiscard]] int drawn_mobs() const;
+
+    // The build type the player has selected. Owned here because `poll_input` sets it from the
+    // number keys; the shell mirrors it into the hotbar highlight.
+    [[nodiscard]] BuildKind selected_build() const;
+
     // Spawn-camp tiles for the current map. Static for the world's lifetime (a pure function of the
     // seed), so this is set once at start-up rather than passed every frame.
     void set_camps(const std::vector<std::pair<int, int>>& camps);

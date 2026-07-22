@@ -54,7 +54,20 @@ if(MMO_BUILD_CLIENT)
     GIT_SHALLOW TRUE)
   FetchContent_MakeAvailable(raylib)
 
-  add_executable(mmo_client src/client_main.cpp src/render/raylib_bridge.cpp)
+  # raygui: single-header immediate-mode UI by the raylib author. Header-only, so it is fetched but
+  # not built — one TU in src/ui/ defines RAYGUI_IMPLEMENTATION.
+  FetchContent_Declare(raygui
+    GIT_REPOSITORY https://github.com/raysan5/raygui.git
+    GIT_TAG 4.0
+    GIT_SHALLOW TRUE)
+  FetchContent_MakeAvailable(raygui)
+
+  add_executable(mmo_client
+    src/client_main.cpp
+    src/render/raylib_bridge.cpp
+    src/ui/screens.cpp
+    src/ui/audio.cpp)
+  target_include_directories(mmo_client PRIVATE "${raygui_SOURCE_DIR}/src")
   target_link_libraries(mmo_client PRIVATE mmo_world raylib Threads::Threads)
 endif()
 

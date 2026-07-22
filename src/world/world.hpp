@@ -72,7 +72,7 @@ public:
         // why handing every chunk a pointer to it does not reintroduce shared mutable state.
         for (int m = 0; m < kMapCount; ++m) {
             flow_[static_cast<std::size_t>(m)].build(kWorldSeed, static_cast<std::uint16_t>(m),
-                                                     kCoreTx, kCoreTy);
+                                                     kHomeTx, kHomeTy);
         }
 
         build_player();
@@ -204,8 +204,8 @@ private:
         player_ = std::make_unique<PlayerActor>();
         player_->id = kPlayerKey;
         player_->map = static_cast<std::uint16_t>(MapId::kHomeValley);
-        player_->set_position(static_cast<float>(kCoreTx) + 2.5f,
-                              static_cast<float>(kCoreTy) + 2.5f);
+        player_->set_position(static_cast<float>(kHomeTx) + 2.5f,
+                              static_cast<float>(kHomeTy) + 2.5f);
         player_->set_start_items(/*wood*/ 200, /*stone*/ 120, /*seed*/ 40);
         player_act_ = std::make_unique<quark::Activation>(player_.get(),
                                                           PlayerActor::dispatch_table(),
@@ -231,17 +231,17 @@ private:
                     ch->status = &status_;
                     ch->player = player_ref_;
                     ch->flow = &flow_[static_cast<std::size_t>(map)];
-                    ch->core_x = static_cast<float>(kCoreTx) + 0.5f;
-                    ch->core_y = static_cast<float>(kCoreTy) + 0.5f;
+                    ch->home_x = static_cast<float>(kHomeTx) + 0.5f;
+                    ch->home_y = static_cast<float>(kHomeTy) + 0.5f;
                     ch->generate_terrain(kWorldSeed);
 
-                    // The tilled apron is already part of the terrain function; only the Core
-                    // building has to be placed, and only in the chunk that owns its tile.
+                    // The tilled apron is already part of the terrain function; only the hearth
+                    // has to be placed, and only in the chunk that owns its tile.
                     if (map == static_cast<int>(MapId::kHomeValley) &&
-                        ch->owns(static_cast<std::uint16_t>(kCoreTx),
-                                 static_cast<std::uint16_t>(kCoreTy))) {
-                        ch->add_building(static_cast<std::uint16_t>(kCoreTx),
-                                         static_cast<std::uint16_t>(kCoreTy), BuildKind::kCore);
+                        ch->owns(static_cast<std::uint16_t>(kHomeTx),
+                                 static_cast<std::uint16_t>(kHomeTy))) {
+                        ch->add_building(static_cast<std::uint16_t>(kHomeTx),
+                                         static_cast<std::uint16_t>(kHomeTy), BuildKind::kHearth);
                     }
 
                     auto act = std::make_unique<quark::Activation>(

@@ -24,6 +24,20 @@ means *free for personal use*, which is not the same thing.
 The last seven are for the full game (see [GAME.md](../GAME.md)) and are **not yet packed into
 `atlas.png`** — UI needs its own atlas with different cell sizes, and audio is loaded as files.
 
+## Audio
+
+`assets/audio/` holds the four sound effects and one music track the game actually uses, copied out
+of the Ninja Adventure pack by hand. They are committed (2.1 MB) because `_src/` is not, and the
+game has to run from a clean checkout.
+
+| File | Source |
+|---|---|
+| `ui_click.wav` | `Audio/Sounds/Menu/Accept.wav` |
+| `build.wav` | `Audio/Sounds/Menu/Accept2.wav` |
+| `harvest.wav` | `Audio/Sounds/Bonus/Bonus.wav` |
+| `hit.wav` | `Audio/Sounds/Hit & Impact/Hit1.wav` |
+| `theme_day.ogg` | `Audio/Musics/11 - Clearing.ogg` |
+
 ## What is committed
 
 - **`atlas.png`** — the ~20 tiles this game actually uses, packed into one 144×54 texture.

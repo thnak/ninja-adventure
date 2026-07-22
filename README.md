@@ -11,8 +11,10 @@ a gate when you feel like an adventure. Built on the [QuarkCpp](../QuarkCpp) act
 | [ARCHITECTURE.md](ARCHITECTURE.md) | technical plan (§0 = design errors being corrected) |
 | [ROADMAP.md](ROADMAP.md) | phased plan, P0 → P8 |
 
-> **The code in this repo is still the demo-era prototype** — it predates the design above. See
-> [GAMEPLAY.md](GAMEPLAY.md) for what it currently does and which parts are scheduled for removal.
+> **P0 is done** — MIT licence, the demo-era "core you must defend" is gone, characters and monsters
+> are animated Ninja Adventure sprites, and the controls that used to be printed over the world now
+> live in a journal behind a real menu. See [ROADMAP.md](ROADMAP.md) for what P1 brings, and
+> [GAMEPLAY.md](GAMEPLAY.md) for what the current build actually does.
 
 ![farm](docs/shot_farm.png)
 
@@ -57,11 +59,15 @@ tools/fetch_assets.sh     # downloads 3 Kenney packs into assets/_src/, rebuilds
 | | |
 |---|---|
 | `WASD` / arrows | move |
-| Left mouse | build (`1` wall · `2` turret · `3` plot · `4` fence) |
+| Left mouse | build the selected structure |
 | Right mouse | plant wheat (tilled soil only) |
 | `E` | harvest a ripe crop |
 | `T` | till a tile — expand the farm past the starting apron |
 | `U` | upgrade the building under the cursor (levels 1–3) |
+| `1`–`5` | hotbar |
+| `J` | journal (controls, tips) |
+| `F3` | debug overlay |
+| `Esc` | pause / back |
 | Wheel | zoom |
 
 ## What maps to what

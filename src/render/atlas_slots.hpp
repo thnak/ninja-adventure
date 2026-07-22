@@ -31,7 +31,7 @@ enum class Slot : std::uint8_t {
     kCropWheatRipe,
     kCropCarrotRipe,
     kCropPumpkinRipe,
-    kBuildCore,
+    kBuildHearth,
     kBuildWall,
     kBuildWallRun,
     kBuildTurret,
@@ -39,10 +39,6 @@ enum class Slot : std::uint8_t {
     kBuildFence,
     kBuildFencePost,
     kSpawnCamp,
-    kMobSlime,
-    kMobSpider,
-    kMobGhost,
-    kPlayer,
     kCount,
 };
 
@@ -61,7 +57,7 @@ inline constexpr AtlasRect kAtlasRects[static_cast<int>(Slot::kCount)] = {
     {55, 19},  // kCropWheatRipe
     {73, 19},  // kCropCarrotRipe
     {91, 19},  // kCropPumpkinRipe
-    {109, 19},  // kBuildCore
+    {109, 19},  // kBuildHearth
     {127, 19},  // kBuildWall
     {1, 37},  // kBuildWallRun
     {19, 37},  // kBuildTurret
@@ -69,14 +65,55 @@ inline constexpr AtlasRect kAtlasRects[static_cast<int>(Slot::kCount)] = {
     {55, 37},  // kBuildFence
     {73, 37},  // kBuildFencePost
     {91, 37},  // kSpawnCamp
-    {109, 37},  // kMobSlime
-    {127, 37},  // kMobSpider
-    {1, 55},  // kMobGhost
-    {19, 55},  // kPlayer
 };
 
 [[nodiscard]] inline constexpr AtlasRect rect_of(Slot s) noexcept {
     return kAtlasRects[static_cast<int>(s)];
+}
+
+// --- Animation sheets ----------------------------------------------------------------
+// Ninja Adventure walk sheets are COLUMN = facing, ROW = frame. Verified by rendering the
+// grid with labels; do not reorder these without re-checking the art.
+enum : int { kDirDown = 0, kDirUp = 1, kDirLeft = 2, kDirRight = 3, kDirCount = 4 };
+
+struct AtlasAnim {
+    std::int16_t x;
+    std::int16_t y;
+    std::uint8_t cols;  // facings
+    std::uint8_t rows;  // frames
+};
+
+enum class Anim : std::uint8_t {
+    kPlayer,
+    kMobSlime,
+    kMobSpider,
+    kMobSpirit,
+    kChicken,
+    kCow,
+    kCount,
+};
+
+inline constexpr AtlasAnim kAtlasAnims[static_cast<int>(Anim::kCount)] = {
+    {1, 55, 4, 4},  // kPlayer
+    {1, 127, 4, 4},  // kMobSlime
+    {1, 199, 4, 4},  // kMobSpider
+    {1, 271, 4, 4},  // kMobSpirit
+    {1, 343, 2, 1},  // kChicken
+    {1, 361, 2, 1},  // kCow
+};
+
+[[nodiscard]] inline constexpr const AtlasAnim& anim_of(Anim a) noexcept {
+    return kAtlasAnims[static_cast<int>(a)];
+}
+
+// `dir` and `frame` are wrapped, so a caller may pass a free-running frame counter and a
+// facing that this particular sheet does not have (animals only face two ways).
+[[nodiscard]] inline constexpr AtlasRect anim_frame(Anim a, int dir, int frame) noexcept {
+    const AtlasAnim& s = anim_of(a);
+    const int c = (dir % s.cols + s.cols) % s.cols;
+    const int r = (frame % s.rows + s.rows) % s.rows;
+    return AtlasRect{static_cast<std::int16_t>(s.x + c * (kAtlasTile + 2)),
+                     static_cast<std::int16_t>(s.y + r * (kAtlasTile + 2))};
 }
 
 }  // namespace mmo

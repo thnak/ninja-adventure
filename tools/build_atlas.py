@@ -63,7 +63,7 @@ MANIFEST = [
     ("CropCarrotRipe",   "RL", 43, 23),
     ("CropPumpkinRipe",  "RL", 41, 23),
     # --- buildings ---
-    ("BuildCore",        "TT", 10,  7),
+    ("BuildHearth",      "RL", 54,  6),   # campfire — the player's home fire
     # Tiny Town's castle wall is a 3x3 nine-slice. An earlier version used its TOP-LEFT CORNER for
     # every wall tile, so a horizontal run repeated a left edge over and over. A one-tile-thick,
     # free-form player wall cannot use a nine-slice at all, so instead:
@@ -80,14 +80,27 @@ MANIFEST = [
     ("BuildFencePost",   "TT",  9,  3),
     # Where a wave comes out of. One tile, self-contained, unmistakably "things arrive here".
     ("SpawnCamp",        "RL", 50,  9),
-    # --- creatures ---
-    ("MobSlime",         "TD",  0,  9),
-    ("MobSpider",        "TD",  2, 10),
-    ("MobGhost",         "TD",  1, 10),
-    ("Player",           "TD",  0,  8),
+    # NOTE: creatures and the player are NOT here — they are animation sheets, see ANIM_MANIFEST.
 ]
 
 COLS = 8  # atlas width in cells; keeps the texture small and squarish
+
+# --- Animation sheets --------------------------------------------------------
+# Ninja Adventure ships each actor as its own file rather than as tiles in a shared sheet, and its
+# walk sheets are a 4x4 grid: COLUMN = facing (down, up, left, right), ROW = animation frame.
+# (Verified by rendering the grid with labels, not assumed.) These are packed as blocks below the
+# single-tile grid, and the generated header exposes `anim_frame(slot, dir, frame)`.
+NINJA = SRC / "ninja/Actor"
+
+ANIM_MANIFEST = [
+    # (name, path relative to NINJA, cols, rows)
+    ("Player",     "Character/NinjaGreen/SeparateAnim/Walk.png", 4, 4),
+    ("MobSlime",   "Monster/Slime/Slime.png",                    4, 4),
+    ("MobSpider",  "Monster/SpiderRed/SpriteSheet.png",          4, 4),
+    ("MobSpirit",  "Monster/Spirit/SpriteSheet.png",             4, 4),
+    ("Chicken",    "Animal/Chicken/SpriteSheetWhite.png",        2, 1),
+    ("Cow",        "Animal/Cow/SpriteSheetWhite.png",            2, 1),
+]
 
 
 def extrude(cell: Image.Image, tile: Image.Image) -> None:
@@ -150,6 +163,38 @@ def main() -> int:
         atlas.paste(cell, (cx, cy))
         entries.append((name, cx + PAD, cy + PAD))
 
+    # --- animation blocks, stacked below the tile grid --------------------------------------
+    anims = []
+    anim_y = rows * cell_px
+    max_w = COLS * cell_px
+    for name, rel, acols, arows in ANIM_MANIFEST:
+        path = NINJA / rel
+        if not path.exists():
+            print(f"missing animation sheet: {path}", file=sys.stderr)
+            return 1
+        sheet = Image.open(path).convert("RGBA")
+        need_w, need_h = acols * TILE, arows * TILE
+        if sheet.width < need_w or sheet.height < need_h:
+            print(f"{name}: {path.name} is {sheet.width}x{sheet.height}, "
+                  f"expected at least {need_w}x{need_h}", file=sys.stderr)
+            return 1
+        block_w, block_h = acols * cell_px, arows * cell_px
+        # Grow the canvas to fit this block.
+        new_w, new_h = max(max_w, block_w), anim_y + block_h
+        if new_w > atlas.width or new_h > atlas.height:
+            grown = Image.new("RGBA", (max(new_w, atlas.width), max(new_h, atlas.height)), (0, 0, 0, 0))
+            grown.paste(atlas, (0, 0))
+            atlas = grown
+        max_w = max(max_w, block_w)
+        for r in range(arows):
+            for c in range(acols):
+                frame = sheet.crop((c * TILE, r * TILE, c * TILE + TILE, r * TILE + TILE))
+                cellimg = Image.new("RGBA", (cell_px, cell_px), (0, 0, 0, 0))
+                extrude(cellimg, frame)
+                atlas.paste(cellimg, (c * cell_px, anim_y + r * cell_px))
+        anims.append((name, PAD, anim_y + PAD, acols, arows))
+        anim_y += block_h
+
     out_png = ROOT / "assets" / "atlas.png"
     atlas.save(out_png)
 
@@ -190,12 +235,51 @@ def main() -> int:
         "    return kAtlasRects[static_cast<int>(s)];",
         "}",
         "",
+        "// --- Animation sheets ----------------------------------------------------------------",
+        "// Ninja Adventure walk sheets are COLUMN = facing, ROW = frame. Verified by rendering the",
+        "// grid with labels; do not reorder these without re-checking the art.",
+        "enum : int { kDirDown = 0, kDirUp = 1, kDirLeft = 2, kDirRight = 3, kDirCount = 4 };",
+        "",
+        "struct AtlasAnim {",
+        "    std::int16_t x;",
+        "    std::int16_t y;",
+        "    std::uint8_t cols;  // facings",
+        "    std::uint8_t rows;  // frames",
+        "};",
+        "",
+        "enum class Anim : std::uint8_t {",
+    ]
+    lines += [f"    k{name}," for name, _, _, _, _ in anims]
+    lines += [
+        "    kCount,",
+        "};",
+        "",
+        "inline constexpr AtlasAnim kAtlasAnims[static_cast<int>(Anim::kCount)] = {",
+    ]
+    lines += [f"    {{{x}, {y}, {c}, {r}}},  // k{name}" for name, x, y, c, r in anims]
+    lines += [
+        "};",
+        "",
+        "[[nodiscard]] inline constexpr const AtlasAnim& anim_of(Anim a) noexcept {",
+        "    return kAtlasAnims[static_cast<int>(a)];",
+        "}",
+        "",
+        "// `dir` and `frame` are wrapped, so a caller may pass a free-running frame counter and a",
+        "// facing that this particular sheet does not have (animals only face two ways).",
+        "[[nodiscard]] inline constexpr AtlasRect anim_frame(Anim a, int dir, int frame) noexcept {",
+        "    const AtlasAnim& s = anim_of(a);",
+        "    const int c = (dir % s.cols + s.cols) % s.cols;",
+        "    const int r = (frame % s.rows + s.rows) % s.rows;",
+        "    return AtlasRect{static_cast<std::int16_t>(s.x + c * (kAtlasTile + 2)),",
+        "                     static_cast<std::int16_t>(s.y + r * (kAtlasTile + 2))};",
+        "}",
+        "",
         "}  // namespace mmo",
         "",
     ]
     header.write_text("\n".join(lines))
 
-    print(f"{out_png}  {atlas.width}x{atlas.height}  ({len(entries)} slots)")
+    print(f"{out_png}  {atlas.width}x{atlas.height}  ({len(entries)} tiles, {len(anims)} anims)")
     print(f"{header}")
     return 0
 

@@ -30,13 +30,12 @@ struct Check {
 };
 
 void print_row(std::int64_t ms, const WorldStatus& st, std::uint32_t mobs) {
-    std::printf("  t=%6.1fs  %-5s  wave=%-2u  mobs=%-5u  killed=%-5u  migrations=%-6u  core_hp=%d\n",
+    std::printf("  t=%6.1fs  %-5s  wave=%-2u  mobs=%-5u  killed=%-5u  migrations=%-6u\n",
                 static_cast<double>(ms) / 1000.0,
                 st.night.load(std::memory_order_relaxed) ? "NIGHT" : "day",
                 st.wave.load(std::memory_order_relaxed), mobs,
                 st.mobs_killed.load(std::memory_order_relaxed),
-                st.migrations.load(std::memory_order_relaxed),
-                st.core_hp.load(std::memory_order_relaxed));
+                st.migrations.load(std::memory_order_relaxed));
 }
 
 }  // namespace
@@ -73,8 +72,8 @@ int main(int argc, char** argv) {
     int planted = 0;
     for (int dy = 1; dy <= 6; ++dy) {
         for (int dx = 1; dx <= 6; ++dx) {
-            world.plant(home, static_cast<std::uint16_t>(kCoreTx + dx),
-                        static_cast<std::uint16_t>(kCoreTy + dy), CropKind::kWheat, 0);
+            world.plant(home, static_cast<std::uint16_t>(kHomeTx + dx),
+                        static_cast<std::uint16_t>(kHomeTy + dy), CropKind::kWheat, 0);
             ++planted;
         }
     }
@@ -83,15 +82,15 @@ int main(int argc, char** argv) {
     const PlayerView before_build = world.player_view();
     int walls = 0;
     for (int dx = -8; dx <= 8; ++dx) {
-        if (world.build_at(home, static_cast<std::uint16_t>(kCoreTx + dx),
-                           static_cast<std::uint16_t>(kCoreTy - 8), BuildKind::kWall)) {
+        if (world.build_at(home, static_cast<std::uint16_t>(kHomeTx + dx),
+                           static_cast<std::uint16_t>(kHomeTy - 8), BuildKind::kWall)) {
             ++walls;
         }
     }
     int turrets = 0;
     for (int dx = -6; dx <= 6; dx += 4) {
-        if (world.build_at(home, static_cast<std::uint16_t>(kCoreTx + dx),
-                           static_cast<std::uint16_t>(kCoreTy - 6), BuildKind::kTurret)) {
+        if (world.build_at(home, static_cast<std::uint16_t>(kHomeTx + dx),
+                           static_cast<std::uint16_t>(kHomeTy - 6), BuildKind::kTurret)) {
             ++turrets;
         }
     }
@@ -100,8 +99,8 @@ int main(int argc, char** argv) {
     int fences = 0;
     for (int dy = -7; dy <= 7; ++dy) {
         for (int dx : {-8, 8}) {
-            if (world.build_at(home, static_cast<std::uint16_t>(kCoreTx + dx),
-                               static_cast<std::uint16_t>(kCoreTy + dy), BuildKind::kFence)) {
+            if (world.build_at(home, static_cast<std::uint16_t>(kHomeTx + dx),
+                               static_cast<std::uint16_t>(kHomeTy + dy), BuildKind::kFence)) {
                 ++fences;
             }
         }
@@ -126,9 +125,9 @@ int main(int argc, char** argv) {
     // The apron is baked into the terrain function; anything past it must be tilled first, which is
     // the chunk's own overlay. Planting on untilled grass has to fail.
     const ChunkCoord core_chunk_c =
-        chunk_of(home, static_cast<float>(kCoreTx), static_cast<float>(kCoreTy));
-    const std::uint16_t out_tx = static_cast<std::uint16_t>(kCoreTx + kFarmRadius + 2);
-    const std::uint16_t out_ty = static_cast<std::uint16_t>(kCoreTy + kFarmRadius + 2);
+        chunk_of(home, static_cast<float>(kHomeTx), static_cast<float>(kHomeTy));
+    const std::uint16_t out_tx = static_cast<std::uint16_t>(kHomeTx + kFarmRadius + 2);
+    const std::uint16_t out_ty = static_cast<std::uint16_t>(kHomeTy + kFarmRadius + 2);
 
     world.plant(home, out_tx, out_ty, CropKind::kCarrot, 0);
     world.sync_world();
@@ -156,18 +155,18 @@ int main(int argc, char** argv) {
     chk.expect(after_till.crops > crops_before_till, "a crop could be planted on reclaimed ground");
 
     // --- Upgrades --------------------------------------------------------------------------------
-    // Measure the chunk that actually OWNS the turrets. They sit at kCoreTx-6 = tile 122, which is
+    // Measure the chunk that actually OWNS the turrets. They sit at kHomeTx-6 = tile 122, which is
     // chunk 3, not the core's chunk 4 — a base a dozen tiles across already straddles a chunk
     // border, which is exactly the property the cluster demo depends on.
-    const ChunkCoord turret_chunk = chunk_of(home, static_cast<float>(kCoreTx - 6),
-                                             static_cast<float>(kCoreTy - 6));
+    const ChunkCoord turret_chunk = chunk_of(home, static_cast<float>(kHomeTx - 6),
+                                             static_cast<float>(kHomeTy - 6));
     const ChunkStats pre_up = world.chunk_stats(turret_chunk);
     int upgrades = 0;
     for (int dx = -6; dx <= 6; dx += 4) {
         // Turret at level 1 -> 2 -> 3.
         for (std::uint8_t lvl = 1; lvl < kMaxLevel; ++lvl) {
-            if (world.upgrade(home, static_cast<std::uint16_t>(kCoreTx + dx),
-                              static_cast<std::uint16_t>(kCoreTy - 6), BuildKind::kTurret, lvl)) {
+            if (world.upgrade(home, static_cast<std::uint16_t>(kHomeTx + dx),
+                              static_cast<std::uint16_t>(kHomeTy - 6), BuildKind::kTurret, lvl)) {
                 ++upgrades;
             }
         }
@@ -187,8 +186,8 @@ int main(int argc, char** argv) {
     // which read as "upgrades are broken" when the feature was fine.
     bool minted = true;
     for (int i = 0; i < 500; ++i) {
-        if (!world.build_at(home, static_cast<std::uint16_t>(kCoreTx - 10),
-                            static_cast<std::uint16_t>(kCoreTy + 10 + i % 5), BuildKind::kTurret)) {
+        if (!world.build_at(home, static_cast<std::uint16_t>(kHomeTx - 10),
+                            static_cast<std::uint16_t>(kHomeTy + 10 + i % 5), BuildKind::kTurret)) {
             minted = false;
             break;
         }
@@ -240,10 +239,11 @@ int main(int argc, char** argv) {
     chk.expect(saw_migration, "mobs migrated across chunk (actor) boundaries");
     chk.expect(core_stats.tick >= static_cast<std::uint64_t>(ticks),
                "every chunk received every tick (no dropped fan-out)");
-    // Buildings are solid now, so the perimeter is load-bearing: mobs have to chew through it
-    // instead of walking past. Before blocking existed the core was destroyed by t=115 s.
-    chk.expect(world.status().core_hp.load(std::memory_order_relaxed) > 0,
-               "the perimeter kept the core alive through wave 1");
+    // Buildings are solid, so the perimeter is load-bearing: mobs have to chew through it instead
+    // of walking past. There is deliberately no global "core HP" to assert on any more (GAME.md §0
+    // — no single loss condition), so the property checked is the one that actually matters: the
+    // player's buildings are still standing.
+    chk.expect(core_stats.buildings > 0, "the perimeter held — buildings survived wave 1");
 
     // Crops planted at t=0 with a 20 s growth time must be ripe well before the run ends.
     if (ticks >= 300) {

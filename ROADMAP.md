@@ -29,22 +29,22 @@ không phải "dọn sau" — mỗi tính năng xây đè lên chúng làm việ
 
 ---
 
-## P0 — Dọn nền và vỏ giao diện
+## P0 — Dọn nền và vỏ giao diện — **XONG**
 
 Chuyển từ "demo" sang "game", và dựng cái vỏ mà mọi hệ thống sau sẽ cắm vào.
 
-- Đổi tên dự án, gỡ các tạo tác demo: chỉ số CHUNK MIGRATIONS ra khỏi HUD → màn hình debug `F3`.
-- **Gỡ thiết kế sai** ([ARCHITECTURE.md §0](ARCHITECTURE.md)): bỏ `BuildKind::kCore`, `core_hp`, và
-  điều kiện thua "core sập". Nhà bạn là thứ bạn xây, không có một điểm duy nhất để bảo vệ.
-- **Đóng gói Ninja Adventure**: atlas nhân vật 4 hướng (Walk 64×64 = 4 hướng × 4 frame), quái, vật
-  nuôi. Thay sprite tạm bằng Tiny Dungeon.
-- Tích hợp **raygui**; dựng khung menu: Menu chính, Tuỳ chọn, Nhật ký/Hướng dẫn, quản lý phím tắt.
-- HUD trong game rút gọn: máu/mana/thể lực, thanh kỹ năng, đồng hồ ngày/mùa.
-- Bộ atlas UI thứ hai từ Kenney UI Pack RPG + Fantasy UI Borders + Game Icons.
-- Âm thanh: nối `raudio`, tiếng bước chân/đánh/UI.
+| | Trạng thái |
+|---|---|
+| Giấy phép MIT (code) + ghi rõ art là CC0 riêng | ✅ |
+| Gỡ `BuildKind::kCore`, `core_hp`, điều kiện thua | ✅ thay bằng `kHearth` — lò sưởi, mất thì xây lại |
+| Nhân vật + quái Ninja Adventure, 4 hướng × 4 frame | ✅ `facing` là state của sim, không phải suy đoán ở renderer |
+| raygui + menu (Chính / Tạm dừng / Nhật ký / Tuỳ chọn) | ✅ theme tối |
+| HUD rút gọn: máu, hotbar, đồng hồ ngày | ✅ hướng dẫn chuyển vào Nhật ký |
+| Chỉ số kỹ thuật → overlay `F3` | ✅ |
+| Âm thanh (`raudio`) | ✅ tự im lặng khi không có sound device (**chưa nghe thử được trên máy build headless**) |
 
-**Xong khi:** game hiện tại chạy y nguyên, nhưng vào qua menu chính, hướng dẫn nằm trong Nhật ký
-thay vì in đè lên màn hình, và có thể chỉnh phím.
+Còn nợ lại sang sau: gán lại phím (màn hình Tuỳ chọn mới chỉ là khung), và atlas UI riêng từ Kenney
+UI Pack — raygui vẽ được menu bằng hình học nên chưa cần, để khi làm túi đồ/chế tạo (P4).
 
 ---
 

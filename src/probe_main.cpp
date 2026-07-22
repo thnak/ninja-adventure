@@ -103,7 +103,7 @@ void print_map(const std::vector<Terrain>& t) {
 void report_reachability(const std::vector<Terrain>& t) {
     std::vector<char> seen(t.size(), 0);
     std::vector<int> stack;
-    const int start = kCoreTy * kMapTiles + kCoreTx;
+    const int start = kHomeTy * kMapTiles + kHomeTx;
     stack.push_back(start);
     seen[static_cast<std::size_t>(start)] = 1;
     int reached = 0;
@@ -193,7 +193,7 @@ int main() {
     if (v && !v->mobs.empty()) {
         const Mob m0 = v->mobs[0];
         std::printf("traced mob %u start (%.2f,%.2f)  target core (%d,%d)\n", m0.id,
-                    static_cast<double>(m0.x), static_cast<double>(m0.y), kCoreTx, kCoreTy);
+                    static_cast<double>(m0.x), static_cast<double>(m0.y), kHomeTx, kHomeTy);
         float last_x = m0.x;
         float last_y = m0.y;
         float travelled = 0.0f;
@@ -214,8 +214,8 @@ int main() {
                     travelled += d;
                     last_x = m.x;
                     last_y = m.y;
-                    const float to_core = std::sqrt((m.x - kCoreTx) * (m.x - kCoreTx) +
-                                                    (m.y - kCoreTy) * (m.y - kCoreTy));
+                    const float to_core = std::sqrt((m.x - kHomeTx) * (m.x - kHomeTx) +
+                                                    (m.y - kHomeTy) * (m.y - kHomeTy));
                     std::printf("  +%3d ticks: pos=(%6.2f,%6.2f)  moved %5.2f  dist to core %6.2f\n",
                                 step * 25, static_cast<double>(m.x), static_cast<double>(m.y),
                                 static_cast<double>(d), static_cast<double>(to_core));

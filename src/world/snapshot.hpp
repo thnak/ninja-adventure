@@ -30,6 +30,8 @@ struct PlayerView {
     float x = 0.0f;
     float y = 0.0f;
     std::int16_t hp = 0;
+    Facing facing = Facing::kDown;
+    std::uint32_t steps = 0;  // monotonic move count — the renderer's animation clock
     std::int32_t items[kItemKinds] = {};
 };
 
@@ -87,8 +89,11 @@ struct WorldStatus {
     std::atomic<std::uint32_t> mobs_alive{0};
     std::atomic<std::uint32_t> mobs_killed{0};
     std::atomic<std::uint32_t> migrations{0};  // cross-chunk (and, once distributed, cross-node)
-    std::atomic<std::int32_t> core_hp{max_hp_of(BuildKind::kCore)};
 };
+
+// NOTE: there is deliberately no "core HP" here any more. A single global health bar implies a
+// single global loss condition, and this game has none — see GAME.md §0. Buildings carry their own
+// HP in `Building::hp`; that is the only health the world tracks.
 
 // The seam the render backend implements. `sim_main` links none of this; `client_main` links one
 // implementation. Adding a Godot/GDExtension backend later means another implementation here and
