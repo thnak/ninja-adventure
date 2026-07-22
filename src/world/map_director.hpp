@@ -87,7 +87,7 @@ private:
         const std::uint16_t per_camp =
             static_cast<std::uint16_t>(std::min<std::uint32_t>(14u + 8u * (wave_ - 1u), 120u));
 
-        const auto home = static_cast<std::uint16_t>(MapId::kHomeValley);
+        const auto home = kOverworld;
         for (int i = 0; i < kSpawnCamps; ++i) {
             int tx = 0;
             int ty = 0;

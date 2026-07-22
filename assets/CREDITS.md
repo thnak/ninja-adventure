@@ -24,6 +24,34 @@ means *free for personal use*, which is not the same thing.
 The last seven are for the full game (see [GAME.md](../GAME.md)) and are **not yet packed into
 `atlas.png`** — UI needs its own atlas with different cell sizes, and audio is loaded as files.
 
+## Style consistency — a known issue being fixed in P1
+
+As of the P0 commit the game mixed two art styles: **characters and monsters were Ninja Adventure,
+but terrain, buildings and crops were still Kenney.** It shows — the world reads as one game and the
+things walking around in it as another.
+
+This is not a licensing problem (both are CC0) but it is a quality one, and it is being fixed in P1
+rather than left, because P1 rewrites the terrain system anyway (radial biome rings) and the tileset
+has to be touched regardless. Ninja Adventure ships a complete 16x16 tileset family that covers
+everything Kenney was doing here:
+
+| Need | Ninja Adventure tileset |
+|---|---|
+| ground, grass, dirt, paths | `TilesetFloor.png` (22x26 tiles) |
+| trees, bushes, flora | `TilesetNature.png` (24x21) |
+| water, shore | `TilesetWater.png` (28x17) |
+| desert ring | `TilesetDesert.png` (20x12) |
+| farm plots and crops | `TilesetField.png` (5x15) |
+| village buildings, walls | `TilesetHouse.png` (33x23) |
+| towers / turrets | `TilesetTowers.png` (24x6) |
+| cliffs, elevation | `TilesetRelief.png` (20x12) |
+| dungeon interiors | `TilesetDungeon.png` (12x4) |
+| monster camps | `tileset_camp.png` (23x9) |
+| ruins | `TilesetVillageAbandoned.png` (20x12) |
+
+The Kenney packs stay in `fetch_assets.sh` for now — some of them (Game Icons, Particle Pack, the
+UI packs) cover things Ninja Adventure does not, and those are still wanted.
+
 ## Audio
 
 `assets/audio/` holds the four sound effects and one music track the game actually uses, copied out

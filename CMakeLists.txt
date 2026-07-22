@@ -69,6 +69,11 @@ if(MMO_BUILD_CLIENT)
     src/ui/audio.cpp)
   target_include_directories(mmo_client PRIVATE "${raygui_SOURCE_DIR}/src")
   target_link_libraries(mmo_client PRIVATE mmo_world raylib Threads::Threads)
+
+  # World map exporter. Needs raylib only for ExportImage — it opens no window and touches no actor,
+  # because terrain is a pure function. See src/worldmap_main.cpp.
+  add_executable(mmo_worldmap src/worldmap_main.cpp)
+  target_link_libraries(mmo_worldmap PRIVATE mmo_world raylib Threads::Threads)
 endif()
 
 # ---- Diagnostic probe ------------------------------------------------------

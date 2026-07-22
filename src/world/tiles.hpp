@@ -11,6 +11,7 @@
 // whole class of "which space is this in?" bug that a client/server split usually invites.
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -23,14 +24,16 @@ namespace mmo {
 // 32x32 keeps a chunk's snapshot comfortably under a page while still giving 64 actors per map.
 inline constexpr int kTilePx = 32;      // renderer-only: pixels per tile
 inline constexpr int kChunkTiles = 32;  // tiles per chunk edge
-inline constexpr int kMapChunks = 8;    // chunks per map edge
-inline constexpr int kMapTiles = kChunkTiles * kMapChunks;  // 256 tiles = 8192 px per map edge
-inline constexpr int kChunksPerMap = kMapChunks * kMapChunks;
+inline constexpr int kMapChunks = 32;   // chunks per map edge
+inline constexpr int kMapTiles = kChunkTiles * kMapChunks;  // 1024 tiles per overworld edge
+inline constexpr int kChunksPerMap = kMapChunks * kMapChunks;  // 1024 chunk actors
 
-inline constexpr int kMapCount = 3;
+// ONE seamless overworld. Instanced realms behind gates get map ids allocated at runtime (ARCH §4);
+// they are not a fixed enum any more, which is why `kMapCount` is 1 rather than 3.
+inline constexpr int kMapCount = 1;
 inline constexpr int kChunkCount = kMapCount * kChunksPerMap;
 
-enum class MapId : std::uint16_t { kHomeValley = 0, kDarkForest = 1, kCrystalCaves = 2 };
+inline constexpr std::uint16_t kOverworld = 0;
 
 // Where a new player is dropped: the centre of the map, which is also the easiest ring. The tilled
 // apron there is part of the terrain *function* (below), not an edit applied afterwards — see
@@ -48,11 +51,52 @@ enum class Terrain : std::uint8_t {
     kStone = 3,
     kSand = 4,
     kTree = 5,  // impassable, harvestable for wood
+    kSnow = 6,   // walkable; crops freeze without a hearth nearby
+    kMarsh = 7,  // walkable but slow; no foundations without stilts
+    kAsh = 8,    // walkable, barren — nothing grows here at all
+    kCount = 9,
 };
 
 [[nodiscard]] inline constexpr bool is_walkable(Terrain t) noexcept {
     return t != Terrain::kWater && t != Terrain::kTree;
 }
+
+// Can a crop be planted here once tilled? Ash never; everything else walkable can.
+[[nodiscard]] inline constexpr bool is_tillable(Terrain t) noexcept {
+    return is_walkable(t) && t != Terrain::kAsh && t != Terrain::kStone;
+}
+
+// --- Rings: difficulty radiates out from the centre (Valheim-style) --------------------------------
+// One rule the player never has to be told: further from the middle is harder. It also removes the
+// hardest world-generation constraint for free — stronghold density is a function of radius, so a
+// stronghold can never smother a central village. See GAME.md §4.
+enum class Ring : std::uint8_t {
+    kMeadow = 0,    // the chill ring. Deliberately huge: a player who never leaves has a whole home
+    kForest = 1,
+    kWetland = 2,   // swamp on one side of the map, desert on the other
+    kSnow = 3,
+    kWasteland = 4,
+    kCount = 5,
+};
+
+inline constexpr int kRingCount = static_cast<int>(Ring::kCount);
+
+// Outer edge of each ring, as a fraction of the map's half-width, measured in CHEBYSHEV distance
+// (square rings, not circles).
+//
+// Two things were wrong with the obvious version and the world-map exporter showed both at a glance:
+//
+//   * **Euclidean rings waste the corners.** A circle inscribed in the map leaves four corners that
+//     are all the outermost, harshest ring. The first render was an island of content in a sea of
+//     ash. Square rings use the whole map.
+//   * **Equal radius steps are nowhere near equal areas.** Area grows as r-squared, so evenly spaced
+//     edges gave Meadow 4.6% and Wasteland 44.6% — precisely backwards, since Meadow is the ring a
+//     player who never wants to leave has to live in. Measured, not guessed.
+//
+// So the edges below are the square roots of the CUMULATIVE AREA each ring should own:
+//   Meadow 26% · Forest 22% · Wetland 20% · Snow 18% · Wasteland 14%.
+// Meadow is deliberately the biggest: it is the chill ring, and it should feel like a whole country.
+inline constexpr float kRingEdge[kRingCount] = {0.5099f, 0.6928f, 0.8246f, 0.9274f, 1.01f};
 
 // --- Entities ------------------------------------------------------------------------------------
 enum class MobKind : std::uint8_t { kSlime = 0, kSpider = 1, kGhost = 2 };
@@ -302,12 +346,30 @@ private:
            0.32f * value_noise(seed ^ 0xA5A5'5A5Aull, x, y, scale * 0.42f);
 }
 
+// Which ring a tile is in. Noise on the radius keeps the boundaries from reading as a dartboard —
+// rings get headlands and bays, and you cross them without noticing a line.
+[[nodiscard]] inline Ring ring_of(std::uint64_t world_seed, int gx, int gy) noexcept {
+    const float half = static_cast<float>(kMapTiles) * 0.5f;
+    const float dx = (static_cast<float>(gx) - half) / half;
+    const float dy = (static_cast<float>(gy) - half) / half;
+    // Chebyshev, so the rings are squares and the map's corners are used — see kRingEdge.
+    float r = std::max(std::abs(dx), std::abs(dy));
+    // Wobble the radius, not the thresholds — that way the whole boundary moves coherently instead
+    // of dissolving into per-tile speckle.
+    r += (fbm(world_seed ^ 0x5150'5150ull, static_cast<float>(gx), static_cast<float>(gy), 70.0f) -
+          0.5f) * 0.16f;
+    for (int i = 0; i < kRingCount; ++i) {
+        if (r < kRingEdge[i]) return static_cast<Ring>(i);
+    }
+    return Ring::kWasteland;
+}
+
 [[nodiscard]] inline Terrain terrain_of(std::uint64_t world_seed, std::uint16_t map, int gx,
                                         int gy) noexcept {
-    // The farm apron is tilled soil by definition. Folding it into the function (rather than
-    // stamping it over a generated chunk afterwards) is what keeps the function total: a chunk
-    // querying a tile just across its border gets the same answer the owning chunk would give.
-    if (map == static_cast<std::uint16_t>(MapId::kHomeValley)) {
+    // The starting apron is tilled soil by definition. Folding it into the function (rather than
+    // stamping it over generated terrain) keeps the function total: a chunk querying a tile just
+    // across its border gets the same answer the owning chunk would give.
+    {
         const int dx = gx - kHomeTx;
         const int dy = gy - kHomeTy;
         if (dx >= -kFarmRadius && dx <= kFarmRadius && dy >= -kFarmRadius && dy <= kFarmRadius) {
@@ -318,21 +380,60 @@ private:
     const std::uint64_t base = world_seed ^ (static_cast<std::uint64_t>(map) << 48);
     const auto x = static_cast<float>(gx);
     const auto y = static_cast<float>(gy);
+    const Ring ring = ring_of(world_seed, gx, gy);
 
-    // Three independent fields. Elevation carves lakes and highlands, forest clumps trees, and the
-    // beach is simply "low ground next to water" rather than its own field.
-    const float elevation = fbm(base ^ 0x1111'2222ull, x, y, 26.0f);
-    const float forest = fbm(base ^ 0x3333'4444ull, x, y, 11.0f);
+    // Three fields, shared by every ring; only the THRESHOLDS change per ring. Using the same noise
+    // everywhere is what makes a biome boundary look like the same land changing rather than two
+    // maps stitched together.
+    const float wet = fbm(base ^ 0x1111'2222ull, x, y, 26.0f);   // low = water
+    const float rock = fbm(base ^ 0x7777'8888ull, x, y, 34.0f);  // high = stone
+    const float flora = fbm(base ^ 0x3333'4444ull, x, y, 11.0f);  // high = trees
 
-    // Thresholds are tuned against MEASURED coverage (tools: `mmo_probe` prints the histogram and a
-    // flood-fill reachability check). The first coherent-noise pass left 35% of the map impassable,
-    // which starved wave spawns at the rim and slowed every mob to a crawl; ~16% is the budget that
-    // keeps lakes and forests visible without turning the map into a maze.
-    if (elevation < 0.28f) return Terrain::kWater;   // ~6%
-    if (elevation < 0.32f) return Terrain::kSand;    // shoreline ring around every lake
-    if (elevation > 0.78f) return Terrain::kStone;   // rocky highland, walkable
-    if (forest > 0.68f) return Terrain::kTree;       // ~10%
-    return Terrain::kGrass;
+    switch (ring) {
+        case Ring::kMeadow:
+            if (wet < 0.24f) return Terrain::kWater;   // small ponds
+            if (wet < 0.28f) return Terrain::kSand;
+            if (flora > 0.74f) return Terrain::kTree;  // sparse copses
+            return Terrain::kGrass;
+
+        case Ring::kForest:
+            if (wet < 0.26f) return Terrain::kWater;
+            if (wet < 0.30f) return Terrain::kSand;
+            if (rock > 0.80f) return Terrain::kStone;
+            if (flora > 0.55f) return Terrain::kTree;  // dense
+            return Terrain::kGrass;
+
+        case Ring::kWetland: {
+            // Swamp on one side, desert on the other. The split is NOISY, not a meridian — the
+            // first version compared `gx > centre` and drew a dead-straight line down the middle of
+            // the map, which the exporter made impossible to miss. Now the boundary wanders, and
+            // the seam between the two is a real place you can walk along.
+            const float lean = (x - static_cast<float>(kHomeTx)) / (static_cast<float>(kMapTiles) * 0.25f);
+            const float wander = (fbm(base ^ 0x2B2B'3C3Cull, x, y, 90.0f) - 0.5f) * 3.0f;
+            const bool desert = (lean + wander) > 0.0f;
+            if (desert) {
+                if (wet < 0.20f) return Terrain::kWater;  // rare oasis
+                if (rock > 0.82f) return Terrain::kStone;
+                if (flora > 0.86f) return Terrain::kTree;  // the odd palm
+                return Terrain::kSand;
+            }
+            if (wet < 0.42f) return Terrain::kWater;  // lots of standing water
+            if (flora > 0.66f) return Terrain::kTree;
+            return Terrain::kMarsh;
+        }
+
+        case Ring::kSnow:
+            if (wet < 0.22f) return Terrain::kWater;  // frozen over in winter (P7)
+            if (rock > 0.66f) return Terrain::kStone;
+            if (flora > 0.78f) return Terrain::kTree;
+            return Terrain::kSnow;
+
+        case Ring::kWasteland:
+        case Ring::kCount: break;
+    }
+    if (wet < 0.18f) return Terrain::kWater;
+    if (rock > 0.55f) return Terrain::kStone;
+    return Terrain::kAsh;
 }
 
 // Which of four mirror orientations to draw a base terrain tile in. A single 16x16 grass tile

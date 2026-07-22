@@ -16,6 +16,11 @@ a gate when you feel like an adventure. Built on the [QuarkCpp](../QuarkCpp) act
 > live in a journal behind a real menu. See [ROADMAP.md](ROADMAP.md) for what P1 brings, and
 > [GAMEPLAY.md](GAMEPLAY.md) for what the current build actually does.
 
+![world map](docs/worldmap.png)
+
+<sub>The whole 1024x1024 overworld, exported by `mmo_worldmap`. Difficulty radiates out from the
+centre: Meadow, Forest, Wetland (swamp west / desert east), Snow, Wasteland.</sub>
+
 ![farm](docs/shot_farm.png)
 
 <sub>Day: the walled farm, turrets (gold pips mark upgrade level), flanking fences, crops at four
@@ -43,6 +48,9 @@ taskset -c 0-3 ./build/mmo_client
 
 # Verify the renderer without a display: fast-forwards, seeds a farm, writes one frame
 xvfb-run -a ./build/mmo_client --shot 100 siege.png
+
+# Export the whole overworld as a PNG, with ring/terrain statistics
+./build/mmo_worldmap --rings --out worldmap.png
 ```
 
 Art is committed as `assets/atlas.png`. To change it, see [`assets/CREDITS.md`](assets/CREDITS.md);

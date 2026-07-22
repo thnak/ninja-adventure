@@ -71,7 +71,17 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
 
     // A mob arrived from a neighbouring chunk. Adopt it verbatim — the sender already owns the
     // decision that this chunk is the new owner.
-    void handle(const MobEnter& e) noexcept { mobs_.push_back(e.mob); }
+    //
+    // The republish matters. Views are published once per tick, so without it a migrating mob is in
+    // NEITHER published view for up to a full tick: the sender already dropped it, and this chunk
+    // will not publish until its next tick. At 10 Hz that is a 100 ms hole — visible as a blink
+    // when a mob crosses a boundary, and it made snapshot-based counts read low (measured: 70 mobs
+    // alive by `ask`, 28 visible in views). Republishing on arrival closes the hole; it costs one
+    // extra publish per migration, which is nothing.
+    void handle(const MobEnter& e) noexcept {
+        mobs_.push_back(e.mob);
+        publish();
+    }
 
     void handle(const SpawnWave& w) noexcept {
         Rng rng(chunk_key(coord) ^ (static_cast<std::uint64_t>(w.seed) << 17));

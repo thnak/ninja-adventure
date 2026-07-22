@@ -203,7 +203,7 @@ private:
     void build_player() {
         player_ = std::make_unique<PlayerActor>();
         player_->id = kPlayerKey;
-        player_->map = static_cast<std::uint16_t>(MapId::kHomeValley);
+        player_->map = kOverworld;
         player_->set_position(static_cast<float>(kHomeTx) + 2.5f,
                               static_cast<float>(kHomeTy) + 2.5f);
         player_->set_start_items(/*wood*/ 200, /*stone*/ 120, /*seed*/ 40);
@@ -237,7 +237,7 @@ private:
 
                     // The tilled apron is already part of the terrain function; only the hearth
                     // has to be placed, and only in the chunk that owns its tile.
-                    if (map == static_cast<int>(MapId::kHomeValley) &&
+                    if (map == kOverworld &&
                         ch->owns(static_cast<std::uint16_t>(kHomeTx),
                                  static_cast<std::uint16_t>(kHomeTy))) {
                         ch->add_building(static_cast<std::uint16_t>(kHomeTx),

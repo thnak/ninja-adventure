@@ -152,7 +152,7 @@ int main() {
     world.build(4);
     world.start();
 
-    const auto home = static_cast<std::uint16_t>(MapId::kHomeValley);
+    const auto home = kOverworld;
 
     // One tick is enough to make every chunk publish its terrain.
     world.step(kTickMs);

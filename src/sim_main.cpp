@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
     Check chk;
 
     // --- Spawn camps: where the monsters come from --------------------------------------------
-    const auto home = static_cast<std::uint16_t>(MapId::kHomeValley);
+    const auto home = kOverworld;
     const auto camps = World::camps(home);
     std::printf("spawn camps (%d fixed lanes, not the whole rim):\n", kSpawnCamps);
     for (int i = 0; i < kSpawnCamps; ++i) {
@@ -252,7 +252,16 @@ int main(int argc, char** argv) {
 
     // Mob conservation: everything that spawned is either alive somewhere or counted as killed.
     // A mob lost during a chunk hand-off would break this.
-    const std::uint32_t alive = count_mobs(world.bus());
+    // Counted by ASK, not from published views: an ask is answered by the chunk itself and is
+    // therefore authoritative, while a view can be one tick stale.
+    std::uint32_t alive = 0;
+    for (int cy = 0; cy < kMapChunks; ++cy) {
+        for (int cx = 0; cx < kMapChunks; ++cx) {
+            alive += world.chunk_stats(ChunkCoord{kOverworld, static_cast<std::uint16_t>(cx),
+                                                  static_cast<std::uint16_t>(cy)})
+                         .mobs;
+        }
+    }
     const std::uint32_t killed = world.status().mobs_killed.load(std::memory_order_relaxed);
     std::printf("  mobs: alive=%u killed=%u migrations=%u peak=%u\n", alive, killed,
                 world.status().migrations.load(std::memory_order_relaxed), peak_mobs);

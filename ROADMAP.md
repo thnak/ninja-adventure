@@ -74,9 +74,21 @@ bản đồ có hồn và để combat biết mình đang cân bằng cho thế 
 
 ---
 
-## P1 — Bộ khung thế giới
+## P1 — Bộ khung thế giới — **đang làm**
 
 Dựng sân khấu thật, trước khi tune bất cứ thứ gì lên trên nó.
+
+| | Trạng thái |
+|---|---|
+| **Công cụ xuất bản đồ** `mmo_worldmap` — PNG full-size, màu phẳng, thống kê vòng/địa hình | ✅ làm đầu tiên: không nhìn được bản đồ thì không tune được worldgen |
+| 1024×1024 ô = **1024 chunk actor** | ✅ 700 tick chạy trong **1,9 giây** |
+| 5 vòng đồng tâm + 3 địa hình mới (tuyết, đầm lầy, tro) | ✅ |
+| Gỡ `kMapCount = 3` → một mặt đất `kOverworld` | ✅ |
+| Thống nhất art sang Ninja Adventure | ⬜ tileset đã khảo sát, xem `assets/CREDITS.md` |
+| Worldgen đặt làng / cứ điểm / cổng / mỏ / đường | ⬜ |
+| BFS đa nguồn + `PathfieldActor` debounce | ⬜ |
+| LOD chunk (10 Hz / 1 Hz / ngủ) | ⬜ |
+| Phương tiện di chuyển | ⬜ |
 
 - **1024×1024 ô** (32×32 = 1024 chunk actor). Gỡ `kMapCount = 3`.
 - **Vòng đồng tâm** ([GAME.md §4](GAME.md)): Đồng cỏ → Rừng → Đầm lầy/Sa mạc → Núi tuyết → Đất cằn,
