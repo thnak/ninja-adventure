@@ -203,7 +203,13 @@ tạo khác biệt đo được trong chiến đấu.
   của P4 và **không cần chiến đấu**, nên nó là cách rẻ nhất để chứng minh hệ thống cõi hoạt động.
 - Bản đồ hầm ngục, PvE nhóm, Tinh chất rơi ra. Mỗi cõi một atlas riêng, nạp/giải phóng khi vào/ra.
 - Đóng cứ điểm bằng Tinh chất → thu hẹp vùng nguy hiểm.
-- **Tích hợp RLDrive**: `add_subdirectory`, viết `CombatEnvironment`, `TrainingActor` trên leader.
+- **Tích hợp RLDrive** (đã khảo sát — xem [ARCHITECTURE.md §7](ARCHITECTURE.md)): `add_subdirectory`,
+  viết `CombatEnvironment`, `TrainingActor` trên leader. **Không dùng `DqnTrainer`** — tự viết vòng
+  lặp 20 dòng. **Phải xử lý `kActionCount` gắn cứng = 15 trong `DqnAgent.cpp:25`**, nếu không thì
+  segfault ngay khi không gian hành động nhỏ hơn.
+- **Pre-train offline, commit file trọng số** (JSON, ~24 KB): "Thế hệ 0" phải là checkpoint đã
+  huấn luyện, không phải mạng ngẫu nhiên — boss mới sinh mà hành xử ngẫu nhiên thì cả tính năng
+  thành trò cười. Round-trip đã kiểm chứng bit-exact.
 - **Policy theo nguyên mẫu, không theo cá thể** (10–15 policy, không phải 115) — bắt buộc, nếu không
   chi phí bùng nổ. Xem [ARCHITECTURE.md §7](ARCHITECTURE.md).
 - **Hai võ đường**: `VillageDojoActor` + `DungeonDojoActor` tự đấu riêng, cộng `SparringActor` giao
