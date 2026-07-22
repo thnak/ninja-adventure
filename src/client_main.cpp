@@ -28,15 +28,18 @@ int main(int argc, char** argv) {
     // path gets verified without a display.
     int shot_seconds = 0;
     const char* shot_path = nullptr;
-    int look_camp = -1;            // --camp N: point the camera at spawn camp N instead of the farm
+    int look_hold = -1;                 // --hold N: point the camera at stronghold N
+    int look_village = -1;              // --village N: point the camera at village N
     const char* shot_screen = nullptr;  // --screen NAME: force a shell screen for the screenshot
     int look_ring = -1;                 // --ring N: park the camera in biome ring N
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--shot") == 0 && i + 2 < argc) {
             shot_seconds = std::atoi(argv[i + 1]);
             shot_path = argv[i + 2];
-        } else if (std::strcmp(argv[i], "--camp") == 0 && i + 1 < argc) {
-            look_camp = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--hold") == 0 && i + 1 < argc) {
+            look_hold = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--village") == 0 && i + 1 < argc) {
+            look_village = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--ring") == 0 && i + 1 < argc) {
             look_ring = std::atoi(argv[i + 1]);  // 0..4 — put the camera in that biome ring
         } else if (std::strcmp(argv[i], "--screen") == 0 && i + 1 < argc) {
@@ -49,10 +52,7 @@ int main(int argc, char** argv) {
     world.start();
 
     RaylibBridge bridge(1280, 720);
-    {
-        const auto camps = World::camps(world.player_view().map);
-        bridge.set_camps(std::vector<std::pair<int, int>>(camps.begin(), camps.end()));
-    }
+    bridge.set_layout(&world.layout());
 
     // Fixed-step accumulator: the world advances in whole `kTickMs` steps regardless of frame time,
     // so simulation behaviour does not change with frame rate. Capped so a stall (window drag, alt-
@@ -79,58 +79,20 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Unattended mode: fast-forward, then seed a farm so the frame actually exercises every sprite
-    // (crops at all four growth stages, walls, turrets, the core, mobs mid-siege) instead of showing
-    // an empty field. Crops are back-dated by staggered amounts so one row spans seedling to ripe.
+    // Unattended mode: fast-forward, then point the camera somewhere worth photographing.
+    //
+    // It no longer seeds a farm. It used to build a walled compound with turrets and rows of crops
+    // around the map centre, because that was the only content in the game — and it quietly meant
+    // every screenshot was of a thing the demo had just constructed rather than of the world. Now
+    // the world generates villages, so the honest shot is one of a village.
     if (shot_path != nullptr) {
         const int steps = shot_seconds * kTicksPerSecond;
         for (int i = 0; i < steps; ++i) world.step(kTickMs);
         world.sync_world();
-
-        const auto map = player.map;
-        const std::int64_t now = world.status().world_ms.load(std::memory_order_relaxed);
-        for (int row = 0; row < 4; ++row) {
-            for (int col = 0; col < 8; ++col) {
-                const auto kind = static_cast<CropKind>(row % 3);
-                // Age spans 0 .. full grow time across the row, so all four stages are on screen.
-                const std::int64_t age = (grow_ms_of(kind) * col) / 7;
-                world.plant(map, static_cast<std::uint16_t>(kHomeTx - 4 + col),
-                            static_cast<std::uint16_t>(kHomeTy + 2 + row), kind, now - age);
-            }
-        }
-        // A bracket around the core rather than a bare line: it exercises horizontal runs, vertical
-        // runs and corners, which is exactly what the wall autotiling has to get right.
-        for (int dx = -5; dx <= 5; ++dx) {
-            world.build_at(map, static_cast<std::uint16_t>(kHomeTx + dx),
-                           static_cast<std::uint16_t>(kHomeTy - 3), BuildKind::kWall);
-        }
-        for (int dy = -2; dy <= 2; ++dy) {
-            world.build_at(map, static_cast<std::uint16_t>(kHomeTx - 5),
-                           static_cast<std::uint16_t>(kHomeTy + dy), BuildKind::kWall);
-            world.build_at(map, static_cast<std::uint16_t>(kHomeTx + 5),
-                           static_cast<std::uint16_t>(kHomeTy + dy), BuildKind::kWall);
-        }
-        for (int dx = -4; dx <= 4; dx += 4) {
-            world.build_at(map, static_cast<std::uint16_t>(kHomeTx + dx),
-                           static_cast<std::uint16_t>(kHomeTy - 1), BuildKind::kTurret);
-        }
-        // Fence the flanks and upgrade one turret, so the demo frame shows every defensive system.
-        for (int dy = -2; dy <= 3; ++dy) {
-            world.build_at(map, static_cast<std::uint16_t>(kHomeTx - 7),
-                           static_cast<std::uint16_t>(kHomeTy + dy), BuildKind::kFence);
-            world.build_at(map, static_cast<std::uint16_t>(kHomeTx + 7),
-                           static_cast<std::uint16_t>(kHomeTy + dy), BuildKind::kFence);
-        }
-        for (std::uint8_t lvl = 1; lvl < kMaxLevel; ++lvl) {
-            world.upgrade(map, static_cast<std::uint16_t>(kHomeTx),
-                          static_cast<std::uint16_t>(kHomeTy - 1), BuildKind::kTurret, lvl);
-        }
-        for (int i = 0; i < 20; ++i) world.step(kTickMs);  // let the chunks tick and publish
-        world.sync_world();
         player = world.player_view();
 
-        // The camera follows the player, so looking at a spawn camp means walking there. The move
-        // is relative, hence the delta.
+        // The camera follows the player, so looking at something means walking there. The move is
+        // relative, hence the delta.
         // Park the camera at the MIDDLE radius of the requested ring. An earlier version walked
         // outward a step at a time and capped the step count, which could not physically reach the
         // outer rings along a diagonal — rings 2, 3 and 4 all produced the same screenshot.
@@ -147,15 +109,26 @@ int main(int argc, char** argv) {
             world.sync_world();
             player = world.player_view();
         }
-        if (look_camp >= 0 && look_camp < kSpawnCamps) {
-            const auto camps = World::camps(player.map);
-            const auto [ctx, cty] = camps[static_cast<std::size_t>(look_camp)];
-            // Stand a few tiles off the camp so the portal is not hidden behind the player sprite.
-            world.move_player(static_cast<float>(ctx) - player.x,
-                              static_cast<float>(cty) + 6.0f - player.y);
+        const auto& lay = world.layout();
+        if (look_village >= 0 && look_village < static_cast<int>(lay.villages().size())) {
+            const Village& v = lay.villages()[static_cast<std::size_t>(look_village)];
+            // Stand a little south of the square: the houses are drawn from their bottom edge, so
+            // looking from below is what shows their faces rather than their roofs.
+            world.move_player(static_cast<float>(v.tx) - player.x,
+                              static_cast<float>(v.ty) + 5.0f - player.y);
             world.sync_world();
             player = world.player_view();
         }
+        if (look_hold >= 0 && look_hold < static_cast<int>(lay.strongholds().size())) {
+            const Stronghold& h = lay.strongholds()[static_cast<std::size_t>(look_hold)];
+            world.move_player(static_cast<float>(h.tx) - player.x,
+                              static_cast<float>(h.ty) + 6.0f - player.y);
+            world.sync_world();
+            player = world.player_view();
+        }
+        for (int i = 0; i < 20; ++i) world.step(kTickMs);  // let the chunks tick and publish
+        world.sync_world();
+        player = world.player_view();
     }
     int frames = 0;
 
@@ -236,8 +209,7 @@ int main(int argc, char** argv) {
 
         bridge.draw(world.bus(), world.status(), player);
 
-        shell.selected_hotbar = static_cast<int>(bridge.selected_build()) - 1;
-        if (shell.selected_hotbar < 0) shell.selected_hotbar = 0;
+        shell.selected_hotbar = static_cast<int>(bridge.selected_build());
         const ui::Action act = ui::draw(shell, world.status(), player);
         if (shell.debug_overlay) {
             ui::draw_debug_overlay(world.status(), player, bridge.drawn_chunks(),

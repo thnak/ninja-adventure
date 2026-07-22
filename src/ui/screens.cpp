@@ -68,8 +68,11 @@ void draw_hud(const ShellState& st, const WorldStatus& status, const PlayerView&
     DrawText(label, w - lw - 22, 18, 20,
              night ? Color{178, 190, 240, 255} : Color{255, 236, 176, 255});
 
-    // Hotbar, bottom-centre. Five slots; the selected one is outlined.
-    constexpr int kSlots = 5;
+    // Hotbar, bottom-centre. Two slots — hearth and crop plot — because that is genuinely
+    // everything a player can place one tile at a time. It used to be five, and three of them were
+    // walls, towers and fences that this art cannot draw (GAME.md §6b). An empty slot that never
+    // fills is a promise the game does not keep, so the slots went with the buildings.
+    constexpr int kSlots = 2;
     constexpr int kSlotPx = 44;
     const int total = kSlots * kSlotPx + (kSlots - 1) * 6;
     const int hx = (w - total) / 2;
@@ -90,7 +93,7 @@ bool handle_shell_keys(ShellState& st) {
         st.debug_overlay = !st.debug_overlay;
         return true;
     }
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 2; ++i) {
         if (IsKeyPressed(KEY_ONE + i)) st.selected_hotbar = i;
     }
     if (IsKeyPressed(KEY_ESCAPE)) {
@@ -140,7 +143,8 @@ Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player)
         case Screen::kMainMenu: {
             DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{18, 20, 26, 255});
             title("Ninja Adventure", GetScreenHeight() / 2 - 190);
-            subtitle("A retired ninja comes home to farm.", GetScreenHeight() / 2 - 138);
+            subtitle("You wake in open country. Somewhere out there, people.",
+                     GetScreenHeight() / 2 - 138);
             static const char* items[] = {"Play", "Journal", "Options", "Quit"};
             switch (button_column(items, 4, GetScreenHeight() / 2 - 80)) {
                 case 0: st.screen = Screen::kPlaying; return Action::kStartGame;
@@ -182,12 +186,12 @@ Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player)
             y += 30;
             static const char* rows[] = {
                 "WASD / arrows      move",
-                "Left mouse         build the selected structure",
+                "Left mouse         place the selected thing",
                 "Right mouse        plant wheat (tilled soil only)",
                 "E                  harvest a ripe crop",
-                "T                  till a tile - expand the farm",
-                "U                  upgrade the building under the cursor",
-                "1 - 5              hotbar",
+                "T                  till a tile - make farmland",
+                "U                  upgrade what is under the cursor",
+                "1 - 2              hearth / crop plot",
                 "Mouse wheel        zoom",
                 "J                  this journal",
                 "F3                 debug overlay",
@@ -201,9 +205,10 @@ Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player)
             DrawText("Getting started", x, y, 20, Color{230, 206, 140, 255});
             y += 30;
             static const char* tips[] = {
-                "Nothing is counting down. Farm at your own pace.",
-                "Monsters wander in at night; a wooden fence stops them.",
-                "Gates lead elsewhere - some to a challenge, some to a quiet place.",
+                "Nothing is counting down. Nothing is chasing you.",
+                "You start with nothing. Walk until you find a village.",
+                "Roads join the villages - follow one and you will arrive somewhere.",
+                "Further from the middle of the world is harder. That is the only rule.",
             };
             for (const char* t : tips) {
                 DrawText(t, x + 8, y, 17, Color{176, 190, 176, 255});

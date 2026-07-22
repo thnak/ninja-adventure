@@ -125,9 +125,6 @@ struct BuildCost {
 
 [[nodiscard]] inline constexpr BuildCost cost_of(BuildKind k) noexcept {
     switch (k) {
-        case BuildKind::kFence: return {ItemKind::kWood, 2};
-        case BuildKind::kWall: return {ItemKind::kWood, 5};
-        case BuildKind::kTurret: return {ItemKind::kStone, 12};
         case BuildKind::kPlot: return {ItemKind::kWood, 2};
         case BuildKind::kHearth: return {ItemKind::kStone, 20};
         case BuildKind::kCount: break;

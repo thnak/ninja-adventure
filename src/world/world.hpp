@@ -31,6 +31,7 @@
 #include "world/protocol.hpp"
 #include "world/snapshot.hpp"
 #include "world/tiles.hpp"
+#include "world/worldgen.hpp"
 
 namespace mmo {
 
@@ -54,6 +55,13 @@ public:
     // `workers` is explicit and small on purpose (CONVENTIONS.md machine safety) — never
     // hardware_concurrency.
     void build(std::uint32_t workers = 4) {
+        // FIRST, before anything reads a tile. Generating the layout publishes the overlay that
+        // `terrain_of` consults, so every terrain query after this line — the chunks' caches, the
+        // flow field's walkability test, the renderer — sees villages and roads rather than bare
+        // noise. Doing it later would give the chunks a cache of the land as it was before anyone
+        // built on it, and nothing would ever correct them.
+        layout_ = &world_layout(kWorldSeed);
+
         pool_ = std::make_unique<quark::detail::MessagePool>(1u << 16);
 
         quark::EngineConfig cfg{};
@@ -67,12 +75,13 @@ public:
 
         router_ = std::make_unique<quark::LocalRouter>(engine_->post_courier(), *pool_);
 
-        // One BFS per map, before any actor exists. Read-only from here on — see flow_field.hpp for
-        // why handing every chunk a pointer to it does not reintroduce shared mutable state.
-        for (int m = 0; m < kMapCount; ++m) {
-            flow_[static_cast<std::size_t>(m)].build(kWorldSeed, static_cast<std::uint16_t>(m),
-                                                     kHomeTx, kHomeTy);
-        }
+        // One multi-source BFS, before any actor exists: distance to the nearest VILLAGE from every
+        // tile. Read-only from here on — see flow_field.hpp for why handing every chunk a pointer
+        // to it does not reintroduce shared mutable state.
+        std::vector<std::pair<int, int>> targets;
+        targets.reserve(layout_->villages().size());
+        for (const Village& v : layout_->villages()) targets.emplace_back(v.tx, v.ty);
+        flow_[0].build(kWorldSeed, kOverworld, targets);
 
         build_player();
         build_chunks();
@@ -162,17 +171,9 @@ public:
         return true;
     }
 
-    // Where the monsters come from. Pure function of the world seed, so this is a lookup, not state.
-    [[nodiscard]] static std::array<std::pair<int, int>, kSpawnCamps> camps(std::uint16_t map) {
-        std::array<std::pair<int, int>, kSpawnCamps> out{};
-        for (int i = 0; i < kSpawnCamps; ++i) {
-            int tx = 0;
-            int ty = 0;
-            camp_tile(kWorldSeed, map, i, tx, ty);
-            out[static_cast<std::size_t>(i)] = {tx, ty};
-        }
-        return out;
-    }
+    // The generated world, for anything that needs to know where things ARE rather than what a
+    // chunk currently holds: the renderer (which buildings to draw), the map exporter, the tests.
+    [[nodiscard]] const WorldLayout& layout() const noexcept { return *layout_; }
 
     // Placement costs resources, so it is a two-step: ASK the trusted inventory to debit, and only
     // tell the (possibly untrusted) chunk to build if the debit succeeded. Doing it in this order
@@ -203,9 +204,13 @@ private:
         player_ = std::make_unique<PlayerActor>();
         player_->id = kPlayerKey;
         player_->map = kOverworld;
-        player_->set_position(static_cast<float>(kHomeTx) + 2.5f,
-                              static_cast<float>(kHomeTy) + 2.5f);
-        player_->set_start_items(/*wood*/ 200, /*stone*/ 120, /*seed*/ 40);
+        // Open country, a good half-minute's walk from the nearest village. Not a farm, not a
+        // tutorial, not a hearth already lit — GAME.md §6b.
+        player_->set_position(static_cast<float>(layout_->spawn_tx()) + 0.5f,
+                              static_cast<float>(layout_->spawn_ty()) + 0.5f);
+        // Enough to light a fire and turn a few tiles of soil once you get somewhere. Deliberately
+        // not enough to live on: the point of the walk is that you arrive needing people.
+        player_->set_start_items(/*wood*/ 40, /*stone*/ 25, /*seed*/ 12);
         player_act_ = std::make_unique<quark::Activation>(player_.get(),
                                                           PlayerActor::dispatch_table(),
                                                           pool_->sink());
@@ -230,18 +235,19 @@ private:
                     ch->status = &status_;
                     ch->player = player_ref_;
                     ch->flow = &flow_[static_cast<std::size_t>(map)];
-                    ch->home_x = static_cast<float>(kHomeTx) + 0.5f;
-                    ch->home_y = static_cast<float>(kHomeTy) + 0.5f;
-                    ch->generate_terrain(kWorldSeed);
-
-                    // The tilled apron is already part of the terrain function; only the hearth
-                    // has to be placed, and only in the chunk that owns its tile.
-                    if (map == kOverworld &&
-                        ch->owns(static_cast<std::uint16_t>(kHomeTx),
-                                 static_cast<std::uint16_t>(kHomeTy))) {
-                        ch->add_building(static_cast<std::uint16_t>(kHomeTx),
-                                         static_cast<std::uint16_t>(kHomeTy), BuildKind::kHearth);
+                    // Fallback heading for a mob the flow field cannot route (an island, a pocket
+                    // walled in by cliffs): the village nearest this chunk's own centre.
+                    const int mid_x = cx * kChunkTiles + kChunkTiles / 2;
+                    const int mid_y = cy * kChunkTiles + kChunkTiles / 2;
+                    if (const Village* v = layout_->nearest_village(mid_x, mid_y)) {
+                        ch->home_x = static_cast<float>(v->tx) + 0.5f;
+                        ch->home_y = static_cast<float>(v->ty) + 0.5f;
                     }
+                    ch->generate_terrain(kWorldSeed);
+                    // Villages and roads are already in the terrain the line above cached — they
+                    // are part of the world, not entities placed on top of it. Nothing is seeded
+                    // here: a new world starts with no player buildings anywhere in it.
+                    ch->publish_now();
 
                     auto act = std::make_unique<quark::Activation>(
                         ch.get(), ChunkActor::dispatch_table(), pool_->sink());
@@ -261,6 +267,9 @@ private:
         director_->status = &status_;
         director_->world_seed = kWorldSeed;
         director_->chunks = chunk_coords_;
+        for (const Stronghold& h : layout_->strongholds()) {
+            director_->raid_sources.emplace_back(h.tx, h.ty);
+        }
         director_act_ = std::make_unique<quark::Activation>(
             director_.get(), MapDirector::dispatch_table(), pool_->sink());
         quark::register_actor<MapDirector>(*engine_, kDirectorKey, *director_act_);
@@ -271,6 +280,7 @@ private:
     std::unique_ptr<quark::Engine<quark::PriorityBands<2>>> engine_;
     std::unique_ptr<quark::LocalRouter> router_;
 
+    const WorldLayout* layout_ = nullptr;
     SnapshotBus bus_;
     WorldStatus status_;
     std::array<FlowField, kMapCount> flow_{};

@@ -53,7 +53,7 @@ struct PlantCrop {
 struct PlaceBuilding {
     std::uint16_t tx = 0;
     std::uint16_t ty = 0;
-    BuildKind kind = BuildKind::kWall;
+    BuildKind kind = BuildKind::kHearth;
     std::uint64_t player = 0;
 };
 

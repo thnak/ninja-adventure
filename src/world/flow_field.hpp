@@ -1,4 +1,4 @@
-// A distance-to-the-core field, and the reason it does not break the actor model.
+// A distance-to-the-nearest-settlement field, and the reason it does not break the actor model.
 //
 // THE PROBLEM. Mobs steer greedily toward the core and slide along obstacles when blocked. That is
 // fine on open ground and fails completely against a concave shape: once coherent terrain gave the
@@ -6,12 +6,13 @@
 // position for the rest of the run — every direction it wanted to go was water, and a greedy
 // steerer has no way to go *backwards* to get around. Measured, not theorised: see `mmo_probe`.
 //
-// THE FIX. Every mob on a map is heading for the same tile, so instead of N searches there is one
-// breadth-first sweep outward from the core over walkable tiles. A mob then just steps to whichever
-// neighbour is closer to the core. No local minima, no per-mob search, and lakes get walked around.
+// THE FIX. Every mob is heading for *a* settlement, so instead of N searches there is one
+// breadth-first sweep outward from all of them at once over walkable tiles. A mob then just steps
+// to whichever neighbour is closer. No local minima, no per-mob search, and lakes get walked around.
 //
-// WHY THIS IS NOT SHARED MUTABLE STATE. The field is a pure function of (world seed, map, core
-// position) — all inputs every node already has, because `terrain_of` is itself a pure function.
+// WHY THIS IS NOT SHARED MUTABLE STATE. The field is a pure function of (world seed, map, target
+// list) — all inputs every node already has, because terrain and the world layout are both derived
+// from the seed alone.
 // Any node can compute a byte-identical field on its own, and nothing ever writes to it after
 // construction. It is shared the way a lookup table is shared, not the way state is shared: chunks
 // hold a `const FlowField*`, there is no message, no lock, and no coherence problem when chunks
@@ -20,6 +21,7 @@
 #pragma once
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "world/tiles.hpp"
@@ -30,10 +32,18 @@ class FlowField {
 public:
     static constexpr std::uint16_t kUnreachable = 0xFFFF;
 
-    // BFS outward from (core_tx, core_ty) over walkable terrain. 8-connected so diagonal travel
+    // BFS outward from EVERY target at once, over walkable terrain. 8-connected so diagonal travel
     // costs the same as orthogonal — mobs then take visually straight lines across open ground
     // instead of staircases.
-    void build(std::uint64_t world_seed, std::uint16_t map, int core_tx, int core_ty) {
+    //
+    // MULTI-SOURCE is what makes one field enough now that there are fifty villages instead of one
+    // core. Seeding the frontier with all of them at distance 0 gives, in a single sweep, the
+    // distance to the NEAREST target from every tile — so a mob descending it walks to whichever
+    // village is closest to it, with no per-mob search and no field per village. One BFS costs the
+    // same as it did with one source; fifty separate fields would cost fifty times as much and
+    // 100 MB of memory.
+    void build(std::uint64_t world_seed, std::uint16_t map,
+               const std::vector<std::pair<int, int>>& targets) {
         map_ = map;
         dist_.assign(static_cast<std::size_t>(kMapTiles) * kMapTiles, kUnreachable);
 
@@ -42,9 +52,14 @@ public:
         frontier.reserve(4096);
         next.reserve(4096);
 
-        const int start = core_ty * kMapTiles + core_tx;
-        dist_[static_cast<std::size_t>(start)] = 0;
-        frontier.push_back(start);
+        for (const auto& [tx, ty] : targets) {
+            if (tx < 0 || ty < 0 || tx >= kMapTiles || ty >= kMapTiles) continue;
+            const int start = ty * kMapTiles + tx;
+            if (dist_[static_cast<std::size_t>(start)] == 0) continue;  // duplicate target
+            dist_[static_cast<std::size_t>(start)] = 0;
+            frontier.push_back(start);
+        }
+        if (frontier.empty()) return;
 
         std::uint16_t d = 0;
         while (!frontier.empty()) {

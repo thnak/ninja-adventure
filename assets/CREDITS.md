@@ -10,9 +10,7 @@ means *free for personal use*, which is not the same thing.
 | Pack | Used for | Link |
 |---|---|---|
 | **Ninja Adventure** (Pixel-Boy & AAA) | **characters (95, 4-direction animated), monsters (66), bosses (20), farm animals (27), FX, items, UI, audio** | <https://pixel-boy.itch.io/ninja-adventure-asset-pack> |
-| Roguelike/RPG pack | terrain (grass, dirt, water, stone, sand), tree, crop plants | <https://kenney.nl/assets/roguelike-rpg-pack> |
-| Tiny Town | core, wall, turret, plot | <https://kenney.nl/assets/tiny-town> |
-| Tiny Dungeon | slime, spider, ghost, player | <https://kenney.nl/assets/tiny-dungeon> |
+| Roguelike/RPG pack | crop growth stages (the last Kenney art in the world) | <https://kenney.nl/assets/roguelike-rpg-pack> |
 | Roguelike Caves & Dungeons | dungeon and mine interiors | <https://kenney.nl/assets/roguelike-caves-dungeons> |
 | UI Pack RPG Expansion | menu panels, buttons | <https://kenney.nl/assets/ui-pack-rpg-expansion> |
 | Fantasy UI Borders | menu frames | <https://kenney.nl/assets/fantasy-ui-borders> |
@@ -21,63 +19,77 @@ means *free for personal use*, which is not the same thing.
 | RPG Audio | hits, footsteps, UI sounds (52) | <https://kenney.nl/assets/rpg-audio> |
 | Music Jingles | stingers and fanfares (86) | <https://kenney.nl/assets/music-jingles> |
 
-The last seven are for the full game (see [GAME.md](../GAME.md)) and are **not yet packed into
+The last six are for the full game (see [GAME.md](../GAME.md)) and are **not yet packed into
 `atlas.png`** — UI needs its own atlas with different cell sizes, and audio is loaded as files.
 
-## Style consistency — a known issue being fixed in P1
+## Style consistency — resolved in P1
 
 As of the P0 commit the game mixed two art styles: **characters and monsters were Ninja Adventure,
-but terrain, buildings and crops were still Kenney.** It shows — the world reads as one game and the
+but terrain, buildings and crops were still Kenney.** It showed — the world read as one game and the
 things walking around in it as another.
 
-This is not a licensing problem (both are CC0) but it is a quality one, and it is being fixed in P1
-rather than left, because P1 rewrites the terrain system anyway (radial biome rings) and the tileset
-has to be touched regardless.
+**The first world is now entirely Ninja Adventure.** Terrain (all eleven types), trees, roads,
+houses, tents, ruins, the hearth and the crop plot all come from the one pack. The only Kenney
+sprites left in `atlas.png` are the five crop growth stages, and those are queued behind
+`TilesetField.png` in P4 when crops get their own system.
 
-**Done so far: terrain and trees.** All nine terrain types and both tree species now come from Ninja
-Adventure. **Still Kenney: buildings** — wall, turret, fence, hearth, plot — and the crop sprites.
+### How the buildings finally migrated: by changing the design, not the manifest
 
-Fill tiles were located by *scanning* every sheet for low-variance (flat) tiles and matching mean
-colour against the terrain palette, rather than by eyeballing five hundred tiles per sheet.
+The blocker was real and it was not a pick. Ninja Adventure has **no single-tile wall and no
+single-tile tower** — `TilesetHouse` (759 tiles) and `TilesetTowers` (144) are every one of them an
+`object_part` slice of something bigger, and the fence is two tiles tall. A first attempt at the
+fence took only its top row and rendered a thin stick, worse than the Kenney tile it replaced.
 
-**Trees are 2 tiles wide and 3 tall in this pack.** Two separate mistakes came from not checking
-that: first `TilesetTowers (0,0)` was picked as a tree and is actually a tower roof; then the right
-sheet was used but sliced to a single 16x16, which takes the *left half* of a canopy and renders it
-sitting on grass. Both look exactly like a bad crop, which is what they were. The packer now has a
-`BIG_MANIFEST` for multi-tile sprites: the region is packed contiguously and drawn as one quad,
-anchored bottom-centre so the trunk sits on its own tile and the canopy overhangs the tiles above.
+Painting a perimeter one tile at a time simply cannot be drawn with this art. So the design changed
+(GAME.md §6b): **the player no longer builds walls at all.** Buildings are whole structures, placed
+whole, and the ones that exist are the ones world generation puts down. `BuildKind` went from five
+values to two — hearth and crop plot, the only two things that genuinely are one tile.
 
-Before adding a sprite, check whether it is self-contained in one tile — the check is whether all
-four 1px borders are transparent.
+That deleted more code than it added, including an entire cross-chunk pre-pass in the renderer: a
+per-tile wall had to know its neighbours in the chunk next door so its style did not change at the
+boundary, and a structure that is one sprite has no neighbours to ask.
 
-**The buildings are still Kenney, and migrating them is not a one-line manifest swap.** Attempted
-and reverted: Ninja Adventure's fence (`TilesetElement` 11-13,2) is a horizontal 3-piece run that is
-**2 tiles tall** — rail on top, base below. Taking only the top tile renders a thin stick, which
-looked worse than what it replaced. Same class of problem as the trees, and it needs the same
-answer: a `BIG_MANIFEST` entry plus an autotile pass that knows about run ends, not just middles.
+### Multi-tile crops: look before you trust
 
-The wall and turret are in the same position. `TilesetHouse` (759 tiles) and `TilesetTowers` (144,
-all `object_part` slices of 2x2 landmark towers) have no single-tile wall or turret at all — every
-candidate is part of a larger structure. This is a real piece of work, not a pick.
+Trees are 2 tiles wide and 3 tall, and houses are 3-4 wide by 3 tall. Four separate rendering bugs
+in this project came from picking a rectangle without seeing it:
 
-Ninja Adventure ships a complete 16x16 tileset family that covers everything Kenney was doing here:
+| Bug | What was actually there |
+|---|---|
+| A field of tower roofs instead of trees | `TilesetTowers (0,0)` is a roof |
+| Trees "cut with the wrong margin" | the right sheet, sliced to one 16x16 = the left half of a canopy |
+| Ground rendering as a flat background wash | the scan looked for the LOWEST-variance tiles, which selects solid fills by construction |
+| A market stall used as a campfire | `TilesetElement (0,4)` is an awning, picked off a thumbnail |
+
+A wrong rectangle is worse than a wrong tile, because it is only wrong at its **edges** — you get a
+house with a strip of its neighbour's roof attached, which no per-tile contact sheet will show you.
+So `tools/verify_structures.py` crops every candidate exactly as the packer would, at 6x, on grass,
+with a tile grid over it. Everything in `BIG_MANIFEST` went through it. The campfire above is the
+one that did not, and it is the one that was wrong.
+
+`assets/tile_index.json` (5225 tiles, with `role`, `self_contained` and a human description written
+after looking) is the other half of the answer: it is how a replacement gets found without
+eyeballing five hundred tiles a sheet.
+
+### Which sheet covers what
 
 | Need | Ninja Adventure tileset |
 |---|---|
-| ground, grass, dirt, paths | `TilesetFloor.png` (22x26 tiles) |
+| ground, grass, dirt, roads | `TilesetFloor.png` (22x26 tiles) |
 | trees, bushes, flora | `TilesetNature.png` (24x21) |
 | water, shore | `TilesetWater.png` (28x17) |
 | desert ring | `TilesetDesert.png` (20x12) |
 | farm plots and crops | `TilesetField.png` (5x15) |
-| village buildings, walls | `TilesetHouse.png` (33x23) |
-| towers / turrets | `TilesetTowers.png` (24x6) |
+| village houses | `TilesetHouse.png` (33x23) |
+| stronghold tents, fire pit | `tileset_camp.png` (23x9) |
+| ruins (wasteland villages) | `TilesetVillageAbandoned.png` (20x12) |
 | cliffs, elevation | `TilesetRelief.png` (20x12) |
 | dungeon interiors | `TilesetDungeon.png` (12x4) |
-| monster camps | `tileset_camp.png` (23x9) |
-| ruins | `TilesetVillageAbandoned.png` (20x12) |
+| drifting leaves, rain, snow | `FX/Particle/` |
 
-The Kenney packs stay in `fetch_assets.sh` for now — some of them (Game Icons, Particle Pack, the
-UI packs) cover things Ninja Adventure does not, and those are still wanted.
+The Kenney packs stay in `fetch_assets.sh` — some of them (Game Icons, Particle Pack, the UI packs)
+cover things Ninja Adventure does not, and those are still wanted for P4's inventory and crafting
+screens.
 
 ## Audio
 
@@ -95,8 +107,11 @@ game has to run from a clean checkout.
 
 ## What is committed
 
-- **`atlas.png`** — the ~20 tiles this game actually uses, packed into one 144×54 texture.
-  Committed, because it is the only art the build needs.
+- **`atlas.png`** — every sprite the game uses: 37 tiles, 6 animation sheets, 17 multi-tile
+  structures and 4 particle strips, packed into one 144×1302 texture. Committed, because it is the
+  only art the build needs.
+- **`tile_index.json`** — 5225 source tiles with role, geometry and a human description. Committed
+  because regenerating it costs a full visual pass over 23 sheets.
 - **`_src/`** — the raw packs. **Not committed** (`.gitignore`); ~2 MB of mostly-unused tiles.
   Run `tools/fetch_assets.sh` to restore them.
 
@@ -113,25 +128,29 @@ The packer regenerates both `assets/atlas.png` and `src/render/atlas_slots.hpp`,
 is a one-line manifest edit — no C++ changes. To find a tile's `(col, row)` in a source sheet:
 
 ```bash
-# Kenney roguelike sheets have a 1px gutter (--stride 17); the tiny_* tilemaps do not (--stride 16)
-python3 tools/atlas_preview.py assets/_src/tinytown/Tilemap/tilemap_packed.png /tmp/tt.png \
-    --rect 0 0 11 10 --stride 16 --scale 4 --cols-per-row 12
+# Query the index for a role and a colour, rather than eyeballing 500 tiles a sheet
+python3 -c "import json;[print(t) for t in json.load(open('assets/tile_index.json'))['tiles']
+            if t['role']=='fill_textured' and 'snow' in t['name']]"
+
+# Whole sheets, labelled col,row, for identifying by eye
+python3 tools/contact_sheet.py assets/_src/ninja/Backgrounds/Tilesets/TilesetHouse.png /tmp/h
+
+# MANDATORY before adding anything to BIG_MANIFEST: every candidate rectangle at 6x, on grass,
+# with a tile grid over it. A footprint one column too wide is only wrong at its edge.
+python3 tools/verify_structures.py /tmp/structures.png
 ```
 
 ## Notes on the packing
 
-- **Tiny Dungeon sprites carry an opaque dark silhouette** (`#3F2631`) — the dungeon floor showing
-  through behind each creature. On grass it reads as a mud blob, so the packer keys that colour out.
-  Both variants were composited over the grass tile before choosing.
-- **The castle wall is a 3x3 nine-slice, not a standalone tile.** Using its top-left corner for
-  every wall segment made a horizontal run repeat a left edge over and over. A one-tile-thick,
-  free-form player wall cannot use a nine-slice at all, so the renderer autotiles instead: the
-  top-middle tile (crenellations along the length, no side edges) drawn unrotated for a horizontal
-  run and rotated 90 degrees for a vertical one, with plain brick for isolated tiles and junctions.
-  The neighbour lookup is gathered across ALL visible chunks, so a wall does not change style where
-  it crosses a chunk boundary.
-- **The tall tree is two tiles** (canopy dome above canopy-base-plus-trunk); row 9 of the roguelike
-  sheet holds a complete one-tile tree, but the two-tile version is what reads as a forest.
+- **A road tile has to work in every ring it passes through.** The red-clay path set
+  (`TilesetFloor` cols 3-9) was the first pick and looks right on grass; across a snowfield it looks
+  like a wound. Only the neutral brown set (cols 14-20) works everywhere the road actually goes.
+- **The interior cell is the only usable one in an autotile set.** Every other cell of a path set
+  carries grass on one or more edges, so two of them side by side show a hard seam. The index names
+  them: `_c` is the centre, everything else is a compass direction.
+- **Particles are not on the tile grid** — a leaf is 12x7, a raindrop 8x8 — so they get their own
+  packing pass with no extrusion. They are drawn at a fixed size in screen space and never sampled
+  at a fractional coordinate, so they have no seam to bleed.
 - **Every tile is extruded by 1px** of its own border colour. The camera zooms continuously, so a
   source rect can land on fractional texture coordinates; without the extruded border, sampling at
   a tile edge picks up the neighbour and shows seams.

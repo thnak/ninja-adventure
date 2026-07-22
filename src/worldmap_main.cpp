@@ -14,6 +14,7 @@
 // compute terrain without asking anyone — here it just makes the tool trivial.
 //
 // Run:  build/mmo_worldmap [--seed N] [--scale N] [--out FILE] [--rings]
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +24,7 @@
 #include "raylib.h"
 
 #include "world/tiles.hpp"
+#include "world/worldgen.hpp"
 
 using namespace mmo;
 
@@ -45,6 +47,10 @@ struct Rgb {
         case Terrain::kSnow: return {228, 234, 242};
         case Terrain::kMarsh: return {86, 96, 62};
         case Terrain::kAsh: return {74, 66, 76};
+        // Generated features are deliberately LOUD against the land. This map is read for
+        // structure, and the first question asked of it is always "did the roads connect?".
+        case Terrain::kPath: return {206, 158, 108};
+        case Terrain::kBuilding: return {40, 30, 28};
         case Terrain::kCount: break;
     }
     return {255, 0, 255};
@@ -91,6 +97,12 @@ int main(int argc, char** argv) {
     }
     if (scale < 1) scale = 1;
 
+    // BEFORE the first terrain query. `world_layout` publishes the overlay that `terrain_of` reads,
+    // and it caches on first call — so a tool that wants a non-default seed has to be the one to
+    // make that call. Query a tile first and the map would show the land with nothing built on it,
+    // which is a silent, plausible-looking wrong answer.
+    const WorldLayout& layout = world_layout(seed);
+
     const int w = kMapTiles * scale;
     const int h = kMapTiles * scale;
     std::vector<unsigned char> px(static_cast<std::size_t>(w) * h * 4, 255);
@@ -127,7 +139,17 @@ int main(int argc, char** argv) {
     }
 
     // --- markers -------------------------------------------------------------------------------
-    cross(px, w, h, kHomeTx * scale, kHomeTy * scale, 6 * scale, Rgb{255, 80, 80});
+    // Villages white, strongholds red, the player's spawn a cyan cross. Three colours is enough to
+    // answer every question this map exists for: are the villages spread out, do the strongholds
+    // crowd them, and does the player wake up somewhere sensible.
+    for (const Village& v : layout.villages()) {
+        cross(px, w, h, v.tx * scale, v.ty * scale, (2 + v.tier) * scale, Rgb{255, 255, 255});
+    }
+    for (const Stronghold& s : layout.strongholds()) {
+        cross(px, w, h, s.tx * scale, s.ty * scale, 3 * scale, Rgb{240, 70, 70});
+    }
+    cross(px, w, h, layout.spawn_tx() * scale, layout.spawn_ty() * scale, 7 * scale,
+          Rgb{90, 240, 240});
 
     Image img{};
     img.data = px.data();
@@ -150,8 +172,8 @@ int main(int argc, char** argv) {
         std::printf("  %-10s %8lld  %5.1f%%\n", kRingNames[i], ring_tiles[i],
                     100.0 * static_cast<double>(ring_tiles[i]) / total);
     }
-    static const char* tn[] = {"grass", "dirt",  "water", "stone", "sand",
-                               "tree",  "snow",  "marsh", "ash"};
+    static const char* tn[] = {"grass", "dirt", "water", "stone", "sand",  "tree",
+                               "snow",  "marsh", "ash",  "path",  "buildg"};
     std::printf("\nterrain\n");
     for (int i = 0; i < static_cast<int>(Terrain::kCount); ++i) {
         std::printf("  %-6s %9lld  %5.1f%%%s\n", tn[i], terrain_tiles[i],
@@ -161,5 +183,40 @@ int main(int argc, char** argv) {
                         : "");
     }
     std::printf("\nimpassable total: %.1f%%\n", 100.0 * static_cast<double>(blocked) / total);
+
+    // --- what generation produced ----------------------------------------------------------------
+    int by_ring[kRingCount] = {};
+    int holds_by_ring[kRingCount] = {};
+    for (const Village& v : layout.villages()) ++by_ring[static_cast<int>(v.ring)];
+    for (const Stronghold& s : layout.strongholds()) ++holds_by_ring[static_cast<int>(s.ring)];
+
+    std::printf("\nsettlements: %zu villages, %zu strongholds, %zu buildings\n",
+                layout.villages().size(), layout.strongholds().size(), layout.structures().size());
+    std::printf("  %-10s %8s %12s\n", "ring", "villages", "strongholds");
+    for (int i = 0; i < kRingCount; ++i) {
+        std::printf("  %-10s %8d %12d\n", kRingNames[i], by_ring[i], holds_by_ring[i]);
+    }
+    if (const Village* home = layout.nearest_village(layout.spawn_tx(), layout.spawn_ty())) {
+        const double d = std::sqrt(
+            static_cast<double>((home->tx - layout.spawn_tx()) * (home->tx - layout.spawn_tx()) +
+                                (home->ty - layout.spawn_ty()) * (home->ty - layout.spawn_ty())));
+        std::printf("\nspawn (%d,%d) -> nearest village #%zu (%u,%u) tier %u, %.0f tiles away\n",
+                    layout.spawn_tx(), layout.spawn_ty(),
+                    static_cast<std::size_t>(home - layout.villages().data()), home->tx, home->ty,
+                    home->tier, d);
+    }
+    // Village indices run in generation (scan) order, which is spatial — so #0 is a corner of the
+    // map, not a typical village. Printing one index per ring gives `mmo_client --village N`
+    // something meaningful to point at.
+    std::printf("\none village per ring, for --village N:\n");
+    for (int i = 0; i < kRingCount; ++i) {
+        for (std::size_t j = 0; j < layout.villages().size(); ++j) {
+            const Village& v = layout.villages()[j];
+            if (static_cast<int>(v.ring) != i) continue;
+            std::printf("  %-10s #%-3zu at (%4u,%4u) tier %u, %u buildings\n", kRingNames[i], j,
+                        v.tx, v.ty, v.tier, v.count);
+            break;
+        }
+    }
     return 0;
 }

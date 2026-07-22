@@ -17,6 +17,7 @@
 
 #include "world/snapshot.hpp"
 #include "world/tiles.hpp"
+#include "world/worldgen.hpp"
 
 namespace mmo {
 
@@ -29,7 +30,7 @@ struct InputFrame {
     bool build = false;
     bool till = false;
     bool upgrade = false;
-    BuildKind build_kind = BuildKind::kWall;
+    BuildKind build_kind = BuildKind::kHearth;
     std::uint16_t cursor_tx = 0;
     std::uint16_t cursor_ty = 0;
     bool quit = false;
@@ -62,9 +63,9 @@ public:
     // number keys; the shell mirrors it into the hotbar highlight.
     [[nodiscard]] BuildKind selected_build() const;
 
-    // Spawn-camp tiles for the current map. Static for the world's lifetime (a pure function of the
-    // seed), so this is set once at start-up rather than passed every frame.
-    void set_camps(const std::vector<std::pair<int, int>>& camps);
+    // The generated world: which buildings stand where. Const for the world's lifetime, so it is
+    // handed over once at start-up rather than passed every frame.
+    void set_layout(const WorldLayout* layout);
 
     // Writes the current framebuffer to a PNG. Used by the `--shot` mode so the renderer can be
     // verified on a headless box (and in CI) instead of only by looking at it.

@@ -44,19 +44,19 @@ enum class Slot : std::uint8_t {
     kTerrainAsh,
     kTerrainAsh1,
     kTerrainAsh2,
+    kTerrainPath,
+    kTerrainPath1,
+    kTerrainPath2,
+    kTerrainBuilding,
+    kTerrainBuilding1,
+    kTerrainBuilding2,
     kCropSeedling,
     kCropGrowing,
     kCropWheatRipe,
     kCropCarrotRipe,
     kCropPumpkinRipe,
     kBuildHearth,
-    kBuildWall,
-    kBuildWallRun,
-    kBuildTurret,
     kBuildPlot,
-    kBuildFence,
-    kBuildFencePost,
-    kSpawnCamp,
     kCount,
 };
 
@@ -85,19 +85,19 @@ inline constexpr AtlasRect kAtlasRects[static_cast<int>(Slot::kCount)] = {
     {91, 37},  // kTerrainAsh
     {109, 37},  // kTerrainAsh1
     {127, 37},  // kTerrainAsh2
-    {1, 55},  // kCropSeedling
-    {19, 55},  // kCropGrowing
-    {37, 55},  // kCropWheatRipe
-    {55, 55},  // kCropCarrotRipe
-    {73, 55},  // kCropPumpkinRipe
-    {91, 55},  // kBuildHearth
-    {109, 55},  // kBuildWall
-    {127, 55},  // kBuildWallRun
-    {1, 73},  // kBuildTurret
-    {19, 73},  // kBuildPlot
-    {37, 73},  // kBuildFence
-    {55, 73},  // kBuildFencePost
-    {73, 73},  // kSpawnCamp
+    {1, 55},  // kTerrainPath
+    {19, 55},  // kTerrainPath1
+    {37, 55},  // kTerrainPath2
+    {55, 55},  // kTerrainBuilding
+    {73, 55},  // kTerrainBuilding1
+    {91, 55},  // kTerrainBuilding2
+    {109, 55},  // kCropSeedling
+    {127, 55},  // kCropGrowing
+    {1, 73},  // kCropWheatRipe
+    {19, 73},  // kCropCarrotRipe
+    {37, 73},  // kCropPumpkinRipe
+    {55, 73},  // kBuildHearth
+    {73, 73},  // kBuildPlot
 };
 
 [[nodiscard]] inline constexpr AtlasRect rect_of(Slot s) noexcept {
@@ -162,16 +162,83 @@ struct AtlasBig {
 enum class Big : std::uint8_t {
     kTreeBroad,
     kTreePine,
+    kHouseOrange,
+    kHouseCream,
+    kHouseAmber,
+    kHouseRed,
+    kHouseBlue,
+    kHouseTan,
+    kHouseWood,
+    kHutSnowA,
+    kHutSnowB,
+    kHutSnowC,
+    kRuinA,
+    kRuinB,
+    kTentA,
+    kTentB,
+    kTentC,
     kCount,
 };
 
 inline constexpr AtlasBig kAtlasBigs[static_cast<int>(Big::kCount)] = {
     {1, 415, 2, 3},  // kTreeBroad
     {1, 465, 2, 3},  // kTreePine
+    {1, 515, 4, 3},  // kHouseOrange
+    {1, 565, 4, 3},  // kHouseCream
+    {1, 615, 4, 3},  // kHouseAmber
+    {1, 665, 4, 3},  // kHouseRed
+    {1, 715, 3, 3},  // kHouseBlue
+    {1, 765, 3, 3},  // kHouseTan
+    {1, 815, 3, 3},  // kHouseWood
+    {1, 865, 3, 3},  // kHutSnowA
+    {1, 915, 3, 3},  // kHutSnowB
+    {1, 965, 3, 3},  // kHutSnowC
+    {1, 1015, 3, 3},  // kRuinA
+    {1, 1065, 3, 3},  // kRuinB
+    {1, 1115, 3, 3},  // kTentA
+    {1, 1165, 3, 3},  // kTentB
+    {1, 1215, 3, 3},  // kTentC
 };
 
 [[nodiscard]] inline constexpr const AtlasBig& big_of(Big b) noexcept {
     return kAtlasBigs[static_cast<int>(b)];
+}
+
+// --- Particle strips -----------------------------------------------------------------
+// Ambience sprites, off the tile grid: a leaf is 12x7, a raindrop 8x8. Frames run left to
+// right in one strip.
+struct AtlasFx {
+    std::int16_t x;
+    std::int16_t y;
+    std::uint8_t w;
+    std::uint8_t h;
+    std::uint8_t frames;
+};
+
+enum class Fx : std::uint8_t {
+    kLeaf,
+    kLeafPink,
+    kRain,
+    kSnow,
+    kCount,
+};
+
+inline constexpr AtlasFx kAtlasFx[static_cast<int>(Fx::kCount)] = {
+    {1, 1265, 12, 7, 6},  // kLeaf
+    {1, 1274, 12, 7, 6},  // kLeafPink
+    {1, 1283, 8, 8, 3},  // kRain
+    {1, 1293, 8, 8, 7},  // kSnow
+};
+
+[[nodiscard]] inline constexpr const AtlasFx& fx_of(Fx f) noexcept {
+    return kAtlasFx[static_cast<int>(f)];
+}
+
+// `frame` is wrapped, so a caller may pass a free-running counter.
+[[nodiscard]] inline constexpr AtlasRect fx_frame(Fx f, int frame) noexcept {
+    const AtlasFx& s = fx_of(f);
+    const int i = (frame % s.frames + s.frames) % s.frames;
+    return AtlasRect{static_cast<std::int16_t>(s.x + i * (s.w + 2)), s.y};
 }
 
 }  // namespace mmo

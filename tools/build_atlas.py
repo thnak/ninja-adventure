@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Pack the tiles this game actually uses out of three Kenney CC0 packs into one atlas.
+"""Pack the sprites this game actually uses out of the CC0 source packs into one atlas.
 
 Why an offline packer rather than loading the source sheets directly:
 
-  * **One texture bind.** The three packs have different grids (17px stride vs 16px) and only ~20
-    of their ~2000 tiles are used. Packing produces a single small texture the renderer binds once.
+  * **One texture bind.** The source sheets have different grids (17px stride vs 16px) and only a
+    few dozen of their ~5000 tiles are used. Packing produces one small texture, bound once.
   * **No magic numbers in C++.** This script emits `src/render/atlas_slots.hpp`, so the manifest
     below is the single source of truth for "which sprite is a slime". Re-arting the game is an
     edit here plus a re-run — no renderer change.
@@ -24,11 +24,13 @@ from PIL import Image
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "assets" / "_src"
 
-# (path, stride) — Kenney's roguelike sheets have a 1px gutter, the "tiny" tilemaps do not.
+# (path, stride) — Kenney's roguelike sheet has a 1px gutter; Ninja Adventure's tilesets do not.
+#
+# Tiny Town and Tiny Dungeon used to be here (walls, towers, plots, creatures). They are gone: the
+# first world is entirely Ninja Adventure now, and a sheet listed here is loaded eagerly and fails
+# the build if missing, so an unused entry is a liability rather than a convenience.
 SHEETS = {
     "RL": (SRC / "roguelike/Spritesheet/roguelikeSheet_transparent.png", 17),
-    "TT": (SRC / "tinytown/Tilemap/tilemap_packed.png", 16),
-    "TD": (SRC / "tinydungeon/Tilemap/tilemap_packed.png", 16),
     # Ninja Adventure tilesets. No gutter, so stride 16. Fill tiles were located by scanning every
     # sheet for low-variance (flat) tiles and matching mean colour against the terrain palette —
     # eyeballing 500 tiles per sheet is not a method.
@@ -38,15 +40,22 @@ SHEETS = {
     "NRelief": (SRC / "ninja/Backgrounds/Tilesets/TilesetRelief.png", 16),
     "NIntFloor": (SRC / "ninja/Backgrounds/Tilesets/Interior/TilesetInteriorFloor.png", 16),
     "NTree": (SRC / "ninja/Backgrounds/Tilesets/TilesetNature.png", 16),
+    # Whole buildings. Every rectangle taken out of these was looked at first, magnified, with a
+    # tile grid over it — see tools/verify_structures.py and the note above BIG_MANIFEST.
+    "NHouse": (SRC / "ninja/Backgrounds/Tilesets/TilesetHouse.png", 16),
+    "NCamp": (SRC / "ninja/Backgrounds/Tilesets/tileset_camp.png", 16),
+    "NVillage": (SRC / "ninja/Backgrounds/Tilesets/TilesetVillageAbandoned.png", 16),
+    "NElem": (SRC / "ninja/Backgrounds/Tilesets/TilesetElement.png", 16),
+    "NField": (SRC / "ninja/Backgrounds/Tilesets/TilesetField.png", 16),
 }
 
 TILE = 16
 PAD = 1  # extruded border, see module docstring
 
-# Tiny Dungeon draws every creature on top of an opaque dark silhouette — the dungeon floor showing
-# through. On grass that reads as a mud blob stuck to the sprite, so it is keyed out at pack time.
-# (Verified by compositing both variants over the grass tile before choosing.)
-KEY_COLOR = {"TD": (63, 38, 49, 255)}
+# Per-sheet colour to punch out to transparency. Empty now that Tiny Dungeon is gone (its creatures
+# were drawn on an opaque dungeon-floor silhouette that read as a mud blob on grass), kept because
+# the mechanism is one line and the next pack may need it.
+KEY_COLOR: dict[str, tuple[int, int, int, int]] = {}
 
 # slot name -> (sheet, col, row).  Order defines the generated enum order.
 MANIFEST = [
@@ -80,6 +89,22 @@ MANIFEST = [
     ("TerrainAsh", "NIntFloor", 16, 13),
     ("TerrainAsh1", "NIntFloor", 19, 13),
     ("TerrainAsh2", "NIntFloor", 16, 16),
+    # Road and village square. These are the CENTRE cells of the brown-dirt autotile set in
+    # TilesetFloor (cols 14-20, rows 7-11) — the interior of a path, with no grass edge on any side.
+    # The set's other cells all carry grass on one or more edges and would show a hard seam wherever
+    # two path tiles met.
+    #
+    # The RED set two columns to the left (cols 3-9) is the same shape and was the first pick, but
+    # roads run through every ring: a red clay road is fine on grass and looks like a wound across a
+    # snowfield. Neutral brown is the only one of the two that works everywhere the road goes.
+    ("TerrainPath", "NFloor", 19, 8),
+    ("TerrainPath1", "NFloor", 19, 9),
+    ("TerrainPath2", "NFloor", 16, 8),
+    # A building's footprint is drawn as PATH and then covered by the building's own sprite, so
+    # kBuilding needs a base tile that reads as trodden ground under an overhanging roof.
+    ("TerrainBuilding", "NFloor", 19, 8),
+    ("TerrainBuilding1", "NFloor", 19, 9),
+    ("TerrainBuilding2", "NFloor", 16, 8),
     # --- overlays (transparent, drawn over the base layer) ---
     # Ninja Adventure's trees are two tiles as well: canopy on top of trunk.
     # Trees are NOT here — they are 2x3 multi-tile sprites, see BIG_MANIFEST.
@@ -90,23 +115,15 @@ MANIFEST = [
     ("CropCarrotRipe",   "RL", 43, 23),
     ("CropPumpkinRipe",  "RL", 41, 23),
     # --- buildings ---
-    ("BuildHearth",      "RL", 54,  6),   # campfire — the player's home fire
-    # Tiny Town's castle wall is a 3x3 nine-slice. An earlier version used its TOP-LEFT CORNER for
-    # every wall tile, so a horizontal run repeated a left edge over and over. A one-tile-thick,
-    # free-form player wall cannot use a nine-slice at all, so instead:
-    #   WallRun      top-middle: crenellations along the length, no side edges. Drawn unrotated for
-    #                a horizontal run and rotated 90 degrees for a vertical one.
-    #   Wall         plain brick, no directional edges - correct for an isolated tile or a junction.
-    ("BuildWall",        "TT",  6, 10),
-    ("BuildWallRun",     "TT",  1,  8),
-    ("BuildTurret",      "TT", 10,  9),
-    ("BuildPlot",        "TT",  7,  3),
-    # Fence is a directional set too, handled the same way as the wall: a vertical bar rotated for
-    # horizontal runs, with the cross piece for isolated posts and junctions.
-    ("BuildFence",       "TT", 11,  4),
-    ("BuildFencePost",   "TT",  9,  3),
-    # Where a wave comes out of. One tile, self-contained, unmistakably "things arrive here".
-    ("SpawnCamp",        "RL", 50,  9),
+    # Only two, and that is the point. Walls, towers and fences used to be here as single Kenney
+    # tiles; they are gone because this pack has no single-tile version of any of them, and because
+    # the game now places whole structures instead (see BIG_MANIFEST and GAME.md §6b).
+    # A fire pit: ring of stones, logs inside. One tile, self-contained.
+    # (TilesetElement (0,4) was tried first on the strength of its thumbnail and is a MARKET STALL
+    # with an awning — which is exactly the failure mode tools/verify_structures.py exists to
+    # catch, and which slipped through because a 2x1 crop was not put through it.)
+    ("BuildHearth",      "NCamp",  4,  4),
+    ("BuildPlot",        "NField", 3,  1),   # ochre tilled field, the interior cell of the set
     # NOTE: creatures and the player are NOT here — they are animation sheets, see ANIM_MANIFEST.
 ]
 
@@ -115,10 +132,50 @@ MANIFEST = [
 # the "cut with the wrong margin" artefact it looks like: you get the left half of a canopy sitting
 # on grass. These are packed as one contiguous region and drawn as a single quad, anchored so the
 # trunk sits on its own tile and the canopy overhangs the tiles above.
+# The house entries below are the reason this list exists at all. This pack has no single-tile wall
+# and no single-tile tower — TilesetHouse's 759 tiles are every one of them a SLICE — so a building
+# can only be drawn whole. Every rectangle here was reviewed at 6x with a tile grid over it
+# (tools/verify_structures.py) before it was written down, because a footprint that is one column
+# too wide is only wrong at its edge: you get a house with a strip of its neighbour's roof attached,
+# which no per-tile contact sheet will ever show you.
+#
+# ORDER MATTERS from `HouseOrange` onward: it must match `StructureKind` in world/worldgen.hpp
+# one for one, so the renderer maps a structure to a sprite by adding an offset instead of by
+# maintaining a second switch that can drift out of step. There is a static_assert on the count.
 BIG_MANIFEST = [
     # (name, sheet, col, row, tiles wide, tiles tall)
     ("TreeBroad", "NTree", 5, 2, 2, 3),
     ("TreePine",  "NTree", 1, 2, 2, 3),
+    # --- StructureKind order starts here ---
+    ("HouseOrange", "NHouse",  0,  0, 4, 3),
+    ("HouseCream",  "NHouse",  4,  0, 4, 3),
+    ("HouseAmber",  "NHouse",  8,  0, 4, 3),
+    ("HouseRed",    "NHouse", 12,  0, 4, 3),
+    ("HouseBlue",   "NHouse", 16,  0, 3, 3),
+    ("HouseTan",    "NHouse", 23,  0, 3, 3),
+    ("HouseWood",   "NHouse", 26,  0, 3, 3),
+    ("HutSnowA",    "NHouse",  0, 11, 3, 3),
+    ("HutSnowB",    "NHouse",  3, 11, 3, 3),
+    ("HutSnowC",    "NHouse",  6, 11, 3, 3),
+    ("RuinA",       "NVillage", 11, 0, 3, 3),
+    ("RuinB",       "NVillage", 11, 3, 3, 3),
+    ("TentA",       "NCamp",  4,  0, 3, 3),
+    ("TentB",       "NCamp",  7,  0, 3, 3),
+    ("TentC",       "NCamp", 10,  0, 3, 3),
+]
+
+# --- Particle strips ---------------------------------------------------------
+# Ambience: drifting leaves, rain, snow. These are NOT on the 16px grid — a leaf is 12x7 and a
+# raindrop 8x8 — so they cannot go through the tile packer, which is why they get their own pass.
+#
+# Frame counts were read off the images, not guessed: each file is one horizontal strip, so
+# `frames = width / frame_w` and the split is verified by the assert in the packing loop below.
+FX_MANIFEST = [
+    # (name, path relative to the ninja pack, frame width, frame height, frames)
+    ("Leaf",     "FX/Particle/Leaf.png",     12, 7, 6),
+    ("LeafPink", "FX/Particle/LeafPink.png", 12, 7, 6),
+    ("Rain",     "FX/Particle/Rain.png",      8, 8, 3),
+    ("Snow",     "FX/Particle/Snow.png",      8, 8, 7),
 ]
 
 COLS = 8  # atlas width in cells; keeps the texture small and squarish
@@ -251,6 +308,34 @@ def main() -> int:
         bigs.append((name, PAD, anim_y + PAD, wt, ht))
         anim_y += bh + 2 * PAD
 
+    # --- particle strips, stacked below the structures ---------------------------------------
+    # No extrusion here on purpose: a particle is drawn at a fixed size in SCREEN space, never
+    # sampled at a fractional texture coordinate, so it has no seam to bleed. Padding between
+    # frames is enough.
+    fxs = []
+    for name, rel, fw, fh, frames in FX_MANIFEST:
+        path = SRC / "ninja" / rel
+        if not path.exists():
+            print(f"missing particle sheet: {path}", file=sys.stderr)
+            return 1
+        sheet = Image.open(path).convert("RGBA")
+        if sheet.width != fw * frames or sheet.height < fh:
+            print(f"{name}: {path.name} is {sheet.width}x{sheet.height}, expected "
+                  f"{fw * frames}x{fh} ({frames} frames of {fw}x{fh})", file=sys.stderr)
+            return 1
+        strip_w = frames * (fw + 2 * PAD)
+        new_h = anim_y + fh + 2 * PAD
+        if new_h > atlas.height or strip_w > atlas.width:
+            grown = Image.new("RGBA", (max(strip_w, atlas.width), max(new_h, atlas.height)),
+                              (0, 0, 0, 0))
+            grown.paste(atlas, (0, 0))
+            atlas = grown
+        for f in range(frames):
+            frame = sheet.crop((f * fw, 0, f * fw + fw, fh))
+            atlas.paste(frame, (f * (fw + 2 * PAD) + PAD, anim_y + PAD))
+        fxs.append((name, PAD, anim_y + PAD, fw, fh, frames))
+        anim_y += fh + 2 * PAD
+
     out_png = ROOT / "assets" / "atlas.png"
     atlas.save(out_png)
 
@@ -360,13 +445,48 @@ def main() -> int:
         "    return kAtlasBigs[static_cast<int>(b)];",
         "}",
         "",
+        "// --- Particle strips -----------------------------------------------------------------",
+        "// Ambience sprites, off the tile grid: a leaf is 12x7, a raindrop 8x8. Frames run left to",
+        "// right in one strip.",
+        "struct AtlasFx {",
+        "    std::int16_t x;",
+        "    std::int16_t y;",
+        "    std::uint8_t w;",
+        "    std::uint8_t h;",
+        "    std::uint8_t frames;",
+        "};",
+        "",
+        "enum class Fx : std::uint8_t {",
+    ]
+    lines += [f"    k{name}," for name, _, _, _, _, _ in fxs]
+    lines += [
+        "    kCount,",
+        "};",
+        "",
+        "inline constexpr AtlasFx kAtlasFx[static_cast<int>(Fx::kCount)] = {",
+    ]
+    lines += [f"    {{{x}, {y}, {w}, {h}, {n}}},  // k{name}" for name, x, y, w, h, n in fxs]
+    lines += [
+        "};",
+        "",
+        "[[nodiscard]] inline constexpr const AtlasFx& fx_of(Fx f) noexcept {",
+        "    return kAtlasFx[static_cast<int>(f)];",
+        "}",
+        "",
+        "// `frame` is wrapped, so a caller may pass a free-running counter.",
+        "[[nodiscard]] inline constexpr AtlasRect fx_frame(Fx f, int frame) noexcept {",
+        "    const AtlasFx& s = fx_of(f);",
+        "    const int i = (frame % s.frames + s.frames) % s.frames;",
+        "    return AtlasRect{static_cast<std::int16_t>(s.x + i * (s.w + 2)), s.y};",
+        "}",
+        "",
         "}  // namespace mmo",
         "",
     ]
     header.write_text("\n".join(lines))
 
     print(f"{out_png}  {atlas.width}x{atlas.height}  "
-          f"({len(entries)} tiles, {len(anims)} anims, {len(bigs)} big)")
+          f"({len(entries)} tiles, {len(anims)} anims, {len(bigs)} big, {len(fxs)} fx)")
     print(f"{header}")
     return 0
 

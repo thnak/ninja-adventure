@@ -51,20 +51,36 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
     WorldStatus* status = nullptr;
     quark::ActorRef<PlayerActor> player{};
     const FlowField* flow = nullptr;  // read-only, never written after bring-up (see flow_field.hpp)
-    // Fallback target when a mob is somewhere the flow field does not cover. Once world generation
-    // lands this becomes "the nearest settlement"; today it is the map centre.
+    // Fallback target when a mob is somewhere the flow field does not cover (an unreachable pocket,
+    // an island): the settlement nearest to this chunk, resolved once at bring-up.
     float home_x = 0.0f;
     float home_y = 0.0f;
 
     // ================================ handlers ====================================================
 
+    // SIMULATION LOD. At 1024 chunk actors, the great majority hold nothing at all at any moment —
+    // no mobs, no crops, no buildings, no player. Ticking them is not expensive (an empty
+    // `Sequential` handler over three empty vectors is a few hundred nanoseconds), but PUBLISHING
+    // them is: every publish allocates a ChunkView and copies a 1 KB terrain array, and doing that
+    // 1024 times per tick is ~10 MB/s of pure garbage for frames nobody is looking at.
+    //
+    // So an idle chunk still ticks — the tick is the world clock and skipping it would let chunks
+    // drift apart — but it republishes only every `kIdlePublish` ticks. Its view cannot go stale in
+    // any way that matters, because "nothing in it changed" is exactly the condition being tested.
+    static constexpr std::uint64_t kIdlePublish = 32;
+
     void handle(const Tick& t) noexcept {
         tick_ = t.tick;
         world_ms_ = t.world_ms;
-        Rng rng(chunk_key(coord) * 0x9E37'79B9'7F4A'7C15ull + t.tick);
 
+        const bool idle = mobs_.empty() && crops_.empty() && buildings_.empty();
+        if (idle) {
+            if (tick_ % kIdlePublish == 0) publish();
+            return;
+        }
+
+        Rng rng(chunk_key(coord) * 0x9E37'79B9'7F4A'7C15ull + t.tick);
         grow_crops();
-        fire_turrets(rng);
         step_mobs(rng);
         publish();
     }
@@ -158,8 +174,9 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         }
     }
 
-    // Base expansion. The starting apron is baked into the terrain FUNCTION; everything the player
-    // reclaims later is this chunk's own overlay, written straight into the terrain cache.
+    // Base expansion. Farmland is no longer given to anyone — there is no starting apron any more
+    // (GAME.md §6b) — so every tile of soil in the world was tilled by a player, and that is this
+    // chunk's own overlay, written straight into the terrain cache.
     //
     // Safe to keep out of `terrain_of` because tilling never changes WALKABILITY — dirt and grass
     // are both passable — so a neighbouring chunk (or another node) computing pure terrain for
@@ -221,6 +238,12 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         }
     }
 
+    // Publish once at bring-up, before the engine starts. Required by the LOD rule above: an idle
+    // chunk republishes only every 32nd tick, so without a first publish the renderer would have
+    // nothing to draw for that chunk's terrain until tick 32 — a visible three-second hole in the
+    // world on the first frames.
+    void publish_now() noexcept { publish(); }
+
     void add_building(std::uint16_t tx, std::uint16_t ty, BuildKind k) noexcept {
         Building b{};
         b.tx = tx;
@@ -264,39 +287,9 @@ private:
         }
     }
 
-    // --- turrets ---------------------------------------------------------------------------------
-    // A turret only sees mobs inside its own chunk. That is a real limitation, and it is the honest
-    // one to ship first: cross-chunk targeting means a chunk reading another chunk's state, which is
-    // exactly the shared-mutable-state coupling the actor model is here to prevent. The fix, when
-    // it's needed, is for chunks to publish a threat summary to their neighbours as a message.
-    void fire_turrets(Rng& rng) noexcept {
-        (void)rng;
-        for (Building& b : buildings_) {
-            if (b.kind != BuildKind::kTurret) continue;
-            if (b.cooldown > 0) {
-                --b.cooldown;
-                continue;
-            }
-            const float bx = static_cast<float>(b.tx) + 0.5f;
-            const float by = static_cast<float>(b.ty) + 0.5f;
-            const float range = turret_range(b.level);
-            Mob* best = nullptr;
-            float best_d2 = range * range;
-            for (Mob& m : mobs_) {
-                const float dx = m.x - bx;
-                const float dy = m.y - by;
-                const float d2 = dx * dx + dy * dy;
-                if (d2 <= best_d2) {
-                    best_d2 = d2;
-                    best = &m;
-                }
-            }
-            if (best == nullptr) continue;
-            best->hp = static_cast<std::int16_t>(best->hp - turret_damage(b.level));
-            b.cooldown = turret_cooldown(b.level);
-        }
-        reap_dead_mobs();
-    }
+    // (Turret firing used to live here. Turrets are gone with the rest of the per-tile buildings —
+    // there is no single-tile tower art in this pack, so a "turret" was a Kenney sprite pasted into
+    // a Ninja Adventure world. What killed mobs is now the player's problem, which is P2.)
 
     void reap_dead_mobs() noexcept {
         std::uint32_t killed = 0;

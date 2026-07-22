@@ -9,6 +9,7 @@
 //      this would not link.
 //
 // Run:  taskset -c 0-3 build/mmo_sim [ticks]
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -55,139 +56,131 @@ int main(int argc, char** argv) {
 
     Check chk;
 
-    // --- Spawn camps: where the monsters come from --------------------------------------------
+    // --- What generation produced ----------------------------------------------------------------
+    // Checked before anything else, because every other property in this file now depends on it: no
+    // villages means no flow-field targets, no raid destinations and nowhere for the player to walk.
     const auto home = kOverworld;
-    const auto camps = World::camps(home);
-    std::printf("spawn camps (%d fixed lanes, not the whole rim):\n", kSpawnCamps);
-    for (int i = 0; i < kSpawnCamps; ++i) {
-        const auto [cx, cy] = camps[static_cast<std::size_t>(i)];
-        std::printf("  camp %d at (%3d,%3d)  chunk (%u,%u)\n", i, cx, cy,
-                    chunk_of(home, static_cast<float>(cx), static_cast<float>(cy)).cx,
-                    chunk_of(home, static_cast<float>(cx), static_cast<float>(cy)).cy);
-    }
-    std::printf("\n");
+    const WorldLayout& layout = world.layout();
 
-    // --- Farming, during daylight ----------------------------------------------------------------
-    // Plant a 6x6 block of wheat on the tilled apron around the core.
-    int planted = 0;
-    for (int dy = 1; dy <= 6; ++dy) {
-        for (int dx = 1; dx <= 6; ++dx) {
-            world.plant(home, static_cast<std::uint16_t>(kHomeTx + dx),
-                        static_cast<std::uint16_t>(kHomeTy + dy), CropKind::kWheat, 0);
-            ++planted;
-        }
+    int villages_by_ring[kRingCount] = {};
+    int holds_by_ring[kRingCount] = {};
+    for (const Village& v : layout.villages()) ++villages_by_ring[static_cast<int>(v.ring)];
+    for (const Stronghold& s : layout.strongholds()) ++holds_by_ring[static_cast<int>(s.ring)];
+
+    static const char* kRingNames[kRingCount] = {"Meadow", "Forest", "Wetland", "Snow", "Wasteland"};
+    std::printf("world generation: %zu villages, %zu strongholds, %zu buildings\n",
+                layout.villages().size(), layout.strongholds().size(), layout.structures().size());
+    for (int i = 0; i < kRingCount; ++i) {
+        std::printf("  %-10s %2d villages  %2d strongholds\n", kRingNames[i], villages_by_ring[i],
+                    holds_by_ring[i]);
     }
 
-    // --- Building, paid for out of the trusted inventory ----------------------------------------
-    const PlayerView before_build = world.player_view();
-    int walls = 0;
-    for (int dx = -8; dx <= 8; ++dx) {
-        if (world.build_at(home, static_cast<std::uint16_t>(kHomeTx + dx),
-                           static_cast<std::uint16_t>(kHomeTy - 8), BuildKind::kWall)) {
-            ++walls;
-        }
+    chk.expect(layout.villages().size() >= 20, "generation placed a plausible number of villages");
+    chk.expect(!layout.strongholds().empty(), "generation placed strongholds");
+    chk.expect(!layout.structures().empty(), "villages actually have buildings in them");
+    // The difficulty gradient has to be visible in the LAYOUT, not only in the terrain palette:
+    // the outer map must be more hostile per settlement than the middle of it. This is the one
+    // property that would silently stop being true if `stronghold_chance` were mis-edited.
+    chk.expect(holds_by_ring[static_cast<int>(Ring::kWasteland)] +
+                       holds_by_ring[static_cast<int>(Ring::kSnow)] >
+                   holds_by_ring[static_cast<int>(Ring::kMeadow)],
+               "strongholds get denser toward the rim");
+
+    // Every building footprint must be impassable and every road walkable — the two claims the
+    // renderer and the flow field both take on trust.
+    int solid = 0;
+    int walkable_paths = 0;
+    for (const Structure& s : layout.structures()) {
+        if (terrain_of(kWorldSeed, home, s.tx, s.ty) == Terrain::kBuilding) ++solid;
     }
-    int turrets = 0;
-    for (int dx = -6; dx <= 6; dx += 4) {
-        if (world.build_at(home, static_cast<std::uint16_t>(kHomeTx + dx),
-                           static_cast<std::uint16_t>(kHomeTy - 6), BuildKind::kTurret)) {
-            ++turrets;
-        }
+    for (const Village& v : layout.villages()) {
+        if (is_walkable(terrain_of(kWorldSeed, home, v.tx, v.ty))) ++walkable_paths;
     }
-    // Cheap fencing to close the flanks — weaker than a wall but it still blocks, which is the
-    // whole point of the perimeter now that buildings are solid.
-    int fences = 0;
-    for (int dy = -7; dy <= 7; ++dy) {
-        for (int dx : {-8, 8}) {
-            if (world.build_at(home, static_cast<std::uint16_t>(kHomeTx + dx),
-                               static_cast<std::uint16_t>(kHomeTy + dy), BuildKind::kFence)) {
-                ++fences;
-            }
-        }
-    }
-    const PlayerView after_build = world.player_view();
+    chk.expect(solid == static_cast<int>(layout.structures().size()),
+               "every structure's tile reads as solid through terrain_of");
+    chk.expect(walkable_paths == static_cast<int>(layout.villages().size()),
+               "every village square is walkable");
 
-    std::printf("build phase: planted=%d walls=%d turrets=%d fences=%d\n", planted, walls, turrets,
-                fences);
-    std::printf("  wood %d -> %d, stone %d -> %d  (debited by the TRUSTED PlayerActor)\n\n",
-                before_build.items[static_cast<int>(ItemKind::kWood)],
-                after_build.items[static_cast<int>(ItemKind::kWood)],
-                before_build.items[static_cast<int>(ItemKind::kStone)],
-                after_build.items[static_cast<int>(ItemKind::kStone)]);
+    // --- The opening: you wake in open country and walk ------------------------------------------
+    const PlayerView spawn = world.player_view();
+    const Village* home_village = layout.nearest_village(static_cast<int>(spawn.x),
+                                                         static_cast<int>(spawn.y));
+    const double walk = home_village == nullptr ? 0.0
+                                                : std::sqrt(std::pow(home_village->tx - spawn.x, 2) +
+                                                            std::pow(home_village->ty - spawn.y, 2));
+    std::printf("\nspawn: (%.0f,%.0f), nearest village %.0f tiles away, inventory w%d s%d\n",
+                static_cast<double>(spawn.x), static_cast<double>(spawn.y), walk,
+                spawn.items[static_cast<int>(ItemKind::kWood)],
+                spawn.items[static_cast<int>(ItemKind::kStone)]);
+    chk.expect(is_walkable(terrain_of(kWorldSeed, home, static_cast<int>(spawn.x),
+                                      static_cast<int>(spawn.y))),
+               "the player does not wake up inside a lake or a wall");
+    chk.expect(walk > 12.0, "the player wakes AWAY from the village, not in it");
 
-    chk.expect(walls > 0, "at least one wall was placed");
-    chk.expect(turrets > 0, "at least one turret was placed");
-    chk.expect(after_build.items[static_cast<int>(ItemKind::kWood)] <
-                   before_build.items[static_cast<int>(ItemKind::kWood)],
-               "placing walls debited wood");
+    // --- Farming, and the fact that nothing is given to you --------------------------------------
+    // There is no starting apron any more, so planting is refused until the player tills — which is
+    // exactly the property to assert, because the old test could not tell tilling from the free
+    // farmland it was standing on.
+    const std::uint16_t farm_tx = static_cast<std::uint16_t>(spawn.x);
+    const std::uint16_t farm_ty = static_cast<std::uint16_t>(spawn.y);
+    const ChunkCoord farm_chunk =
+        chunk_of(home, static_cast<float>(farm_tx), static_cast<float>(farm_ty));
 
-    // --- Base expansion: reclaim ground beyond the starting apron --------------------------------
-    // The apron is baked into the terrain function; anything past it must be tilled first, which is
-    // the chunk's own overlay. Planting on untilled grass has to fail.
-    const ChunkCoord core_chunk_c =
-        chunk_of(home, static_cast<float>(kHomeTx), static_cast<float>(kHomeTy));
-    const std::uint16_t out_tx = static_cast<std::uint16_t>(kHomeTx + kFarmRadius + 2);
-    const std::uint16_t out_ty = static_cast<std::uint16_t>(kHomeTy + kFarmRadius + 2);
-
-    world.plant(home, out_tx, out_ty, CropKind::kCarrot, 0);
+    world.plant(home, farm_tx, farm_ty, CropKind::kWheat, 0);
     world.sync_world();
-    const std::uint32_t crops_before_till = world.chunk_stats(core_chunk_c).crops;
+    const std::uint32_t crops_untilled = world.chunk_stats(farm_chunk).crops;
 
     int tilled = 0;
     for (int dy = 0; dy < 3; ++dy) {
         for (int dx = 0; dx < 3; ++dx) {
-            if (world.till(home, static_cast<std::uint16_t>(out_tx + dx),
-                           static_cast<std::uint16_t>(out_ty + dy))) {
+            if (world.till(home, static_cast<std::uint16_t>(farm_tx + dx),
+                           static_cast<std::uint16_t>(farm_ty + dy))) {
                 ++tilled;
             }
         }
     }
     world.sync_world();
-    world.plant(home, out_tx, out_ty, CropKind::kCarrot, 0);
-    world.sync_world();
-    const ChunkStats after_till = world.chunk_stats(core_chunk_c);
-
-    std::printf("base expansion: tilled %d tiles beyond the apron\n", tilled);
-    std::printf("  crops before tilling %u -> after %u  (planting on untilled grass is refused)\n\n",
-                crops_before_till, after_till.crops);
-    chk.expect(tilled > 0, "tilling reclaimed ground outside the starting apron");
-    chk.expect(after_till.tilled > 0, "the chunk recorded its tilled overlay");
-    chk.expect(after_till.crops > crops_before_till, "a crop could be planted on reclaimed ground");
-
-    // --- Upgrades --------------------------------------------------------------------------------
-    // Measure the chunk that actually OWNS the turrets. They sit at kHomeTx-6 = tile 122, which is
-    // chunk 3, not the core's chunk 4 — a base a dozen tiles across already straddles a chunk
-    // border, which is exactly the property the cluster demo depends on.
-    const ChunkCoord turret_chunk = chunk_of(home, static_cast<float>(kHomeTx - 6),
-                                             static_cast<float>(kHomeTy - 6));
-    const ChunkStats pre_up = world.chunk_stats(turret_chunk);
-    int upgrades = 0;
-    for (int dx = -6; dx <= 6; dx += 4) {
-        // Turret at level 1 -> 2 -> 3.
-        for (std::uint8_t lvl = 1; lvl < kMaxLevel; ++lvl) {
-            if (world.upgrade(home, static_cast<std::uint16_t>(kHomeTx + dx),
-                              static_cast<std::uint16_t>(kHomeTy - 6), BuildKind::kTurret, lvl)) {
-                ++upgrades;
-            }
+    int planted = 0;
+    for (int dy = 0; dy < 3; ++dy) {
+        for (int dx = 0; dx < 3; ++dx) {
+            world.plant(home, static_cast<std::uint16_t>(farm_tx + dx),
+                        static_cast<std::uint16_t>(farm_ty + dy), CropKind::kWheat, 0);
+            ++planted;
         }
     }
     world.sync_world();
-    const ChunkStats post_up = world.chunk_stats(turret_chunk);
-    std::printf("upgrades: %d applied in chunk (%u,%u); summed building levels %u -> %u\n\n",
-                upgrades, turret_chunk.cx, turret_chunk.cy, pre_up.building_levels,
-                post_up.building_levels);
-    chk.expect(upgrades > 0, "at least one upgrade was paid for and applied");
-    chk.expect(post_up.building_levels > pre_up.building_levels,
-               "upgrades raised the buildings' levels");
+    const ChunkStats after_till = world.chunk_stats(farm_chunk);
 
-    // Overspend must be refused atomically: keep buying turrets until the inventory says no, and
-    // prove the balance never went negative. Runs LAST because it deliberately drains the player —
-    // an earlier version ran it before the upgrade test and left nothing to pay for an upgrade,
-    // which read as "upgrades are broken" when the feature was fine.
+    std::printf("\nfarming: tilled %d tiles, planted %d\n", tilled, planted);
+    std::printf("  crops on untilled ground %u -> after tilling %u\n", crops_untilled,
+                after_till.crops);
+    chk.expect(crops_untilled == 0, "planting on wild ground is refused — nothing is given to you");
+    chk.expect(tilled > 0, "the player could reclaim ground");
+    chk.expect(after_till.tilled > 0, "the chunk recorded its tilled overlay");
+    chk.expect(after_till.crops > 0, "a crop could be planted on reclaimed ground");
+
+    // --- Building, paid for out of the trusted inventory ------------------------------------------
+    const PlayerView before_build = world.player_view();
+    const bool lit = world.build_at(home, static_cast<std::uint16_t>(farm_tx + 4),
+                                    static_cast<std::uint16_t>(farm_ty), BuildKind::kHearth);
+    const PlayerView after_build = world.player_view();
+    std::printf("\nhearth: %s;  stone %d -> %d  (debited by the TRUSTED PlayerActor)\n",
+                lit ? "lit" : "could not afford",
+                before_build.items[static_cast<int>(ItemKind::kStone)],
+                after_build.items[static_cast<int>(ItemKind::kStone)]);
+    chk.expect(lit, "the player could afford a hearth");
+    chk.expect(after_build.items[static_cast<int>(ItemKind::kStone)] <
+                   before_build.items[static_cast<int>(ItemKind::kStone)],
+               "lighting a hearth debited stone");
+
+    // Overspend must be refused atomically: keep building until the inventory says no, and prove
+    // the balance never went negative. Runs LAST because it deliberately drains the player — an
+    // earlier ordering left nothing to pay for the test above, which read as "building is broken"
+    // when the feature was fine.
     bool minted = true;
     for (int i = 0; i < 500; ++i) {
-        if (!world.build_at(home, static_cast<std::uint16_t>(kHomeTx - 10),
-                            static_cast<std::uint16_t>(kHomeTy + 10 + i % 5), BuildKind::kTurret)) {
+        if (!world.build_at(home, static_cast<std::uint16_t>(farm_tx + 8),
+                            static_cast<std::uint16_t>(farm_ty + i % 5), BuildKind::kHearth)) {
             minted = false;
             break;
         }
@@ -227,27 +220,22 @@ int main(int argc, char** argv) {
     // --- Verify ----------------------------------------------------------------------------------
     std::printf("\nverification\n");
 
-    const ChunkCoord core_chunk = core_chunk_c;
-    const ChunkStats core_stats = world.chunk_stats(core_chunk);
-    std::printf("  core chunk (%u,%u): crops=%u ripe=%u buildings=%u tick=%llu\n", core_chunk.cx,
-                core_chunk.cy, core_stats.crops, core_stats.ripe, core_stats.buildings,
-                static_cast<unsigned long long>(core_stats.tick));
+    const ChunkStats farm_stats = world.chunk_stats(farm_chunk);
+    std::printf("  home chunk (%u,%u): crops=%u ripe=%u buildings=%u tick=%llu\n", farm_chunk.cx,
+                farm_chunk.cy, farm_stats.crops, farm_stats.ripe, farm_stats.buildings,
+                static_cast<unsigned long long>(farm_stats.tick));
 
     chk.expect(saw_night, "the day/night cycle reached night");
-    chk.expect(world.status().wave.load(std::memory_order_relaxed) > 0, "at least one wave spawned");
-    chk.expect(peak_mobs > 0, "mobs were spawned and are alive in chunks");
+    chk.expect(world.status().wave.load(std::memory_order_relaxed) > 0, "at least one night passed");
+    chk.expect(peak_mobs > 0, "a raid came out of a stronghold");
     chk.expect(saw_migration, "mobs migrated across chunk (actor) boundaries");
-    chk.expect(core_stats.tick >= static_cast<std::uint64_t>(ticks),
+    chk.expect(farm_stats.tick >= static_cast<std::uint64_t>(ticks),
                "every chunk received every tick (no dropped fan-out)");
-    // Buildings are solid, so the perimeter is load-bearing: mobs have to chew through it instead
-    // of walking past. There is deliberately no global "core HP" to assert on any more (GAME.md §0
-    // — no single loss condition), so the property checked is the one that actually matters: the
-    // player's buildings are still standing.
-    chk.expect(core_stats.buildings > 0, "the perimeter held — buildings survived wave 1");
+    chk.expect(farm_stats.buildings > 0, "the player's hearth is still standing");
 
-    // Crops planted at t=0 with a 20 s growth time must be ripe well before the run ends.
+    // Crops planted with a 20 s growth time must be ripe well before the run ends.
     if (ticks >= 300) {
-        chk.expect(core_stats.ripe > 0, "wheat planted at t=0 ripened");
+        chk.expect(farm_stats.ripe > 0, "wheat planted early in the run ripened");
     }
 
     // Mob conservation: everything that spawned is either alive somewhere or counted as killed.

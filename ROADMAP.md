@@ -74,7 +74,7 @@ bản đồ có hồn và để combat biết mình đang cân bằng cho thế 
 
 ---
 
-## P1 — Bộ khung thế giới — **đang làm**
+## P1 — Bộ khung thế giới — **XONG**
 
 Dựng sân khấu thật, trước khi tune bất cứ thứ gì lên trên nó.
 
@@ -85,46 +85,54 @@ Dựng sân khấu thật, trước khi tune bất cứ thứ gì lên trên nó
 | 5 vòng đồng tâm + 3 địa hình mới (tuyết, đầm lầy, tro) | ✅ |
 | Gỡ `kMapCount = 3` → một mặt đất `kOverworld` | ✅ |
 | Thống nhất art: **địa hình + cây** sang Ninja Adventure | ✅ 9 loại địa hình, cây 2 mảnh mọc trên nền đúng vòng |
-| Thống nhất art: **công trình** (tường, tháp, rào, lò sưởi, luống) | ⬜ vẫn còn Kenney |
+| **Thế giới đầu tiên 100% Ninja Adventure** | ✅ không còn ô Kenney nào trong world |
 | Ảnh từng quần xã (`--ring N`) | ✅ `docs/biomes/` |
-| Worldgen đặt làng / cứ điểm / cổng / mỏ / đường | ⬜ |
-| BFS đa nguồn + `PathfieldActor` debounce | ⬜ |
-| LOD chunk (10 Hz / 1 Hz / ngủ) | ⬜ |
-| Phương tiện di chuyển | ⬜ |
+| **Worldgen đặt làng / cứ điểm / đường** | ✅ 49 làng, 23 cứ điểm, 493 công trình, `src/world/worldgen.hpp` |
+| **Gỡ nông trại khởi đầu + tường/tháp/rào đặt-từng-ô** | ✅ `BuildKind` còn 2 giá trị |
+| **Lớp không khí**: lá bay / mưa / tuyết theo vòng | ✅ 0 state, 0 message |
+| **BFS đa nguồn** (tới làng gần nhất) | ✅ một lượt quét, không phải một field mỗi làng |
+| **LOD chunk** | ✅ chunk rỗng chỉ publish 32 tick một lần |
+| Đột kích ngẫu nhiên từ cứ điểm thay cho đợt tấn công theo lịch | ✅ 10%/cứ điểm/đêm |
+| `PathfieldActor` debounce | ⬜ đẩy sang P3 — chưa có gì làm field phải dựng lại |
+| Phương tiện di chuyển | ⬜ đẩy sang P2 — đi cùng với chiến đấu và thể lực |
+| Autotile bờ biển / ranh giới quần xã (1113 ô `transition_edge` chưa dùng) | ⬜ đẩy sang P9 — thẩm mỹ, không chặn gì |
+| Mỏ / cổng | ⬜ đẩy sang P4 — cả hai cần hạ tầng instance |
 
-- **1024×1024 ô** (32×32 = 1024 chunk actor). Gỡ `kMapCount = 3`.
-- **Vòng đồng tâm** ([GAME.md §4](GAME.md)): Đồng cỏ → Rừng → Đầm lầy/Sa mạc → Núi tuyết → Đất cằn,
-  bờ vòng có noise.
-- **Sinh thế giới** ([ARCHITECTURE.md §8](ARCHITECTURE.md)): đặt **40–60 làng** (mật độ phải nhân
-  theo diện tích, nếu không bản đồ trống rỗng), cứ điểm (mật độ tăng ra ngoài), mỏ, cổng, đường.
-  Bố cục được lưu và phát, không phải hàm thuần.
-- **Cứ điểm thay trại spawn**: `StrongholdActor`; gỡ `kSpawnCamps`/`camp_tile()`. Tách `MapDirector`
-  xuống chỉ còn đồng hồ thế giới.
-- **BFS đa nguồn** + `PathfieldActor` debounce. Ở 1024² một lần BFS tốn ~25 ms → debounce là bắt
-  buộc, không phải tối ưu hoá.
-- **LOD mô phỏng**: chunk không có người chơi gần hạ xuống 1 Hz hoặc ngủ. Không làm thì quái chạy
-  loanh quanh trong 1000 chunk không ai nhìn.
-- **Di chuyển**: ngựa (hoặc lướt kiểu ninja) + điểm dịch chuyển ở làng. Ở 1024² đây là **thiết yếu**,
-  không phải tiện nghi — đi bộ chéo bản đồ mất gần 4 phút.
-- **Làng là hạng mục BẮT BUỘC của P1, không phải trang trí** ([GAME.md §6b](GAME.md)): người chơi
-  bắt đầu tay trắng giữa đồng không và phải đi tới làng, nên không có làng thì không có game. Làng
-  được đặt **nguyên khối** từ `TilesetHouse` — đó cũng là cách duy nhất dùng được bộ art này, vì nó
-  không có ô tường/tháp đơn lẻ nào.
-- **Gỡ nông trại khởi đầu** khỏi `terrain_of` (mảng đất 13×13 đang nhét cứng), và gỡ tường/tháp/rào
-  đặt-từng-ô. Về sau xây dựng là **đặt nguyên công trình**, không phải tô từng ô.
-- **Lớp không khí**: lá bay, mưa, tuyết, gợn nước ([GAME.md §6c](GAME.md)). Hạt sống trong renderer,
-  sinh từ `(seed, camera, thời gian)` — không actor nào biết, nên không tốn gì về kiến trúc.
-- Truyền tham số `season` vào `terrain_of` ngay bây giờ — nó đụng flow field, làm một lần rẻ hơn hai.
+**Xong khi:** ✅ sinh một thế giới mới, đi từ tâm ra rìa và **thấy được** độ khó tăng dần
+(22 → 12 → 5 → 9 → 1 làng, 1 → 4 → 4 → 6 → 8 cứ điểm); làng nằm ở chỗ hợp lý; không vùng nào bị
+cứ điểm bóp nghẹt.
 
-**Xong khi:** sinh một thế giới mới, cưỡi ngựa từ tâm ra rìa và **thấy được** độ khó tăng dần qua
-từng vòng; làng nằm ở chỗ hợp lý; không có vùng nào bị cứ điểm bóp nghẹt.
+### Ba thứ đo được rồi mới sửa, đáng ghi lại
+
+| Triệu chứng | Nguyên nhân thật |
+|---|---|
+| 17 làng vùng tuyết / 5 làng vùng rừng | Lọc bằng địa hình **thay cho** mật độ theo vòng. Tuyết dễ xây, rừng khó — nên lọc theo địa hình thưởng đúng nơi phải vắng nhất |
+| Bản đồ trông như bo mạch in | Noise của đường ở scale 48 biến thiên quá chậm → mỗi con đường thành hai đoạn vuông góc |
+| Bếp lửa hoá thành quầy hàng | Chọn ô `TilesetElement (0,4)` theo thumbnail mà không soi. Đúng cái lỗi `tools/verify_structures.py` sinh ra để chặn — và nó lọt vì crop 2×1 không đi qua công cụ đó |
+
+### Đẩy sang sau, và vì sao
+
+- **`PathfieldActor` debounce** → P3. Một lần BFS ở 1024² tốn ~25 ms, nên debounce là bắt buộc —
+  nhưng **chỉ khi có thứ làm field phải dựng lại**. Hôm nay làng là bất biến và công trình cố ý
+  không ảnh hưởng flow field, nên field dựng đúng một lần lúc khởi động. Viết cơ chế debounce bây
+  giờ là viết cho một vấn đề chưa tồn tại.
+- **Phương tiện di chuyển** → P2. Đi chéo bản đồ mất gần 4 phút, nên ở 1024² đây là thiết yếu chứ
+  không phải tiện nghi. Nhưng ngựa/lướt gắn với thể lực và tốc độ nhân vật, và cả hai được định
+  nghĩa ở P2 — làm trước là tune tốc độ hai lần.
+- **Autotile bờ biển / ranh giới quần xã** → P9. 1113 ô `transition_edge` vẫn chưa dùng, nên mọi
+  ranh giới hiện là bậc thang cứng. Xấu, nhưng không chặn gì và không đụng vào thiết kế nào.
+- **Mỏ và cổng** → P4. Cả hai cần hạ tầng instance (`MapId` là giá trị runtime), và P4 đã phải làm
+  hạ tầng đó cho khu mỏ.
+- **Tham số `season` cho `terrain_of`** → P7, cùng với mùa. Lý do cũ ("đụng flow field, làm một lần
+  rẻ hơn hai") không còn đúng: flow field giờ nhắm vào làng, không vào địa hình mùa vụ.
 
 ---
 
-## P2 — Nhân vật và chiến đấu
+## P2 — Nhân vật và chiến đấu — **tiếp theo**
 
-Hiện người chơi chỉ đứng nhìn tháp bắn. Đây là giai đoạn biến nó thành một game — và giờ nó được
-tune trên bản đồ thật.
+Người chơi hiện **không đánh nhau được gì cả**: tháp bắn đã bị gỡ cùng với các công trình đặt-từng-ô,
+nên quái đi tới làng và không có gì cản. Đó là trạng thái đúng để bước vào P2 — combat được tune một
+lần, trên bản đồ thật, thay vì tune quanh một cái tháp mà bộ art không vẽ nổi.
 
 - `PlayerActor` **keyed theo tài khoản**, nhiều instance (nguyên tắc 2).
 - **Đăng nhập cơ bản**: tên + mật khẩu, hash bằng Argon2 (Monocypher — một file .c, public domain).
@@ -255,10 +263,10 @@ Cân bằng, nhạc, hiệu ứng hạt, hướng dẫn, bách khoa, tối ưu, 
 | Nợ | Trả ở |
 |---|---|
 | `BuildKind::kCore` + `core_hp` + điều kiện thua | **P0** |
-| Mặt đất 256×256; `kMapCount = 3` | **P1** |
-| `kSpawnCamps`/`camp_tile()` → cứ điểm do worldgen đặt | P1 |
-| `MapDirector` ôm quá nhiều trách nhiệm | P1 |
-| Chunk tạo sẵn hết lúc bring-up, không ngủ được | P1 (LOD) |
+| Mặt đất 256×256; `kMapCount = 3` | **P1 ✅** |
+| `kSpawnCamps`/`camp_tile()` → cứ điểm do worldgen đặt | **P1 ✅** |
+| Chunk tạo sẵn hết lúc bring-up, không ngủ được | **P1 ✅** chunk rỗng publish 32 tick/lần |
+| `MapDirector` ôm quá nhiều trách nhiệm | P3 — giờ nó chỉ còn đồng hồ + tung xúc xắc đột kích, đủ nhỏ để đợi |
 | `PlayerActor` singleton | **P2** (nguyên tắc 2) |
 | Tháp chỉ thấy quái cùng chunk | P3 |
 | Công trình chỉ chặn đường trong chunk sở hữu | P3 |
@@ -285,4 +293,4 @@ Cân bằng, nhạc, hiệu ứng hạt, hướng dẫn, bách khoa, tối ưu, 
 
 ## Không còn gì chặn đường
 
-Mọi quyết định đã chốt. Việc tiếp theo là **P0**.
+Mọi quyết định đã chốt. **P0 và P1 xong.** Việc tiếp theo là **P2 — nhân vật và chiến đấu.**

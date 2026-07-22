@@ -15,7 +15,9 @@
 // makes the tick number a globally agreed value that rides along with every message.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "quark/core/actor.hpp"
@@ -39,6 +41,9 @@ struct MapDirector : quark::Actor<MapDirector, quark::Sequential, quark::Priorit
     WorldStatus* status = nullptr;
     std::uint64_t world_seed = 0;
     std::vector<ChunkCoord> chunks;  // every chunk in the world, in index order
+    // Where raids come from. Filled from the world layout at bring-up; the director never reads the
+    // layout itself, so it stays a plain list of tiles that could equally have arrived over a wire.
+    std::vector<std::pair<int, int>> raid_sources;
 
     void handle(const DirectorTick& d) noexcept {
         world_ms_ += d.dt_ms;
@@ -54,8 +59,7 @@ struct MapDirector : quark::Actor<MapDirector, quark::Sequential, quark::Priorit
             status->night.store(night, std::memory_order_relaxed);
         }
 
-        // Nightfall: pick the rim chunks of the home map and seed a wave into each. Wave N is
-        // bigger than wave N-1 — the reason to keep building during the day.
+        // Nightfall: roll for a raid at every stronghold. Most of them stay asleep.
         if (dawn_to_dusk) {
             ++wave_;
             if (status != nullptr) status->wave.store(wave_, std::memory_order_relaxed);
@@ -76,33 +80,65 @@ struct MapDirector : quark::Actor<MapDirector, quark::Sequential, quark::Priorit
     [[nodiscard]] std::int64_t world_ms() const noexcept { return world_ms_; }
 
 private:
-    // Waves come out of the map's fixed spawn CAMPS, not out of every rim chunk. See the note on
-    // `camp_tile` in tiles.hpp: uniform rim spawning meant monsters arrived from all 360 degrees,
-    // which made any perimeter shorter than the whole map border pointless. Five camps turn the map
-    // into five approach lanes that a player can actually fortify.
+    // Raids come out of STRONGHOLDS, and only some of them, chosen at random each night.
+    //
+    // The old version emptied all five fixed camps every single night, which is a schedule, and a
+    // schedule is the opposite of what this game is for: if you know a wave lands at nightfall you
+    // are never relaxing, you are waiting. The design decision (GAME.md §9) is that a settlement
+    // has a chance of being raided, not an appointment — so most nights nothing happens where you
+    // are, and the one that does is a surprise rather than a countdown.
+    //
+    // The odds rise with the ring, because the strongholds themselves are denser out there: the
+    // meadow gets the occasional nuisance, the wasteland is genuinely hostile, and no table
+    // anywhere had to say so.
     void spawn_wave() noexcept {
-        Rng rng(0xDEAD'BEEFull ^ (static_cast<std::uint64_t>(wave_) * 0x9E37'79B9'7F4A'7C15ull));
-        // Difficulty curve: 14 mobs per camp on wave 1, +8 per wave, capped so a long session does
-        // not turn into an allocation benchmark.
-        const std::uint16_t per_camp =
-            static_cast<std::uint16_t>(std::min<std::uint32_t>(14u + 8u * (wave_ - 1u), 120u));
+        if (raid_sources.empty()) return;
+        Rng rng(world_seed ^ 0xDEAD'BEEFull ^
+                (static_cast<std::uint64_t>(wave_) * 0x9E37'79B9'7F4A'7C15ull));
+
+        // Mobs per raiding stronghold. Grows slowly with the night count and is capped, because at
+        // 1024 chunks the interesting number is how many places are raided, not how deep one pile is.
+        const std::uint16_t per_source =
+            static_cast<std::uint16_t>(std::min<std::uint32_t>(8u + 3u * (wave_ - 1u), 40u));
 
         const auto home = kOverworld;
-        for (int i = 0; i < kSpawnCamps; ++i) {
-            int tx = 0;
-            int ty = 0;
-            camp_tile(world_seed, home, i, tx, ty);
+        std::uint32_t sent = 0;
+        for (const auto& [tx, ty] : raid_sources) {
+            if (rng.unit() > kRaidChance) continue;
             SpawnWave w{};
-            w.count = per_camp;
+            w.count = per_source;
             w.seed = static_cast<std::uint32_t>(rng.next());
             w.kind = static_cast<std::uint8_t>(rng.below(3));
             w.tx = static_cast<std::uint16_t>(tx);
             w.ty = static_cast<std::uint16_t>(ty);
-            w.radius = kCampRadius;
+            w.radius = 3;
             const ChunkCoord c = chunk_of(home, static_cast<float>(tx), static_cast<float>(ty));
             router->get<ChunkActor>(chunk_key(c)).tell(w);
+            ++sent;
+        }
+        // A night on which nothing at all stirs is fine and intended, but a run that never spawns
+        // anything is indistinguishable from a broken director. So the FIRST night always raids,
+        // from one source, and after that the dice decide.
+        if (sent == 0 && wave_ == 1) {
+            const auto& [tx, ty] = raid_sources[rng.below(static_cast<std::uint32_t>(
+                raid_sources.size()))];
+            SpawnWave w{};
+            w.count = per_source;
+            w.seed = static_cast<std::uint32_t>(rng.next());
+            w.kind = static_cast<std::uint8_t>(rng.below(3));
+            w.tx = static_cast<std::uint16_t>(tx);
+            w.ty = static_cast<std::uint16_t>(ty);
+            w.radius = 3;
+            router->get<ChunkActor>(chunk_key(chunk_of(home, static_cast<float>(tx),
+                                                       static_cast<float>(ty))))
+                .tell(w);
         }
     }
+
+    // Per stronghold, per night. Tuned so that with ~25 strongholds a typical night wakes two or
+    // three of them somewhere on a 1024x1024 map — which, from where the player is standing, means
+    // most nights are quiet.
+    static constexpr float kRaidChance = 0.10f;
 
     std::int64_t world_ms_ = 0;
     std::uint64_t tick_ = 0;

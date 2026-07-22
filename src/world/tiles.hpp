@@ -39,13 +39,13 @@ inline constexpr std::uint16_t kOverworld = 0;
 // and the renderer needs it too (to know which ring a tile is in without asking an actor).
 inline constexpr std::uint64_t kWorldSeed = 0x5EED'0BEEF'CAFEull;
 
-// Where a new player is dropped: the centre of the map, which is also the easiest ring. The tilled
-// apron there is part of the terrain *function* (below), not an edit applied afterwards — see
-// `terrain_of`. Once world generation lands (ROADMAP P1) this becomes "the starting village", and
-// these constants go away.
+// The middle of the map. It is the easiest ring and the reference point the rings radiate from —
+// but it is NOT where a player starts any more. There used to be a hard-coded 13x13 tilled apron
+// here and a hearth in the middle of it, which meant every world opened on the same farm. The
+// player now wakes somewhere unremarkable and has to walk to a village (GAME.md §6b); `spawn_tile`
+// in worldgen.hpp picks that spot.
 inline constexpr int kHomeTx = kMapTiles / 2;
 inline constexpr int kHomeTy = kMapTiles / 2;
-inline constexpr int kFarmRadius = 6;
 
 // --- Terrain -------------------------------------------------------------------------------------
 enum class Terrain : std::uint8_t {
@@ -58,16 +58,23 @@ enum class Terrain : std::uint8_t {
     kSnow = 6,   // walkable; crops freeze without a hearth nearby
     kMarsh = 7,  // walkable but slow; no foundations without stilts
     kAsh = 8,    // walkable, barren — nothing grows here at all
-    kCount = 9,
+    // The two terrains world GENERATION writes (everything above is noise). A road and a village
+    // square are the same packed earth; a structure's footprint is solid.
+    kPath = 9,
+    // The footprint of a whole building. Impassable, and the renderer draws PATH under it — the
+    // building itself is one multi-tile sprite drawn in its own pass, exactly like a tree. This is
+    // why the game needs no single-tile wall art: there is no such thing as half a house.
+    kBuilding = 10,
+    kCount = 11,
 };
 
 [[nodiscard]] inline constexpr bool is_walkable(Terrain t) noexcept {
-    return t != Terrain::kWater && t != Terrain::kTree;
+    return t != Terrain::kWater && t != Terrain::kTree && t != Terrain::kBuilding;
 }
 
-// Can a crop be planted here once tilled? Ash never; everything else walkable can.
+// Can a crop be planted here once tilled? Ash never; nor a road or a floor you do not own.
 [[nodiscard]] inline constexpr bool is_tillable(Terrain t) noexcept {
-    return is_walkable(t) && t != Terrain::kAsh && t != Terrain::kStone;
+    return is_walkable(t) && t != Terrain::kAsh && t != Terrain::kStone && t != Terrain::kPath;
 }
 
 // --- Rings: difficulty radiates out from the centre (Valheim-style) --------------------------------
@@ -105,6 +112,17 @@ inline constexpr float kRingEdge[kRingCount] = {0.5099f, 0.6928f, 0.8246f, 0.927
 // --- Entities ------------------------------------------------------------------------------------
 enum class MobKind : std::uint8_t { kSlime = 0, kSpider = 1, kGhost = 2 };
 enum class CropKind : std::uint8_t { kWheat = 0, kCarrot = 1, kPumpkin = 2 };
+// What a PLAYER puts down, one tile at a time. Deliberately short.
+//
+// It used to also carry kWall, kTurret and kFence, and removing them is a design decision, not a
+// cut. Ninja Adventure has no single-tile wall or tower: TilesetHouse's 759 tiles and
+// TilesetTowers' 144 are every one of them a SLICE of something bigger, and the fence is two tiles
+// tall. Painting a perimeter tile by tile cannot be drawn with this art at all — the earlier
+// attempt rendered a wall as the top-left corner of a nine-slice, repeated.
+//
+// So building became "place a whole structure" (GAME.md §6b), and the whole structures that exist
+// today are the ones world generation places: houses, tents, ruins. What is left here is what
+// genuinely IS one tile.
 enum class BuildKind : std::uint8_t {
     // The player's home fire. It marks where you live and where you respawn, and in the snow rings
     // it is what keeps crops alive. It is NOT a thing whose destruction ends anything — losing it
@@ -112,11 +130,8 @@ enum class BuildKind : std::uint8_t {
     // world had to defend; see ARCHITECTURE.md §0 S2 for why that was the wrong shape once you can
     // build anywhere and villages exist.)
     kHearth = 0,
-    kWall = 1,
-    kTurret = 2,
-    kPlot = 3,
-    kFence = 4,  // cheap, weak, but it still stops a mob — the early-game perimeter
-    kCount = 5,
+    kPlot = 1,
+    kCount = 2,
 };
 
 // Everything except a crop plot is solid: a mob cannot walk through it and must break it instead.
@@ -193,19 +208,16 @@ inline constexpr std::uint8_t kCropStages = 4;
 struct Building {
     std::uint16_t tx = 0;
     std::uint16_t ty = 0;
-    BuildKind kind = BuildKind::kWall;
+    BuildKind kind = BuildKind::kHearth;
     std::int16_t hp = 0;
-    std::uint8_t cooldown = 0;  // turret fire cooldown, in ticks
+    std::uint8_t cooldown = 0;  // ticks until this building may act again
     std::uint8_t level = 1;
 };
 
 [[nodiscard]] inline constexpr std::int16_t base_hp_of(BuildKind k) noexcept {
     switch (k) {
         case BuildKind::kHearth: return 400;
-        case BuildKind::kWall: return 200;
-        case BuildKind::kTurret: return 120;
         case BuildKind::kPlot: return 20;
-        case BuildKind::kFence: return 60;
         case BuildKind::kCount: break;
     }
     return 100;
@@ -217,18 +229,6 @@ struct Building {
     const int base = base_hp_of(k);
     const int scaled = (level >= 3) ? base * 3 : (level == 2 ? (base * 9) / 5 : base);
     return static_cast<std::int16_t>(scaled);
-}
-
-// Turret stats per level. Range grows slowly and damage fast, so upgrading is about killing what
-// already walks into the field rather than covering more ground.
-[[nodiscard]] inline constexpr float turret_range(std::uint8_t level) noexcept {
-    return level >= 3 ? 8.5f : (level == 2 ? 7.0f : 6.0f);
-}
-[[nodiscard]] inline constexpr std::int16_t turret_damage(std::uint8_t level) noexcept {
-    return level >= 3 ? 34 : (level == 2 ? 22 : 14);
-}
-[[nodiscard]] inline constexpr std::uint8_t turret_cooldown(std::uint8_t level) noexcept {
-    return level >= 3 ? 4 : (level == 2 ? 5 : 6);
 }
 
 // --- Chunk addressing ----------------------------------------------------------------------------
@@ -368,19 +368,10 @@ private:
     return Ring::kWasteland;
 }
 
-[[nodiscard]] inline Terrain terrain_of(std::uint64_t world_seed, std::uint16_t map, int gx,
-                                        int gy) noexcept {
-    // The starting apron is tilled soil by definition. Folding it into the function (rather than
-    // stamping it over generated terrain) keeps the function total: a chunk querying a tile just
-    // across its border gets the same answer the owning chunk would give.
-    {
-        const int dx = gx - kHomeTx;
-        const int dy = gy - kHomeTy;
-        if (dx >= -kFarmRadius && dx <= kFarmRadius && dy >= -kFarmRadius && dy <= kFarmRadius) {
-            return Terrain::kDirt;
-        }
-    }
-
+// The land itself, before anyone built on it. Pure noise, no neighbour lookups, no global state —
+// which is what lets world GENERATION call it while it is still deciding where the villages go.
+[[nodiscard]] inline Terrain terrain_base(std::uint64_t world_seed, std::uint16_t map, int gx,
+                                          int gy) noexcept {
     const std::uint64_t base = world_seed ^ (static_cast<std::uint64_t>(map) << 48);
     const auto x = static_cast<float>(gx);
     const auto y = static_cast<float>(gy);
@@ -440,6 +431,46 @@ private:
     return Terrain::kAsh;
 }
 
+// --- The generated overlay -------------------------------------------------------------------
+// Roads, village squares and building footprints cannot be a pure function of (seed, x, y) the way
+// terrain is, and the reason is not laziness: a village has to know where the OTHER villages are
+// before it can pick a spot, and a road has to know both ends. So world generation runs once, up
+// front, and publishes its result here as one byte per tile — `kNoOverlay` where it did not build.
+//
+// WHY A PROCESS-WIDE POINTER IS THE RIGHT SHAPE, and not a lapse into shared mutable state. It is
+// the same argument flow_field.hpp makes, and it holds for the same three reasons:
+//
+//   * It is derived from the world seed alone, so every node computes a byte-identical array on
+//     its own. Nothing is ever sent, and there is no coherence problem when chunks live on
+//     different machines.
+//   * It is written exactly once, before the engine starts, and is const from then on. There is no
+//     interleaving to reason about because there is no second write.
+//   * `terrain_of` has to stay a free function callable for ANY tile — that property is what lets a
+//     chunk test the tile a mob is stepping onto without asking its neighbour. Threading a layout
+//     handle through every caller would buy nothing and cost that.
+//
+// The alternative — each chunk owning its own patch of village — reintroduces exactly the
+// cross-chunk read this design exists to avoid, at the border of every structure.
+inline constexpr std::uint8_t kNoOverlay = 0xFF;
+
+namespace detail {
+inline const std::uint8_t* g_overlay = nullptr;  // kMapTiles * kMapTiles, or null before worldgen
+}
+
+// Called once by worldgen, before the engine starts. Passing null restores bare noise (used by
+// tools that want to see the land without anything on it).
+inline void publish_overlay(const std::uint8_t* tiles) noexcept { detail::g_overlay = tiles; }
+
+// The world as it actually is: the land, plus whatever generation put on it.
+[[nodiscard]] inline Terrain terrain_of(std::uint64_t world_seed, std::uint16_t map, int gx,
+                                        int gy) noexcept {
+    if (detail::g_overlay != nullptr && gx >= 0 && gy >= 0 && gx < kMapTiles && gy < kMapTiles) {
+        const std::uint8_t o = detail::g_overlay[static_cast<std::size_t>(gy) * kMapTiles + gx];
+        if (o != kNoOverlay) return static_cast<Terrain>(o);
+    }
+    return terrain_base(world_seed, map, gx, gy);
+}
+
 // Which of four mirror orientations to draw a base terrain tile in. A single 16x16 grass tile
 // repeated across a 256x256 map shows an obvious grid; mirroring per-tile breaks the repeat at
 // zero cost (a negative source rect, no extra texture). Renderer-only — the simulation neither
@@ -451,59 +482,9 @@ private:
     return static_cast<int>(r.below(64));  // low 2 bits = mirroring, higher bits = variant choice
 }
 
-// --- Spawn camps ---------------------------------------------------------------------------------
-// Waves used to spawn at a random walkable tile in EVERY rim chunk, which meant monsters arrived
-// from all 360 degrees at once. That quietly made defence pointless: no wall matters if the only
-// way to use one is to enclose the entire perimeter. A small number of fixed camps turns the map
-// into a handful of approach lanes — and because mobs follow the flow field, those lanes are
-// predictable, so a wall placed across one actually changes the outcome.
-//
-// Camp positions are a pure function of (seed, map), like everything else about the world, so every
-// node agrees on where they are without exchanging a message.
-inline constexpr int kSpawnCamps = 5;
-inline constexpr int kCampInset = 6;    // tiles in from the map edge
-inline constexpr int kCampRadius = 3;   // mobs spawn within this many tiles of the camp
-
-[[nodiscard]] inline void camp_tile(std::uint64_t world_seed, std::uint16_t map, int index, int& tx,
-                                    int& ty) noexcept {
-    // Walk the map's border rectangle (inset by kCampInset) and take evenly spaced points, jittered
-    // per map so the three maps do not have identical layouts.
-    const int span = kMapTiles - 2 * kCampInset;
-    const int perimeter = 4 * span;
-    Rng r(world_seed ^ (static_cast<std::uint64_t>(map) << 32) ^ 0xCA'11'CA'11ull);
-    const int jitter = static_cast<int>(r.below(static_cast<std::uint32_t>(perimeter)));
-    int t = (jitter + (perimeter * index) / kSpawnCamps) % perimeter;
-
-    if (t < span) {  // top edge, left to right
-        tx = kCampInset + t;
-        ty = kCampInset;
-    } else if (t < 2 * span) {  // right edge, top to bottom
-        tx = kMapTiles - 1 - kCampInset;
-        ty = kCampInset + (t - span);
-    } else if (t < 3 * span) {  // bottom edge, right to left
-        tx = kMapTiles - 1 - kCampInset - (t - 2 * span);
-        ty = kMapTiles - 1 - kCampInset;
-    } else {  // left edge, bottom to top
-        tx = kCampInset;
-        ty = kMapTiles - 1 - kCampInset - (t - 3 * span);
-    }
-
-    // Nudge to the nearest walkable tile: a camp inside a lake would spawn nothing.
-    if (is_walkable(terrain_of(world_seed, map, tx, ty))) return;
-    for (int radius = 1; radius <= 12; ++radius) {
-        for (int dy = -radius; dy <= radius; ++dy) {
-            for (int dx = -radius; dx <= radius; ++dx) {
-                const int nx = tx + dx;
-                const int ny = ty + dy;
-                if (nx < 1 || ny < 1 || nx >= kMapTiles - 1 || ny >= kMapTiles - 1) continue;
-                if (!is_walkable(terrain_of(world_seed, map, nx, ny))) continue;
-                tx = nx;
-                ty = ny;
-                return;
-            }
-        }
-    }
-}
+// (Spawn camps used to live here — five points on the map's rim, evenly spaced by arithmetic.
+// World generation places STRONGHOLDS now: they sit where the land allows, their density rises with
+// the ring, and they are the thing a raid actually comes out of. See worldgen.hpp.)
 
 // --- Simulation cadence --------------------------------------------------------------------------
 inline constexpr int kTicksPerSecond = 10;

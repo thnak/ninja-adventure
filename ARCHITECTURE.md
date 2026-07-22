@@ -454,12 +454,45 @@ Một quyết định thiết kế xoá được cả một lớp lỗi. Đây l
 
 Bước 9 vẫn giữ — nhưng giờ nó gần như luôn đạt ngay lần đầu, thay vì là cái van an toàn chính.
 
+### Đã làm — `src/world/worldgen.hpp` (P1)
+
+Thứ tự thực tế hơi khác bản phác ở trên, và lý do đáng ghi lại:
+
+```
+1. chọn chỗ làng   lưới jitter ô 112 ô, 9x9 = 81 ứng viên   → ~49 làng
+2. đường           nối mỗi làng với 2 làng gần nhất
+3. dựng làng       quảng trường (kPath) rồi nhà quanh nó
+4. cứ điểm         lưới jitter ô 124; bỏ nếu quá gần làng
+```
+
+**Đường đi TRƯỚC nhà, không phải sau.** Đặt nhà trước rồi mới rải đường thì đường phải né nhà —
+và cái nó né được thì nó cũng cắt được. Đặt đường trước, nhà mọc quanh quảng trường mà đường đã
+chạm tới, thì việc "đường xuyên qua nhà" không phải là lỗi cần chặn mà là chuyện không thể xảy ra.
+
+**Cứ điểm SAU CÙNG,** vì nó là thứ duy nhất được phép bị đẩy đi: ứng viên quá gần làng thì bỏ luôn,
+không dời. Làm ngược lại — cứ điểm trước — thì một cứ điểm rơi đúng mảnh đất xây được duy nhất của
+cả vùng sẽ **xoá lặng lẽ một cái làng**, và bản đồ có một lỗ thủng mà không gì trong game giải
+thích được.
+
+Hai chỗ đo được rồi mới sửa:
+
+| Triệu chứng | Nguyên nhân |
+|---|---|
+| 17 làng vùng tuyết / 5 làng vùng rừng — ngược hoàn toàn | Lọc bằng địa hình *thay cho* mật độ. Tuyết là đất **dễ** xây (trống, phẳng, không cây), rừng là đất khó — nên lọc theo địa hình lại thưởng đúng những nơi lẽ ra phải vắng nhất. Tách làm hai: nước gần như phủ quyết, cây chỉ là điểm trừ, và mật độ theo vòng là một núm riêng |
+| Bản đồ trông như bo mạch in | fbm ở scale 48 biến thiên chậm, nên một trục bị khoá suốt hàng chục bước → mọi con đường thành hai đoạn vuông góc. Scale 19 lật trục vài ô một lần |
+
 ### Hệ quả kiến trúc (không đổi)
 
 Vẫn đúng như đã nêu: **địa hình thuần theo (seed, x, y)** — mọi node tự tính, không đồng bộ. Nhưng
-**bố cục** (làng/cứ điểm/mỏ/cổng/đường) là kết quả sinh một lần, **leader lưu và phát** cho node mới.
+**bố cục** (làng/cứ điểm/mỏ/cổng/đường) là kết quả sinh một lần.
 
 Hai loại dữ liệu khác nhau: một loại tính được, một loại phải nhớ.
+
+Cách nối hai loại đó lại: worldgen ghi một **byte mỗi ô** (`kNoOverlay` ở đâu nó không xây), và
+`terrain_of` đọc overlay trước rồi mới rơi về noise. Nghĩa là `terrain_of` **vẫn là hàm gọi được
+cho ô bất kỳ** — tính chất chịu lực cho phép một chunk kiểm tra ô mà con quái sắp bước sang mà
+không phải hỏi hàng xóm. Overlay là con trỏ toàn cục ghi một lần trước khi engine chạy, cùng loại
+với `FlowField`: sinh từ seed nên mọi node tự có bản giống hệt từng byte, không cần gửi gì cả.
 
 ### Các cõi thì sinh riêng
 

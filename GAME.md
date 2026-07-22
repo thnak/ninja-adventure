@@ -530,6 +530,21 @@ Nếu người chơi không bắt đầu bằng việc xây, thì **không cần
 
 Cũng hợp tông chill: bạn bắt đầu bằng một chuyến đi bộ, không phải bằng một danh sách việc.
 
+### Đã làm (P1)
+
+Thế giới hiện sinh ra **49 làng, 23 cứ điểm, 493 công trình**. Người chơi tỉnh dậy cách làng gần
+nhất khoảng **30 ô** — đủ xa để việc đầu tiên game bảo bạn làm là *đi và nhìn quanh*, đủ gần để
+việc đi bộ vẫn có nghĩa. Túi đồ khởi đầu là 40 gỗ / 25 đá / 12 hạt: đủ nhóm một bếp lửa và cuốc vài
+ô đất khi đã tới nơi, **cố ý không đủ để sống một mình**.
+
+`BuildKind` giờ chỉ còn **hai** giá trị — bếp lửa và luống cây — và thanh hotbar rút từ 5 ô xuống
+2 ô. Một ô hotbar không bao giờ đầy là một lời hứa game không giữ.
+
+Một hệ quả không ngờ tới và đáng ghi: **cả một lượt vẽ tiền xử lý biến mất khỏi renderer.** Tường
+đặt-từng-ô cần biết hàng xóm của nó ở chunk bên cạnh để không đổi kiểu ở biên chunk, nên mỗi khung
+hình phải gom vị trí tường của mọi chunk đang hiện trước khi vẽ được ô đầu tiên. Một công trình là
+một sprite: không có hàng xóm để hỏi, không có đường nối để giấu.
+
 ---
 
 ## 6c. Không khí: lá bay, mưa, gió
@@ -552,6 +567,23 @@ Hai điểm kỹ thuật đáng nói:
    vẫn cùng pha, và ảnh chụp vẫn tái lập được.
 
 Đây là thứ trả lại nhiều nhất trên mỗi dòng code trong toàn bộ danh sách còn lại.
+
+### Đã làm (P1) — lớp hạt theo vòng
+
+Đồng cỏ và rừng có **lá bay**, đầm lầy/sa mạc có **mưa**, núi tuyết có **tuyết rơi**, đất cằn thì
+không có gì (và sự im lặng đó cũng nói lên điều gì đó).
+
+Cả lớp này nằm gọn trong `raylib_bridge.cpp` và **không có một dòng state nào**. Vị trí một hạt là
+biểu thức đóng theo `(chỉ số ô lưới, đồng hồ thế giới)`: không lưu, không cập nhật, không actor nào
+biết chúng tồn tại. Lưới hạt neo vào **camera** chứ không vào bản đồ, nên số hạt trên màn hình là
+hằng số dù người chơi đi bao xa.
+
+Dùng **đồng hồ thế giới chứ không phải frame** là chỗ duy nhất cần cẩn thận, và nó đáng: hai máy
+nhìn cùng một chỗ thấy lá ở cùng vị trí, và ảnh chụp ở world t=22s hôm nay giống hệt ảnh chụp ở
+world t=22s ngày mai. Một hiệu ứng gỡ lỗi được thay vì một hiệu ứng chỉ biết đứng nhìn.
+
+Mật độ ban đầu đặt 1 hạt / 320 px và trông như **bụi bám màn hình** chứ không như thời tiết; 160 px
+mới đúng. Đo bằng cách nhìn, không đoán.
 
 ---
 
