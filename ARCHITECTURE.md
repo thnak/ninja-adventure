@@ -217,6 +217,32 @@ gần nên 32 tick nữa nó mới publish.
 
 ---
 
+## 2c. Tất định tới đâu — ranh giới, nói cho rõ (P2)
+
+P1 kết thúc bằng việc chứng minh worldgen khớp **từng ô** giữa GCC/Linux và MSVC/Windows, sau khi
+một phép so sánh float làm lệch 266 ô đường. Chuẩn đó vẫn giữ, nhưng P2 làm lộ ra ranh giới của nó
+và nếu không ghi ra thì lần sau sẽ có người đọc nhầm thành hồi quy.
+
+**Vẫn khớp từng byte trên cả hai toolchain** — mọi thứ dẫn xuất từ seed:
+
+```
+51 làng / 27 cứ điểm / 522 công trình · spawn (458,538) · 11 tally địa hình
+619 con thú lúc bring-up · trận dàn dựng: 10 sinh vật, 8 thù địch, 2 watcher
+máu slot 0 = 100, slot 1 = 36 · 18 nhát trúng / 22 bị từ chối · 8 mạng · 32 XP
+```
+
+**Không khớp, và không cần khớp** — số lần migrate giữa chunk. Nó lệch cả giữa hai lần chạy trên
+*cùng một máy* (3407 rồi 3432). Lý do không phải float mà là mô hình actor: chunk A gửi
+`CreatureEnter` cho chunk B, và việc B rút message đó trước hay sau `Tick` của chính nó là do
+scheduler quyết định. Con vật vì thế bước tiếp sớm hơn hoặc muộn hơn một tick, và tổng tích luỹ trôi.
+
+Phân biệt này quan trọng vì nó nói cho ta biết **cái gì được phép kiểm tra chéo giữa các node** khi
+thế giới phân tán: mọi thứ là hàm thuần của seed thì so sánh được và phải khớp; mọi thứ phụ thuộc
+thứ tự message thì không, và một cơ chế "chạy dư thừa rồi đối chiếu" phải so cái trước, không phải
+cái sau.
+
+---
+
 ## 3. Lưu trữ và tiến trình
 
 Quyết định leader-là-nguồn-sự-thật làm phần này gọn hơn hẳn so với kế hoạch trước.
