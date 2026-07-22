@@ -36,7 +36,7 @@ SHEETS = {
     "NWater": (SRC / "ninja/Backgrounds/Tilesets/TilesetWater.png", 16),
     "NDesert": (SRC / "ninja/Backgrounds/Tilesets/TilesetDesert.png", 16),
     "NRelief": (SRC / "ninja/Backgrounds/Tilesets/TilesetRelief.png", 16),
-    "NLogic": (SRC / "ninja/Backgrounds/Tilesets/TilesetLogic.png", 16),
+    "NIntFloor": (SRC / "ninja/Backgrounds/Tilesets/Interior/TilesetInteriorFloor.png", 16),
     "NTree": (SRC / "ninja/Backgrounds/Tilesets/TilesetNature.png", 16),
 }
 
@@ -50,15 +50,20 @@ KEY_COLOR = {"TD": (63, 38, 49, 255)}
 
 # slot name -> (sheet, col, row).  Order defines the generated enum order.
 MANIFEST = [
-    # --- terrain (opaque, drawn as the base layer) — all Ninja Adventure ---
-    ("TerrainGrass",     "NFloor",   0, 12),
-    ("TerrainDirt",      "NFloor",  11, 19),
-    ("TerrainWater",     "NWater",   1,  1),
-    ("TerrainStone",     "NFloor",  20, 14),
-    ("TerrainSand",      "NDesert", 15,  8),
-    ("TerrainSnow",      "NFloor",   0, 19),
-    ("TerrainMarsh",     "NRelief",  8,  1),
-    ("TerrainAsh",       "NLogic",   6,  0),
+    # --- terrain (opaque, drawn as the base layer) ---
+    # Every pick here is `fill_textured` from assets/tile_index.json. The previous set was chosen by
+    # scanning for the LOWEST-variance tiles, which selects flat solid colours by construction — the
+    # ground rendered as a plain background colour rather than as art. Two were worse than plain:
+    # ash was a swatch from the map-EDITOR marker sheet, and marsh was a vertical cliff face.
+    # See assets/TILE_INDEX.md for how to query for replacements.
+    ("TerrainGrass",     "NFloor",     1, 12),
+    ("TerrainDirt",      "NFloor",    12, 19),
+    ("TerrainWater",     "NWater",    11,  2),
+    ("TerrainStone",     "NIntFloor",  5, 13),
+    ("TerrainSand",      "NFloor",     1,  5),
+    ("TerrainSnow",      "NFloor",     1, 19),
+    ("TerrainMarsh",     "NFloor",    12, 12),
+    ("TerrainAsh",       "NIntFloor", 16, 13),
     # --- overlays (transparent, drawn over the base layer) ---
     # Ninja Adventure's trees are two tiles as well: canopy on top of trunk.
     # Trees are NOT here — they are 2x3 multi-tile sprites, see BIG_MANIFEST.
