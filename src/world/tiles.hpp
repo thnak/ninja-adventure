@@ -35,6 +35,23 @@ inline constexpr int kChunkCount = kMapCount * kChunksPerMap;
 
 inline constexpr std::uint16_t kOverworld = 0;
 
+// How many players can be logged in at once. This is a SESSION-SLOT count, not an account limit:
+// the account table is unbounded, and a slot is what an account is bound to when it logs in.
+//
+// It is fixed rather than grown on demand because `Engine::register_activation` is cold-only —
+// actors are registered before `start()` and the registry is not safe to mutate afterwards. So the
+// roster is pre-registered and login binds. See player_actor.hpp.
+inline constexpr int kMaxPlayers = 8;
+inline constexpr std::uint64_t kPlayerKeyBase = 0x1000;
+
+[[nodiscard]] inline constexpr std::uint64_t player_key(int slot) noexcept {
+    return kPlayerKeyBase + static_cast<std::uint64_t>(slot);
+}
+
+[[nodiscard]] inline constexpr int player_slot(std::uint64_t key) noexcept {
+    return static_cast<int>(key - kPlayerKeyBase);
+}
+
 // The world seed lives here, not in world.hpp, because `terrain_of` is the thing that consumes it
 // and the renderer needs it too (to know which ring a tile is in without asking an actor).
 inline constexpr std::uint64_t kWorldSeed = 0x5EED'0BEEF'CAFEull;
@@ -109,8 +126,187 @@ inline constexpr int kRingCount = static_cast<int>(Ring::kCount);
 // Meadow is deliberately the biggest: it is the chill ring, and it should feel like a whole country.
 inline constexpr float kRingEdge[kRingCount] = {0.5099f, 0.6928f, 0.8246f, 0.9274f, 1.01f};
 
+// --- Factions --------------------------------------------------------------------------------
+// A faction, not a hostile/friendly bit — because a faction lets creatures fight EACH OTHER, and
+// that is what turns "the map has monsters on it" into "the world has an ecosystem" almost for free
+// (GAME.md §5). A raid crossing a forest kills the deer in it, and the player sees the cost of
+// leaving a stronghold standing without one line of text explaining it.
+enum class Faction : std::uint8_t {
+    kWild = 0,     // boar, wolf, bear, hare, chicken
+    kMonster = 1,  // slimes, spirits, everything a stronghold spits out
+    kPlayer = 2,   // the player and anything they build
+    kVillager = 3,
+    kCount = 4,
+};
+
+inline constexpr int kFactionCount = static_cast<int>(Faction::kCount);
+
+// How `a` regards `b` by default. Note the asymmetry that makes wildlife work: Wild is neutral
+// toward Player, but Monster is hostile toward everyone including Wild.
+enum class Stance : std::uint8_t { kNeutral = 0, kHostile = 1, kFriendly = 2 };
+
+[[nodiscard]] inline constexpr Stance stance_between(Faction a, Faction b) noexcept {
+    if (a == Faction::kMonster) return b == Faction::kMonster ? Stance::kFriendly : Stance::kHostile;
+    if (b == Faction::kMonster) return Stance::kHostile;  // everyone hates monsters back
+    if (a == Faction::kPlayer && b == Faction::kVillager) return Stance::kFriendly;
+    if (a == Faction::kVillager && b == Faction::kPlayer) return Stance::kFriendly;
+    return Stance::kNeutral;
+}
+
+// How a creature regards the PLAYER specifically, and the load-bearing sentence of the whole
+// system: **this is state, not a species trait.** A neutral boar that has been shot is hostile to
+// you for a while and then cools off. If it were a fixed property of the species there would be
+// nothing here to play with — you would simply learn which sprites to avoid.
+enum class Disposition : std::uint8_t {
+    kHostile = 0,  // attacks on sight
+    kNeutral = 1,  // ignores you until provoked
+    kTimid = 2,    // never attacks; flees when hit
+};
+
+// How long a provoked creature stays angry, and the memory that makes it feel motivated: each time
+// you provoke the same creature it stays angry longer. Harass an animal enough and it becomes a
+// real enemy — a small detail, but it is what makes the behaviour look like it has a reason.
+inline constexpr std::uint16_t kAngerTicks = 200;      // 20 s at 10 Hz
+inline constexpr std::uint16_t kAngerPerGrudge = 100;  // +10 s each time it is provoked again
+inline constexpr std::uint8_t kMaxGrudge = 4;
+
+// --- Elements and status ------------------------------------------------------------------------
+// Magic SETS a status; a physical blow DETONATES it (GAME.md §7). That is the combo system in one
+// sentence, and it is why exactly one status is tracked per creature rather than a bitmask: every
+// combo in the design is (one status) x (one kind of blow), so a set of them would be state nobody
+// reads. Applying a second status replaces the first, which is also what makes chaining a decision
+// — you cannot stack every school onto one target and swing once.
+enum class Element : std::uint8_t {
+    kNone = 0,
+    kFire = 1,
+    kIce = 2,
+    kEarth = 3,
+    kShock = 4,
+    kCount = 5,
+};
+
+inline constexpr int kElementCount = static_cast<int>(Element::kCount);
+
+enum class Status : std::uint8_t {
+    kNone = 0,
+    kFrozen = 1,   // cannot move at all
+    kBurning = 2,  // damage over time
+    kWet = 3,      // slower, and the conductor for Shock
+    kMuddy = 4,    // much slower
+    kShocked = 5,  // damage over time, and staggers
+    kCount = 6,
+};
+
+[[nodiscard]] inline constexpr Status status_of(Element e) noexcept {
+    switch (e) {
+        case Element::kFire: return Status::kBurning;
+        case Element::kIce: return Status::kFrozen;
+        case Element::kEarth: return Status::kMuddy;
+        case Element::kShock: return Status::kShocked;
+        case Element::kNone:
+        case Element::kCount: break;
+    }
+    return Status::kNone;
+}
+
+// How long a freshly applied status lasts, in ticks. Frozen is the shortest because it is the
+// strongest: it is a full stop, and the Shatter combo has to be a window you aim for rather than a
+// state you park a creature in.
+[[nodiscard]] inline constexpr std::uint8_t status_ticks_of(Status s) noexcept {
+    switch (s) {
+        case Status::kFrozen: return 25;
+        case Status::kBurning: return 50;
+        case Status::kWet: return 80;
+        case Status::kMuddy: return 60;
+        case Status::kShocked: return 30;
+        case Status::kNone:
+        case Status::kCount: break;
+    }
+    return 0;
+}
+
+// Movement multiplier a status imposes.
+[[nodiscard]] inline constexpr float status_speed_scale(Status s) noexcept {
+    switch (s) {
+        case Status::kFrozen: return 0.0f;
+        case Status::kMuddy: return 0.45f;
+        case Status::kWet: return 0.85f;
+        case Status::kShocked: return 0.7f;
+        case Status::kBurning: return 1.15f;  // it panics — burning things run
+        case Status::kNone:
+        case Status::kCount: break;
+    }
+    return 1.0f;
+}
+
+// The combos. `heavy` distinguishes a charged melee blow from a light one; `by_projectile` an arrow
+// from a hand weapon. Returned as a damage multiplier plus a flag for the side effect the chunk has
+// to act on, because a multiplier alone cannot express "splash two tiles" or "give the caster mana".
+enum class Combo : std::uint8_t {
+    kNone = 0,
+    kShatter = 1,   // Frozen + heavy melee: x2.5, ignores armour
+    kBlast = 2,     // Burning + arrow: splash damage 2 tiles
+    kConduct = 3,   // Wet + Shock: chains to every wet enemy nearby
+    kCrush = 4,     // Muddy + heavy melee: stun
+    kArc = 5,       // Shocked + melee: returns mana to the striker
+};
+
+[[nodiscard]] inline constexpr Combo combo_of(Status s, bool heavy, bool by_projectile,
+                                              Element by_element) noexcept {
+    if (by_element == Element::kShock && s == Status::kWet) return Combo::kConduct;
+    if (by_element != Element::kNone) return Combo::kNone;  // other spells do not detonate
+    if (s == Status::kFrozen && heavy && !by_projectile) return Combo::kShatter;
+    if (s == Status::kBurning && by_projectile) return Combo::kBlast;
+    if (s == Status::kMuddy && heavy && !by_projectile) return Combo::kCrush;
+    if (s == Status::kShocked && !by_projectile) return Combo::kArc;
+    return Combo::kNone;
+}
+
+[[nodiscard]] inline constexpr float combo_damage_scale(Combo c) noexcept {
+    switch (c) {
+        case Combo::kShatter: return 2.5f;
+        case Combo::kBlast: return 1.6f;
+        case Combo::kConduct: return 1.4f;
+        case Combo::kCrush: return 1.3f;
+        case Combo::kArc: return 1.1f;
+        case Combo::kNone: break;
+    }
+    return 1.0f;
+}
+
+[[nodiscard]] inline const char* describe(Combo c) noexcept {
+    switch (c) {
+        case Combo::kShatter: return "SHATTER";
+        case Combo::kBlast: return "BLAST";
+        case Combo::kConduct: return "CONDUCT";
+        case Combo::kCrush: return "CRUSH";
+        case Combo::kArc: return "ARC";
+        case Combo::kNone: break;
+    }
+    return "";
+}
+
 // --- Entities ------------------------------------------------------------------------------------
-enum class MobKind : std::uint8_t { kSlime = 0, kSpider = 1, kGhost = 2 };
+// ONE creature type for everything alive that is not a player — monsters, wildlife, and later the
+// villagers. Splitting them into separate entity types would double every loop in ChunkActor for a
+// difference (`faction` + `disposition`) that is two bytes. See GAME.md §5, technical consequence 3.
+enum class CreatureKind : std::uint8_t {
+    kSlime = 0,
+    kSpider = 1,
+    kGhost = 2,
+    kSkull = 3,  // the outer rings' monster: slow, and it hits like a cart
+    // Wildlife. These do NOT use the flow field — they wander around a home tile, which is what
+    // makes them cheap enough to have a lot of (GAME.md §5, consequence 1).
+    kBoar = 4,
+    kWolf = 5,
+    kBear = 6,
+    kHare = 7,
+    kChicken = 8,
+    kCount = 9,
+};
+
+inline constexpr int kCreatureKinds = static_cast<int>(CreatureKind::kCount);
+
 enum class CropKind : std::uint8_t { kWheat = 0, kCarrot = 1, kPumpkin = 2 };
 // What a PLAYER puts down, one tile at a time. Deliberately short.
 //
@@ -147,19 +343,104 @@ enum class ItemKind : std::uint8_t { kWood = 0, kStone = 1, kSeed = 2, kProduce 
 
 inline constexpr int kItemKinds = static_cast<int>(ItemKind::kCount);
 
-struct MobStats {
+struct CreatureStats {
     std::int16_t max_hp;
-    float speed;         // tiles per second
+    float speed;          // tiles per second
     std::int16_t damage;  // per attack
+    Faction faction;
+    Disposition disposition;  // the STARTING disposition; a creature's own may change
+    float aggro;              // tiles: how far it notices a player it is willing to fight
+    float reach;              // tiles: how close it must be to land a blow
+    std::uint16_t xp;         // awarded to whoever kills it
+    float territory;          // tiles wandered from home; 0 = uses the flow field instead
 };
 
-[[nodiscard]] inline constexpr MobStats stats_of(MobKind k) noexcept {
+[[nodiscard]] inline constexpr CreatureStats stats_of(CreatureKind k) noexcept {
+    using F = Faction;
+    using D = Disposition;
     switch (k) {
-        case MobKind::kSlime: return {30, 1.2f, 4};
-        case MobKind::kSpider: return {45, 2.6f, 7};
-        case MobKind::kGhost: return {80, 1.8f, 12};
+        //                 hp  speed  dmg  faction      disposition  aggro reach  xp  territory
+        case CreatureKind::kSlime:   return {30, 1.2f,  4, F::kMonster, D::kHostile,  7.0f, 1.0f,  4, 0.0f};
+        case CreatureKind::kSpider:  return {45, 2.6f,  7, F::kMonster, D::kHostile,  9.0f, 1.0f,  7, 0.0f};
+        case CreatureKind::kGhost:   return {80, 1.8f, 12, F::kMonster, D::kHostile, 10.0f, 1.2f, 12, 0.0f};
+        case CreatureKind::kSkull:   return {140, 1.1f, 22, F::kMonster, D::kHostile, 8.0f, 1.2f, 22, 0.0f};
+        // Wildlife. The neutral ones hit hard on purpose: a boar you chose to fight should be a
+        // real decision, and a bear should be a mistake you only make once.
+        case CreatureKind::kBoar:    return {70, 2.2f, 14, F::kWild, D::kNeutral, 3.5f, 1.0f,  9, 14.0f};
+        case CreatureKind::kWolf:    return {60, 3.0f, 11, F::kWild, D::kNeutral, 5.0f, 1.0f, 10, 20.0f};
+        case CreatureKind::kBear:    return {180, 1.9f, 28, F::kWild, D::kNeutral, 4.0f, 1.3f, 26, 16.0f};
+        case CreatureKind::kHare:    return {14, 3.4f,  0, F::kWild, D::kTimid,   6.0f, 0.0f,  2, 10.0f};
+        case CreatureKind::kChicken: return {10, 2.4f,  0, F::kWild, D::kTimid,   5.0f, 0.0f,  1,  8.0f};
+        case CreatureKind::kCount: break;
     }
-    return {30, 1.2f, 4};
+    return {30, 1.2f, 4, F::kMonster, D::kHostile, 7.0f, 1.0f, 4, 0.0f};
+}
+
+// Difficulty by RING, applied when a creature is created rather than when it is hit — so a slime
+// that wandered inward from the wasteland stays a wasteland slime, and the player can tell.
+//
+// This is the one balance knob that could only be tuned once the map was real (ROADMAP P2): the
+// numbers below are per-ring multipliers on HP and damage, not on speed. Speed is left alone
+// deliberately — a faster creature is not harder so much as unfair, because the player's own speed
+// is fixed and there is no answer to something that simply outruns you.
+[[nodiscard]] inline constexpr float ring_hp_scale(Ring r) noexcept {
+    switch (r) {
+        case Ring::kMeadow: return 1.0f;
+        case Ring::kForest: return 1.5f;
+        case Ring::kWetland: return 2.3f;
+        case Ring::kSnow: return 3.4f;
+        case Ring::kWasteland: return 5.0f;
+        case Ring::kCount: break;
+    }
+    return 1.0f;
+}
+
+[[nodiscard]] inline constexpr float ring_damage_scale(Ring r) noexcept {
+    switch (r) {
+        case Ring::kMeadow: return 1.0f;
+        case Ring::kForest: return 1.35f;
+        case Ring::kWetland: return 1.8f;
+        case Ring::kSnow: return 2.4f;
+        case Ring::kWasteland: return 3.2f;
+        case Ring::kCount: break;
+    }
+    return 1.0f;
+}
+
+// Which monster a stronghold in this ring sends. The outer rings do not merely field tougher
+// slimes; they field different things, so the ring reads as a different place rather than the same
+// place with bigger numbers.
+[[nodiscard]] inline constexpr CreatureKind raid_kind_of(Ring r, std::uint32_t roll) noexcept {
+    switch (r) {
+        case Ring::kMeadow: return CreatureKind::kSlime;
+        case Ring::kForest: return (roll % 2 == 0) ? CreatureKind::kSlime : CreatureKind::kSpider;
+        case Ring::kWetland: return (roll % 2 == 0) ? CreatureKind::kSpider : CreatureKind::kGhost;
+        case Ring::kSnow: return (roll % 3 == 0) ? CreatureKind::kSkull : CreatureKind::kGhost;
+        case Ring::kWasteland: return (roll % 3 == 0) ? CreatureKind::kGhost : CreatureKind::kSkull;
+        case Ring::kCount: break;
+    }
+    return CreatureKind::kSlime;
+}
+
+// Which animals live in this ring, and how thick on the ground. Wildlife is ambient: it is placed
+// once at bring-up per chunk, not spawned in waves, because it is scenery that fights back rather
+// than a threat the director schedules.
+[[nodiscard]] inline constexpr CreatureKind wildlife_kind_of(Ring r, std::uint32_t roll) noexcept {
+    switch (r) {
+        case Ring::kMeadow:
+            return (roll % 4 == 0) ? CreatureKind::kBoar
+                                   : (roll % 2 == 0 ? CreatureKind::kHare : CreatureKind::kChicken);
+        case Ring::kForest:
+            return (roll % 3 == 0) ? CreatureKind::kWolf
+                                   : (roll % 3 == 1 ? CreatureKind::kBoar : CreatureKind::kHare);
+        case Ring::kWetland:
+            return (roll % 2 == 0) ? CreatureKind::kBoar : CreatureKind::kWolf;
+        case Ring::kSnow:
+            return (roll % 3 == 0) ? CreatureKind::kBear : CreatureKind::kWolf;
+        case Ring::kWasteland: return CreatureKind::kBear;
+        case Ring::kCount: break;
+    }
+    return CreatureKind::kHare;
 }
 
 // Which way a creature is facing. The order matches the COLUMN order of the Ninja Adventure walk
@@ -173,16 +454,101 @@ enum class Facing : std::uint8_t { kDown = 0, kUp = 1, kLeft = 2, kRight = 3 };
     return dy < 0.0f ? Facing::kUp : Facing::kDown;
 }
 
-// A mob lives in map-global tile space. Its owning chunk is derived, never stored — so migration is
-// "recompute the owner and forward", with no field to forget to update.
-struct Mob {
+// A creature lives in map-global tile space. Its owning chunk is derived, never stored — so
+// migration is "recompute the owner and forward", with no field to forget to update.
+struct Creature {
     std::uint32_t id = 0;
     float x = 0.0f;
     float y = 0.0f;
     std::int16_t hp = 0;
-    MobKind kind = MobKind::kSlime;
-    std::uint8_t attack_cd = 0;  // ticks until this mob may strike again
+    std::int16_t max_hp = 0;  // already ring-scaled, so a health bar means something
+    std::int16_t damage = 0;  // likewise
+    CreatureKind kind = CreatureKind::kSlime;
+    std::uint8_t attack_cd = 0;  // ticks until it may strike again
     Facing facing = Facing::kDown;
+
+    // --- disposition, which is STATE ---------------------------------------------------------
+    Disposition disposition = Disposition::kHostile;
+    std::uint16_t anger_ticks = 0;  // >0: hostile to `target` regardless of `disposition`
+    std::uint8_t grudge = 0;        // times provoked; each one makes the next anger last longer
+    std::uint64_t target = 0;       // the player key it is angry at, 0 = nobody
+
+    // --- elemental state ------------------------------------------------------------------------
+    Status status = Status::kNone;
+    std::uint8_t status_ticks = 0;
+    std::uint8_t stun_ticks = 0;
+
+    // --- wildlife wandering ---------------------------------------------------------------------
+    // Home is where an animal was born; it strays no further than its species' territory. Monsters
+    // leave this at zero and follow the flow field instead.
+    std::uint16_t home_tx = 0;
+    std::uint16_t home_ty = 0;
+    std::uint8_t wander_cd = 0;
+    std::int8_t wander_dx = 0;
+    std::int8_t wander_dy = 0;
+};
+
+// An arrow or a bolt in flight, owned by the chunk it is currently over.
+//
+// WHY A PROJECTILE IS CHUNK STATE and not something the shooter owns: it has to be able to hit
+// creatures the shooter cannot see, and the actor that knows what is standing on a tile is the one
+// that owns the tile. Making it chunk state means it migrates exactly like a creature does, through
+// the same hand-off, and hit resolution is a local loop over the local creature list — no
+// cross-actor read on the hot path. The alternative (the player actor owning its arrows) would have
+// to ask every chunk along the flight path what is in it, every tick.
+struct Projectile {
+    std::uint32_t id = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+    float vx = 0.0f;  // tiles per second
+    float vy = 0.0f;
+    std::int16_t damage = 0;
+    std::uint8_t life = 0;  // ticks remaining
+    Element element = Element::kNone;
+    std::uint64_t owner = 0;  // the player key to credit a kill to
+};
+
+inline constexpr float kArrowSpeed = 18.0f;   // tiles per second
+inline constexpr std::uint8_t kArrowLife = 12;  // ticks — about 20 tiles of range
+
+// A flash where something happened: a sword arc, a spell landing, a blast going off.
+//
+// WHY THIS IS SIMULATION STATE AND NOT A CLIENT-SIDE FLOURISH. The client that swung the sword
+// knows it swung, so it could draw its own arc for free. But then a fight is invisible to everyone
+// except the person having it — the other players in the field see creatures losing health for no
+// visible reason. Publishing effects as ordinary chunk state means combat is legible to whoever is
+// watching, which is the entire difference between a multiplayer world and several single-player
+// ones in the same coordinate system. The cost is a handful of 12-byte records per chunk per tick,
+// all of them gone within a second.
+enum class EffectKind : std::uint8_t {
+    kSlash = 0,
+    kFire = 1,
+    kIce = 2,
+    kEarth = 3,
+    kShock = 4,
+    kBlast = 5,  // a combo detonating
+    kCount = 6,
+};
+
+[[nodiscard]] inline constexpr EffectKind effect_of(Element e) noexcept {
+    switch (e) {
+        case Element::kFire: return EffectKind::kFire;
+        case Element::kIce: return EffectKind::kIce;
+        case Element::kEarth: return EffectKind::kEarth;
+        case Element::kShock: return EffectKind::kShock;
+        case Element::kNone:
+        case Element::kCount: break;
+    }
+    return EffectKind::kSlash;
+}
+
+inline constexpr std::uint8_t kEffectLife = 6;  // ticks; the art has 4-14 frames to spend
+
+struct Effect {
+    float x = 0.0f;
+    float y = 0.0f;
+    EffectKind kind = EffectKind::kSlash;
+    std::uint8_t age = 0;  // counts up; dropped at kEffectLife
 };
 
 struct Crop {
@@ -485,6 +851,63 @@ inline void publish_overlay(const std::uint8_t* tiles) noexcept { detail::g_over
 // (Spawn camps used to live here — five points on the map's rim, evenly spaced by arithmetic.
 // World generation places STRONGHOLDS now: they sit where the land allows, their density rises with
 // the ring, and they are the thing a raid actually comes out of. See worldgen.hpp.)
+
+// --- The player -----------------------------------------------------------------------------
+// Three bars, and each one gates a different verb, which is the only reason to have three: health
+// is what the world takes from you, stamina is what swinging and shooting costs, mana is what
+// casting costs. If two of them gated the same thing one of them would be decoration.
+inline constexpr std::int16_t kPlayerMaxHp = 100;
+inline constexpr std::int16_t kPlayerMaxMana = 60;
+inline constexpr std::int16_t kPlayerMaxStamina = 100;
+inline constexpr float kPlayerSpeed = 6.0f;   // tiles per second on foot
+inline constexpr float kMountSpeed = 11.0f;   // on a mount — the 1024x1024 map's travel answer
+
+// Regeneration per tick, at 10 Hz. Stamina comes back fast because it paces a fight; mana comes
+// back slowly because it paces a day. Health barely comes back at all — that is what a hearth and
+// food are for.
+inline constexpr std::int16_t kStaminaRegen = 2;
+inline constexpr std::int16_t kManaRegen = 1;
+inline constexpr std::int64_t kHealthRegenMs = 3'000;  // 1 hp per 3 s, out of combat only
+inline constexpr std::int64_t kCombatCooldownMs = 5'000;
+
+inline constexpr std::int16_t kSwingStamina = 12;
+inline constexpr std::int16_t kHeavyStamina = 28;
+inline constexpr std::int16_t kShootStamina = 16;
+inline constexpr std::int16_t kSpellMana = 14;
+
+inline constexpr std::int16_t kBaseMeleeDamage = 14;
+inline constexpr std::int16_t kBaseRangedDamage = 11;
+inline constexpr std::int16_t kBaseSpellDamage = 16;
+inline constexpr float kMeleeReach = 1.9f;
+inline constexpr float kHeavyReach = 2.4f;
+inline constexpr float kSpellRadius = 1.8f;
+
+inline constexpr std::uint8_t kSwingCooldown = 3;  // ticks
+inline constexpr std::uint8_t kHeavyCooldown = 8;
+inline constexpr std::uint16_t kRespawnTicks = 30;
+
+// --- Skills ----------------------------------------------------------------------------------
+// No classes: you level what you use (GAME.md §7). The cap is what keeps that from collapsing into
+// "everyone maxes everything by hour 40" — it forces a choice, which is what makes players in an
+// MMO worth having around each other.
+enum class Skill : std::uint8_t { kMelee = 0, kRanged = 1, kMagic = 2, kCraft = 3, kCount = 4 };
+
+inline constexpr int kSkillCount = static_cast<int>(Skill::kCount);
+inline constexpr std::uint8_t kMaxSkillLevel = 20;
+inline constexpr std::uint16_t kSkillPointCap = 34;  // total levels across all four skills
+
+// XP needed to go from `level` to `level+1`. Quadratic, so the first few come quickly and the last
+// few are a project.
+[[nodiscard]] inline constexpr std::uint32_t xp_for_level(std::uint8_t level) noexcept {
+    const std::uint32_t l = level + 1u;
+    return 40u * l * l;
+}
+
+// Every skill level is +6% on that skill's damage. Small enough that a level is not a gate, big
+// enough that twenty of them is a different character.
+[[nodiscard]] inline constexpr float skill_scale(std::uint8_t level) noexcept {
+    return 1.0f + 0.06f * static_cast<float>(level);
+}
 
 // --- Simulation cadence --------------------------------------------------------------------------
 inline constexpr int kTicksPerSecond = 10;

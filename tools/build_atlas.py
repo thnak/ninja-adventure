@@ -176,6 +176,25 @@ FX_MANIFEST = [
     ("LeafPink", "FX/Particle/LeafPink.png", 12, 7, 6),
     ("Rain",     "FX/Particle/Rain.png",      8, 8, 3),
     ("Snow",     "FX/Particle/Snow.png",      8, 8, 7),
+    # --- combat ---------------------------------------------------------------------------------
+    # An arrow is one 16x16 sprite rather than a tile in the terrain atlas, because it is the one
+    # thing in the game that has to be drawn ROTATED — and `fx()` is already the draw path that
+    # takes a rotation. Frame count 1: it does not animate, it points.
+    ("Arrow",    "Items/Projectile/Arrow.png", 16, 16, 1),
+    # The four schools and the blow that detonates them. These are the pack's own elemental strips;
+    # their frame widths are NOT 16 and are not multiples of it, which is why FX_MANIFEST exists as
+    # a separate concept from the tile grid at all. Each width below was measured by scanning the
+    # sheet for fully transparent columns, not guessed from the file size.
+    ("Slash",    "FX/Attack/Cut/SpriteSheet.png",           32, 32,  4),
+    ("Fire",     "FX/Elemental/Flam/SpriteSheet.png",       25, 30,  8),
+    ("Ice",      "FX/Elemental/Ice/SpriteSheet.png",        32, 32, 10),
+    ("Earth",    "FX/Elemental/Rock/SpriteSheet.png",       30, 30, 14),
+    ("Shock",    "FX/Elemental/Thunder/SpriteSheet.png",    20, 28,  8),
+    ("Blast",    "FX/Elemental/Explosion/SpriteSheet.png",  40, 40,  9),
+    # The Character screen's portrait. Ninja Adventure ships a 38x38 `Faceset.png` beside every
+    # actor — off the 16px grid, like every other entry here, which is exactly what this list is
+    # for. One frame: it is a portrait, not an animation.
+    ("FacePlayer", "Actor/Character/NinjaGreen/Faceset.png", 38, 38, 1),
 ]
 
 COLS = 8  # atlas width in cells; keeps the texture small and squarish
@@ -187,14 +206,31 @@ COLS = 8  # atlas width in cells; keeps the texture small and squarish
 # single-tile grid, and the generated header exposes `anim_frame(slot, dir, frame)`.
 NINJA = SRC / "ninja/Actor"
 
+# A 4x4 sheet is 4 FACINGS across x 4 frames down (down / up / left / right, matching `Facing`).
+# A sheet with ONE row has no facings at all — its columns are frames — and the renderer detects
+# that from `rows == 1` rather than from a flag here, so a two-frame chicken can be handed a
+# four-way facing and simply bob instead of snapping between two sprites (see `Impl::anim`).
+#
+# EVERY ENTRY BELOW WAS LOOKED AT before it was written down (a 6x contact sheet of the candidate
+# sheets, side by side, with a tile grid over them). That is the same discipline verify_structures.py
+# enforces for multi-tile crops, and it is what ruled out three plausible-by-name choices: Hyena is
+# 28x13 and does not fit the grid at all, Monster/Beast is a red demon rather than anything that
+# reads as wildlife, and Animal/Racoon is a two-frame side view where Monster/Racoon is a full
+# four-direction sheet of the same creature.
 ANIM_MANIFEST = [
     # (name, path relative to NINJA, cols, rows)
     ("Player",     "Character/NinjaGreen/SeparateAnim/Walk.png", 4, 4),
     ("MobSlime",   "Monster/Slime/Slime.png",                    4, 4),
     ("MobSpider",  "Monster/SpiderRed/SpriteSheet.png",          4, 4),
     ("MobSpirit",  "Monster/Spirit/SpriteSheet.png",             4, 4),
+    ("MobSkull",   "Monster/Skull/SpriteSheet.png",              4, 4),
+    ("Boar",       "Animal/WildBoar/SpriteSheet.png",            2, 1),
+    ("Wolf",       "Animal/DogBlack/SpriteSheet.png",            2, 1),
+    ("Bear",       "Monster/Bear/SpriteSheet.png",               4, 4),
+    ("Racoon",     "Monster/Racoon/SpriteSheet.png",             4, 4),
     ("Chicken",    "Animal/Chicken/SpriteSheetWhite.png",        2, 1),
     ("Cow",        "Animal/Cow/SpriteSheetWhite.png",            2, 1),
+    ("Horse",      "Animal/Horse/SpriteSheetBrownSide.png",      2, 1),
 ]
 
 

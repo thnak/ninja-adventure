@@ -86,10 +86,39 @@ eyeballing five hundred tiles a sheet.
 | cliffs, elevation | `TilesetRelief.png` (20x12) |
 | dungeon interiors | `TilesetDungeon.png` (12x4) |
 | drifting leaves, rain, snow | `FX/Particle/` |
+| fire / ice / earth / shock spells, the blast a combo makes | `FX/Elemental/` |
+| a sword arc | `FX/Attack/Cut/` |
+| the arrow in flight | `Items/Projectile/Arrow.png` |
+| wildlife and the outer-ring monster | `Actor/Animal/WildBoar`, `Actor/Animal/DogBlack`, `Actor/Monster/{Bear,Racoon,Skull}` |
+| the Character screen's portrait | `Actor/Character/NinjaGreen/Faceset.png` |
 
 The Kenney packs stay in `fetch_assets.sh` — some of them (Game Icons, Particle Pack, the UI packs)
 cover things Ninja Adventure does not, and those are still wanted for P4's inventory and crafting
 screens.
+
+### Choosing the P2 creatures: three plausible names ruled out by looking
+
+Wildlife needed a pack animal, a big neutral bruiser and a small timid critter. The obvious picks by
+NAME were all wrong, and a 6x contact sheet of the candidates side by side settled it in one glance:
+
+| Wanted | Obvious pick | What it actually is |
+|---|---|---|
+| a wolf | `Animal/Hyena` | a **28×13** sheet — it does not fit the 16px grid at all |
+| a wolf | `Monster/Beast` | a red demon; nothing about it reads as wildlife |
+| a small critter | `Animal/Racoon` | a two-frame side view — `Monster/Racoon` is the same animal with all four directions |
+
+The pack is also not consistent about sheet SHAPE: its four-direction actors are 4×4 grids (column =
+facing, row = frame), but its small animals ship as a single row of two frames. Feeding `facing`
+into a one-row sheet makes an animal snap between two poses as you walk around it. The renderer
+therefore treats `rows == 1` as "these columns are frames, not facings" — one rule, derived from
+what the packer already records, rather than a per-species flag.
+
+## Password hashing
+
+`third_party/monocypher/` is [Monocypher](https://github.com/LoupVaillant/Monocypher) 4.0.2,
+vendored — **one `.c` file**, dual BSD-2 / CC0. It is what turns a password into an Argon2i hash in
+`src/world/account.hpp`, and it was chosen over libsodium or a system Argon2 for exactly one reason:
+nothing to install, no version to match, and no step a contributor on Windows can get wrong.
 
 ## Audio
 
@@ -107,9 +136,9 @@ game has to run from a clean checkout.
 
 ## What is committed
 
-- **`atlas.png`** — every sprite the game uses: 37 tiles, 6 animation sheets, 17 multi-tile
-  structures and 4 particle strips, packed into one 144×1302 texture. Committed, because it is the
-  only art the build needs.
+- **`atlas.png`** — every sprite the game uses: 37 tiles, 12 animation sheets, 17 multi-tile
+  structures and 12 off-grid strips (weather, spells, the arrow, the portrait), packed into one
+  448×1834 texture. Committed, because it is the only art the build needs.
 - **`tile_index.json`** — 5225 source tiles with role, geometry and a human description. Committed
   because regenerating it costs a full visual pass over 23 sheets.
 - **`_src/`** — the raw packs. **Not committed** (`.gitignore`); ~2 MB of mostly-unused tiles.

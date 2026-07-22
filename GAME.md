@@ -344,6 +344,36 @@ thật sự. Chi tiết nhỏ, nhưng nó làm hành vi có vẻ *có lý do*.
 
 ---
 
+### Đã làm (P2)
+
+`faction` và `disposition` nằm ngay trong `Creature` — **một struct duy nhất** cho mọi thứ sống mà
+không phải người chơi, đúng như hệ quả kỹ thuật 3 ở trên. Tách quái và thú thành hai loại entity sẽ
+nhân đôi mọi vòng lặp trong `ChunkActor` để đổi lấy chênh lệch đúng hai byte.
+
+| | Trong game |
+|---|---|
+| Thù địch | slime, nhện, ma, sọ — 4 loài, **loài nào ra trận là do vòng quyết định** |
+| Trung lập | lợn rừng, sói, gấu — đánh rất đau, để việc gây sự là một *lựa chọn* |
+| Hiền | thỏ, gà — không bao giờ đánh trả, bị đánh thì chạy |
+
+Thái độ là **trạng thái**: một con lợn rừng bị chọc sẽ hằn học `kAngerTicks` (20 giây) rồi nguội —
+nhưng `grudge` tăng mỗi lần, và mỗi điểm `grudge` cộng thêm 10 giây cho lần sau. Quấy rầy mãi một
+con vật thì nó thành kẻ thù thật. Đánh một con sói thì cả bầy trong bán kính 7 ô nổi giận theo.
+
+Hai chi tiết làm cả hệ thống *nhìn thấy được*, và nếu thiếu thì nó chỉ là bảng số:
+
+- Con vật đang giận có **một vạch đỏ nhỏ trên đầu**. Trạng thái người chơi không nhìn thấy được là
+  trạng thái coi như không tồn tại — đó là khác biệt giữa "con lợn tự dưng lao vào tôi" và "tôi
+  chọc nó".
+- Quái **giết thú trên đường đi**. Không phải hệ thống săn mồi: chúng chỉ đánh thứ chắn đường, và
+  điều đó biến một cứ điểm không ai dọn thành một vệt chết trên bản đồ mà không cần một dòng chữ nào.
+
+Thú hoang **không dùng flow field**, chỉ lang thang quanh ô `home` trong bán kính của loài — nên
+~620 con sống trên bản đồ gần như không tốn gì. Chúng được gieo một lần từ khoá chunk và **không
+hồi sinh**: một con nai mọc lại sau vài phút biến thế giới thành bảng tính tự nạp lại.
+
+---
+
 ## 6. Làng mạc — hàng xóm, không phải đồng hồ đếm ngược
 
 Thế giới cũ chỉ có *đất trống + cứ điểm + nông trại bạn*. Không ai khác sống ở đó — với một game
@@ -618,6 +648,27 @@ trở nên cụ thể thay vì chỉ là hai thanh máu riêng:
 
 Hệ quả hay: **thời tiết cũng đặt trạng thái**. Trời mưa → mọi thứ *Ướt* → build Lôi mạnh lên trong
 mưa. Mùa đông → hồ đóng băng → vừa mở lối đi mới cho quái, vừa cho phép *Vỡ vụn* dễ hơn.
+
+---
+
+### Đã làm (P2)
+
+Cả năm dòng của bảng trên đã chạy. Phép **đặt** trạng thái, đòn vật lý **kích nổ** nó, và trạng thái
+bị tiêu đi khi nổ — nên combo là một *khung thời gian bạn nhắm vào*, không phải một chỗ đỗ.
+
+Mỗi sinh vật mang **đúng một** trạng thái, và đó là quyết định chứ không phải sự lười. Cả năm combo
+đều là (một trạng thái) × (một kiểu đòn), nên một bitmask sẽ là state không ai đọc — và quan trọng
+hơn: đặt trạng thái mới **ghi đè** trạng thái cũ, nên bạn không thể xếp chồng cả bốn hệ lên một mục
+tiêu rồi vung một nhát. Việc chọn hệ nào là việc phải chọn.
+
+Trạng thái được vẽ bằng **màu nhuộm lên sprite**, cùng màu với hệ phép đã gây ra nó. Chín loài × năm
+trạng thái là 45 sprite mà bộ art không có; một lớp màu đọc được ngay, tốn không gì, và dạy người
+chơi bảng ánh xạ mà không phải nói ra.
+
+Kinh nghiệm rơi vào kỹ năng **theo cách con vật chết**, không theo thứ giết nó: bắn thì lên Tầm xa,
+đốt thì lên Phép. Đó là toàn bộ nội dung của "lên kỹ năng theo việc mình làm". Trần tổng 34 điểm
+trên 4 nhánh, hiển thị ngay cạnh tổng ở màn hình Nhân vật — một giới hạn chỉ lộ ra khi va vào là
+một báo lỗi, không phải một thiết kế.
 
 ---
 

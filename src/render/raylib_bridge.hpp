@@ -22,6 +22,12 @@
 namespace mmo {
 
 // What the player asked for this frame, in world terms. No raylib types cross this boundary.
+//
+// The left mouse button means two different things, and which one is decided by a MODE rather than
+// by a modifier. Combat is the default and building is a mode you enter with `B`, because the
+// alternative — one button that builds when you click ground and swings when you click a creature —
+// makes the most dangerous moment in the game (something is on top of you) the moment the control
+// is most ambiguous.
 struct InputFrame {
     float move_x = 0.0f;  // -1..1
     float move_y = 0.0f;
@@ -31,6 +37,18 @@ struct InputFrame {
     bool till = false;
     bool upgrade = false;
     BuildKind build_kind = BuildKind::kHearth;
+    bool build_mode = false;
+
+    // --- combat ---
+    bool swing = false;
+    bool heavy = false;
+    bool shoot = false;
+    bool cast = false;
+    Element element = Element::kFire;
+    bool mount = false;   // edge-triggered toggle
+    float aim_x = 0.0f;   // cursor, in map tiles (fractional)
+    float aim_y = 0.0f;
+
     std::uint16_t cursor_tx = 0;
     std::uint16_t cursor_ty = 0;
     bool quit = false;
@@ -45,7 +63,11 @@ public:
     RaylibBridge& operator=(const RaylibBridge&) = delete;
 
     [[nodiscard]] bool begin_frame() override;
-    void draw(const SnapshotBus& bus, const WorldStatus& status, const PlayerView& player) override;
+    // `local_slot` is which player the camera follows. Every OTHER live slot is drawn as another
+    // character in the world — which is the whole visible difference between a keyed PlayerActor
+    // and the singleton it replaced.
+    void draw(const SnapshotBus& bus, const WorldStatus& status, const PlayerBus& players,
+              int local_slot) override;
     void end_frame() override;
 
     // Reads the keyboard/mouse and converts to world intent, using the last drawn camera to turn
@@ -57,11 +79,13 @@ public:
     // What the last `draw` actually put on screen. Read by the F3 debug overlay, which lives in the
     // UI shell rather than here.
     [[nodiscard]] int drawn_chunks() const;
-    [[nodiscard]] int drawn_mobs() const;
+    [[nodiscard]] int drawn_creatures() const;
 
-    // The build type the player has selected. Owned here because `poll_input` sets it from the
-    // number keys; the shell mirrors it into the hotbar highlight.
+    // What the player has selected, and which mode they are in. Owned here because `poll_input`
+    // sets them from the number keys; the shell mirrors them into the hotbar.
     [[nodiscard]] BuildKind selected_build() const;
+    [[nodiscard]] Element selected_element() const;
+    [[nodiscard]] bool build_mode() const;
 
     // The generated world: which buildings stand where. Const for the world's lifetime, so it is
     // handed over once at start-up rather than passed every frame.

@@ -128,33 +128,56 @@ cứ điểm bóp nghẹt.
 
 ---
 
-## P2 — Nhân vật và chiến đấu — **tiếp theo**
+## P2 — Nhân vật và chiến đấu — **XONG**
 
-Người chơi hiện **không đánh nhau được gì cả**: tháp bắn đã bị gỡ cùng với các công trình đặt-từng-ô,
-nên quái đi tới làng và không có gì cản. Đó là trạng thái đúng để bước vào P2 — combat được tune một
-lần, trên bản đồ thật, thay vì tune quanh một cái tháp mà bộ art không vẽ nổi.
+| | Trạng thái |
+|---|---|
+| `PlayerActor` **keyed theo tài khoản**, nhiều instance (nguyên tắc 2) | ✅ 8 slot phiên, đăng ký nguội lúc bring-up |
+| **Đăng nhập**: tên + mật khẩu, Argon2 qua Monocypher | ✅ `src/world/account.hpp`, 32 MiB / 3 lượt, salt riêng mỗi tài khoản |
+| Máu / mana / thể lực; chết và hồi sinh | ✅ ba thanh, mỗi thanh khoá một động từ khác nhau |
+| Quái tấn công người chơi | ✅ qua **beacon**, không phải `ask` — xem dưới |
+| Cận chiến + tầm xa; đường đạn | ✅ mũi tên là state của chunk, migrate y hệt sinh vật |
+| Bốn hệ phép và hệ trạng thái | ✅ Đóng băng / Bỏng / Ướt / Dính bùn / Nhiễm điện |
+| **Combo vật lý × phép** | ✅ đủ 5 dòng bảng [GAME.md §7](GAME.md) |
+| **Phe và thái độ** | ✅ `disposition` là *trạng thái*; nổi giận, nguội lại, và **nhớ mặt** |
+| Bầy đàn nổi giận theo | ✅ đánh một con sói là đánh cả đàn |
+| Động vật hoang dã lang thang quanh `home`, không dùng flow field | ✅ ~620 con, gieo một lần từ khoá chunk, không hồi sinh |
+| Kinh nghiệm theo hành động, giới hạn tổng điểm kỹ năng | ✅ 4 kỹ năng, trần 34 điểm |
+| Màn hình Nhân vật (`C`), có chân dung | ✅ |
+| **Cân bằng độ khó theo vòng** | ✅ HP ×1 → ×5, sát thương ×1 → ×3,2, và **loài khác nhau** theo vòng |
+| Phương tiện di chuyển (đẩy từ P1 sang) | ✅ `R` — nhanh hơn, nhưng không đánh được |
 
-- `PlayerActor` **keyed theo tài khoản**, nhiều instance (nguyên tắc 2).
-- **Đăng nhập cơ bản**: tên + mật khẩu, hash bằng Argon2 (Monocypher — một file .c, public domain).
-  Cần một tài khoản để `PlayerActor` key theo.
-- Máu / mana / thể lực; chết và hồi sinh; quái tấn công người chơi.
-- Cận chiến + tầm xa; đường đạn; thanh kỹ năng.
-- Bốn hệ phép và **hệ trạng thái** (Đóng băng / Bỏng / Ướt / Dính bùn / Nhiễm điện).
-- **Hệ phe và thái độ sinh vật** ([GAME.md §5](GAME.md)): `faction` + `disposition` là *trạng thái*
-  chứ không phải thuộc tính loài; sinh vật trung lập nổi giận khi bị chọc rồi nguội lại; bầy đàn
-  nổi giận theo. Động vật hoang dã lang thang quanh `home`, **không** dùng flow field.
-- **Combo vật lý × phép** — cơ chế chữ ký, xem [GAME.md §7](GAME.md).
-- Kinh nghiệm theo hành động, giới hạn tổng điểm kỹ năng.
-- Màn hình Nhân vật (`C`), có chân dung (`Faceset.png` đi kèm mỗi nhân vật).
-- **Cân bằng độ khó theo vòng** — đây là thứ chỉ làm được khi bản đồ đã thật.
+**Xong khi:** ✅ `mmo_sim` dàn dựng một trận thật và khẳng định được từng mắt xích — beacon tới chunk,
+quái đánh người chơi, người chơi vung kiếm, chunk xử sát thương, XP quay về; hai tài khoản cùng đứng
+một ô là **hai thanh máu khác nhau**; chết rồi hồi sinh ở lò sưởi mà **không mất gì**.
 
-**Xong khi:** một mình sống được ở vòng 1; combo Đóng băng → cận chiến nặng gây *Vỡ vụn* nhìn thấy
-rõ; đi ngang đàn sói không gây sự thì chúng kệ bạn, bắn một con thì cả đàn xông tới; và ra vòng 3
-thì **chết** — độ khó theo vòng có thật.
+### Ba thứ đo được rồi mới sửa, đáng ghi lại
+
+| Triệu chứng | Nguyên nhân thật |
+|---|---|
+| "Quái không đánh người chơi" — máu vẫn 100 sau 25 tick | Không phải lỗi. Có **hai** tài khoản cùng đăng nhập, cùng đứng một ô spawn; quái chọn người gần nhất và nó chọn người kia. Chính xác là điều nguyên tắc 2 tồn tại để làm đúng |
+| `mmo_probe` segfault | `int hist[6]` đánh chỉ số bằng `Terrain` — enum đã lên 11 giá trị từ **P1**. Ghi tràn stack, im lặng suốt một giai đoạn. Giờ mảng lấy kích thước từ `Terrain::kCount` |
+| Cả thế giới hoá đỏ khi chết | Lớp phủ toàn màn hình alpha 130. Một lớp wash phủ kín mạnh hơn nhiều so với lúc đọc code, vì mắt không còn chỗ nào chưa nhuộm để so |
+
+### Một quyết định kiến trúc đáng ghi: beacon, không phải `ask`
+
+Sinh vật cần biết người chơi ở đâu **mỗi tick**. Hỏi `PlayerActor` (tier A, sau này ở máy khác) là
+đặt một lượt đọc đồng bộ xuyên actor — rồi xuyên máy — vào đường nóng di chuyển của mọi con quái
+trong thế giới. Nên chiều dữ liệu bị đảo lại: MapDirector đọc vị trí từ `PlayerBus` đã publish rồi
+phát `PlayerBeacon` tới 5×5 chunk quanh mỗi người chơi, ba tick một lần.
+
+Nó là **soft state có hạn dùng**: chunk quên một beacon không nghe lại sau 12 tick. Không cần message
+"người chơi đã rời đi", mất một beacon thì tự lành, và một chunk vừa được đặt lại sau khi node chết
+chỉ việc học lại danh sách ở nhịp sau. Đây là ARP, và đúng vì cùng một lý do ARP đúng.
+
+Phần thưởng không định trước: **danh sách beacon chính là interest set.** Wildlife làm gần như không
+chunk nào còn "rỗng", nên luật LOD cũ (chunk rỗng publish thưa) lẽ ra đã âm thầm hết tác dụng. Luật
+đúng — và đáng lẽ luôn phải là — "chỉ publish đủ nhanh khi có người nhìn được", và `players_` chính
+là vị từ đó, miễn phí. P6 sẽ dùng lại đúng danh sách này để quyết định stream chunk nào cho ai.
 
 ---
 
-## P3 — Hệ thống thế giới
+## P3 — Hệ thống thế giới — **tiếp theo**
 
 Giờ mới xây các hệ thống *lên trên* bộ khung, khi cân bằng combat đã ổn định.
 
@@ -267,12 +290,12 @@ Cân bằng, nhạc, hiệu ứng hạt, hướng dẫn, bách khoa, tối ưu, 
 | `kSpawnCamps`/`camp_tile()` → cứ điểm do worldgen đặt | **P1 ✅** |
 | Chunk tạo sẵn hết lúc bring-up, không ngủ được | **P1 ✅** chunk rỗng publish 32 tick/lần |
 | `MapDirector` ôm quá nhiều trách nhiệm | P3 — giờ nó chỉ còn đồng hồ + tung xúc xắc đột kích, đủ nhỏ để đợi |
-| `PlayerActor` singleton | **P2** (nguyên tắc 2) |
+| `PlayerActor` singleton | **P2 ✅** 8 slot phiên, keyed |
 | Tháp chỉ thấy quái cùng chunk | P3 |
 | Công trình chỉ chặn đường trong chunk sở hữu | P3 |
 | `MapId` là enum cố định | P4 (hạ tầng instance) |
 | Chưa có persistence | P5 |
-| Renderer đọc toàn bộ SnapshotBus, không có interest set | P6 (chuẩn bị ở P2) |
+| Renderer đọc toàn bộ SnapshotBus, không có interest set | P6 — **nửa đầu đã có ở P2**: danh sách beacon đã là interest set phía server |
 | Chưa có âm thanh | P0 |
 
 ---
@@ -291,6 +314,18 @@ Cân bằng, nhạc, hiệu ứng hạt, hướng dẫn, bách khoa, tối ưu, 
 | Thứ tự | **khung thế giới → combat → hệ thống** | tune combat một lần, trên bản đồ thật |
 | RL | quái **+ vệ binh làng**, chỉ chiến binh | policy theo nguyên mẫu, không theo cá thể |
 
+## Nợ P2 đẩy sang sau, và vì sao
+
+- **Slot phiên cố định (8)** → P6. `Engine::register_activation` là cold-only ("safe, single-threaded
+  before start()"), nên một actor không thể xuất hiện khi thế giới đang chạy. Roster đăng ký sẵn và
+  đăng nhập chỉ *gắn* tài khoản vào slot. Máy chủ thật cũng có connection slot vì đúng lý do này;
+  bỏ giới hạn cần Quark cho phép spawn nóng, và đó là việc của P6.
+- **Mật khẩu đi qua mạng dạng rõ** → P6, cùng `SecureTransport`. Chưa có mạng nên chưa có gì để
+  mã hoá, nhưng phải ghi rõ trước khi có người chơi cùng nhau qua Internet.
+- **Sát thương do va chạm giữa quái và quái** chỉ trong cùng chunk → P3, cùng message tóm tắt hàng xóm.
+- **Loot của quái** → P4. Sinh vật hoang dã rơi thịt; quái chưa rơi gì, vì bảng loot là việc của P4
+  và đặt một bảng tạm bây giờ là đặt nó hai lần.
+
 ## Không còn gì chặn đường
 
-Mọi quyết định đã chốt. **P0 và P1 xong.** Việc tiếp theo là **P2 — nhân vật và chiến đấu.**
+Mọi quyết định đã chốt. **P0, P1 và P2 xong.** Việc tiếp theo là **P3 — hệ thống thế giới.**

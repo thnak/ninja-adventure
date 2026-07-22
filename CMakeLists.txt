@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(QuarkMmo LANGUAGES CXX VERSION 0.1.0
+project(QuarkMmo LANGUAGES C CXX VERSION 0.1.0
         DESCRIPTION "Serverless farm-survival MMO on the Quark actor engine")
 
 set(CMAKE_CXX_STANDARD 23)
@@ -24,11 +24,20 @@ set(QUARK_BUILD_BENCH OFF CACHE BOOL "" FORCE)
 set(QUARK_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory("${QUARK_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/quark" EXCLUDE_FROM_ALL)
 
+# ---- Password hashing ------------------------------------------------------
+# Monocypher, vendored (tag 4.0.2), dual BSD-2 / CC0. ONE .c file — which is the whole reason it was
+# chosen over libsodium or a system Argon2: no package to find, no version to match, nothing for a
+# contributor on Windows to install. It is compiled as C because it is C; that is the only reason
+# this project declares the C language at all. See src/world/account.hpp.
+add_library(mmo_crypto STATIC third_party/monocypher/monocypher.c)
+target_include_directories(mmo_crypto PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/monocypher")
+set_target_properties(mmo_crypto PROPERTIES C_STANDARD 99 POSITION_INDEPENDENT_CODE ON)
+
 # ---- Shared simulation -----------------------------------------------------
 # Header-only: the world lives entirely in templates + inline code, like the engine it sits on.
 add_library(mmo_world INTERFACE)
 target_include_directories(mmo_world INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(mmo_world INTERFACE quark::quark)
+target_link_libraries(mmo_world INTERFACE quark::quark mmo_crypto)
 target_compile_features(mmo_world INTERFACE cxx_std_23)
 
 find_package(Threads REQUIRED)

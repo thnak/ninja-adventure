@@ -26,13 +26,60 @@ namespace mmo {
 
 struct PlayerView {
     std::uint64_t id = 0;
+    std::uint32_t account = 0;  // 0 = this session slot is empty
     std::uint16_t map = 0;
     float x = 0.0f;
     float y = 0.0f;
     std::int16_t hp = 0;
+    std::int16_t max_hp = 0;
+    std::int16_t mana = 0;
+    std::int16_t stamina = 0;
     Facing facing = Facing::kDown;
     std::uint32_t steps = 0;  // monotonic move count — the renderer's animation clock
+    std::uint16_t dead_ticks = 0;  // >0 while waiting to respawn
+    std::uint32_t deaths = 0;
+    bool mounted = false;
+    std::uint16_t respawn_tx = 0;
+    std::uint16_t respawn_ty = 0;
     std::int32_t items[kItemKinds] = {};
+    std::uint8_t skill_level[kSkillCount] = {};
+    std::uint32_t skill_xp[kSkillCount] = {};
+    std::uint32_t skill_next[kSkillCount] = {};
+
+    [[nodiscard]] bool live() const noexcept { return account != 0; }
+};
+
+using PlayerViewPtr = std::shared_ptr<const PlayerView>;
+
+// The players' equivalent of `SnapshotBus`, one slot per session.
+//
+// WHO READS IT AND WHY THAT IS SOUND. Two readers: the renderer (which must not `ask` in a frame,
+// for the reasons at the top of this file), and MapDirector — which needs every player's position
+// each tick in order to fan `PlayerBeacon`s to the chunks near them. The director could not obtain
+// that by asking without blocking a tier-A actor on N replies per tick.
+//
+// This does NOT weaken the trust tiering, and the reason is specific: `MapDirector` and every
+// `PlayerActor` both carry `Require<Trusted>`, so placement guarantees they are co-located on the
+// leader. A shared in-process publication between two actors that are pinned to the same node is a
+// local optimisation, not a channel. What crosses to an untrusted chunk host is always a real
+// message — `PlayerBeacon` — and a chunk can no more read this array than it can read an
+// inventory.
+class PlayerBus {
+public:
+    PlayerBus() : slots_(kMaxPlayers) {}
+    PlayerBus(const PlayerBus&) = delete;
+    PlayerBus& operator=(const PlayerBus&) = delete;
+
+    void publish(int slot, PlayerViewPtr v) noexcept {
+        slots_[static_cast<std::size_t>(slot)].store(std::move(v), std::memory_order_release);
+    }
+
+    [[nodiscard]] PlayerViewPtr load(int slot) const noexcept {
+        return slots_[static_cast<std::size_t>(slot)].load(std::memory_order_acquire);
+    }
+
+private:
+    std::vector<std::atomic<PlayerViewPtr>> slots_;
 };
 
 // One chunk's renderable state at one tick. Terrain is included because a chunk may be re-placed
@@ -42,7 +89,9 @@ struct ChunkView {
     std::uint64_t tick = 0;
     std::int64_t world_ms = 0;
     std::uint8_t terrain[kChunkTiles * kChunkTiles] = {};
-    std::vector<Mob> mobs;
+    std::vector<Creature> creatures;
+    std::vector<Projectile> shots;
+    std::vector<Effect> effects;
     std::vector<Crop> crops;
     std::vector<Building> buildings;
 };
@@ -86,8 +135,10 @@ struct WorldStatus {
     std::atomic<std::uint64_t> tick{0};
     std::atomic<bool> night{false};
     std::atomic<std::uint32_t> wave{0};
-    std::atomic<std::uint32_t> mobs_alive{0};
-    std::atomic<std::uint32_t> mobs_killed{0};
+    std::atomic<std::uint32_t> creatures_alive{0};
+    std::atomic<std::uint32_t> creatures_killed{0};
+    std::atomic<std::uint32_t> player_kills{0};  // of those, how many the players did themselves
+    std::atomic<std::uint32_t> player_deaths{0};
     std::atomic<std::uint32_t> migrations{0};  // cross-chunk (and, once distributed, cross-node)
 };
 
@@ -104,7 +155,7 @@ public:
 
     // Returns false when the user has asked to close the window.
     [[nodiscard]] virtual bool begin_frame() = 0;
-    virtual void draw(const SnapshotBus&, const WorldStatus&, const PlayerView&) = 0;
+    virtual void draw(const SnapshotBus&, const WorldStatus&, const PlayerBus&, int local_slot) = 0;
     virtual void end_frame() = 0;
 };
 

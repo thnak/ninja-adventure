@@ -140,6 +140,29 @@ Cái giá để làm đúng gần bằng không:
 
 Một file nguồn thả vào repo. Không có build system nào phải sửa.
 
+### Đã làm (P2) — `src/world/account.hpp`
+
+Argon2i qua Monocypher 4.0.2, vendored (**một file `.c`**, BSD-2/CC0): 32 MiB, 3 lượt, salt 16 byte
+riêng cho mỗi tài khoản, so sánh hash bằng `crypto_verify32` (thời gian hằng — so từng byte làm rò
+độ dài tiền tố trùng khớp qua timing, biến bài toán offline thành online). Một cái tên thế giới chưa
+từng thấy sẽ **tạo tài khoản** thay vì bị từ chối: đó là mô hình Minecraft/Valheim, và là lý do
+không có máy chủ tài khoản nào ở đây.
+
+Tham số 32 MiB/3 lượt là núm quyết định một file tài khoản bị lộ đắt bao nhiêu để tấn công offline.
+Hạ nó xuống thì người chơi **không thấy gì cả** còn kẻ tấn công được tất cả — nên nó không bị hạ để
+cho test chạy nhanh hơn.
+
+### Đã làm (P2) — roster người chơi, và vì sao nó cố định
+
+`Engine::register_activation` là **cold-only** — chính comment của nó nói "safe, single-threaded
+before start()". Một actor không thể xuất hiện khi thế giới đang chạy. Nên `kMaxPlayers = 8`
+`PlayerActor` được đăng ký sẵn lúc bring-up và **đăng nhập chỉ *gắn* một tài khoản vào một slot**
+(`BindAccount`); slot chưa gắn thì trơ — nó nhận tick, bỏ qua, và publish một view nói `account == 0`.
+
+Đây không phải là né tránh: máy chủ thật cũng có connection slot vì đúng lý do này. Bảng tài khoản
+thì không bị giới hạn — cái bị giới hạn là số người *đang* đăng nhập, và `AccountId` (chứ không phải
+slot) là thứ P5 sẽ khoá bản lưu theo.
+
 ### Thứ *có thể* để sau
 
 - **Mã hoá đường truyền.** Chưa nối `SecureTransport` thì mật khẩu đi qua mạng ở dạng rõ. Với LAN /
@@ -157,6 +180,40 @@ Hai việc phải làm để nó không thành thảm hoạ:
 2. **Lưu định kỳ + lúc thoát.** Sập máy mất tối đa một khoảng snapshot.
 
 Bầu leader tự động là chuyện của sau này, nếu có bao giờ cần.
+
+---
+
+## 2b. Người chơi ở đâu — beacon, không phải `ask` (P2)
+
+Đây là quyết định kiến trúc lớn nhất của P2 và nó không nằm ở combat.
+
+Một con quái quyết định đuổi ai cần biết vị trí người chơi **mỗi tick**. Hỏi `PlayerActor` là đặt một
+lượt đọc đồng bộ xuyên actor — và một ngày nào đó xuyên máy — vào đường nóng di chuyển của mọi sinh
+vật trong thế giới. Nên chiều dữ liệu bị đảo:
+
+```
+PlayerActor  --publish-->  PlayerBus  --đọc-->  MapDirector  --PlayerBeacon-->  5x5 ChunkActor
+   (tier A)                (tier A)              (tier A)         (message)         (tier B)
+```
+
+**`PlayerBus` không phá vỡ phân tầng tin cậy**, và lý do phải cụ thể: `MapDirector` và mọi
+`PlayerActor` đều mang `Require<Trusted>`, nên placement bảo đảm chúng nằm cùng trên leader. Chia sẻ
+một publication in-process giữa hai actor bị ghim cùng node là tối ưu cục bộ, không phải một kênh.
+Thứ đi sang một chunk host không tin cậy **luôn là một message thật** — `PlayerBeacon` — và một chunk
+không đọc được mảng này, y như không đọc được túi đồ.
+
+Beacon là **soft state có hạn dùng**: chunk quên một beacon không nghe lại sau `kBeaconLease` tick.
+Không cần message "người chơi đã rời", mất một beacon thì tự lành, và một chunk vừa được đặt lại sau
+khi node chết chỉ việc học lại roster ở nhịp sau. Đây là ARP, và đúng vì cùng lý do ARP đúng.
+
+**Và nó là interest set.** Wildlife (~620 con) làm gần như không chunk nào còn rỗng, nên luật LOD cũ
+("chunk rỗng publish thưa") lẽ ra đã âm thầm ngừng tiết kiệm bất cứ thứ gì. Luật đúng — và đáng lẽ
+luôn phải là — "chỉ publish đủ nhanh khi có ai nhìn được", và `players_` chính là vị từ đó, miễn phí.
+P6 sẽ dùng lại đúng danh sách này để quyết định stream chunk nào cho client nào.
+
+Một hệ quả phải nhớ khi viết công cụ: **một sự kiện chỉ hiện ra trong view sau đúng một chu kỳ LOD.**
+`mmo_probe` báo "raid creatures: 0" vì nó đọc view ngay sau lúc trời tối; chunk đó không có ai đứng
+gần nên 32 tick nữa nó mới publish.
 
 ---
 

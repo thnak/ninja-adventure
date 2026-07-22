@@ -39,6 +39,7 @@ struct MapDirector : quark::Actor<MapDirector, quark::Sequential, quark::Priorit
     // Wired at bring-up.
     quark::LocalRouter* router = nullptr;
     WorldStatus* status = nullptr;
+    const PlayerBus* players = nullptr;  // read-only: where everyone is, published by the actors
     std::uint64_t world_seed = 0;
     std::vector<ChunkCoord> chunks;  // every chunk in the world, in index order
     // Where raids come from. Filled from the world layout at bring-up; the director never reads the
@@ -66,13 +67,18 @@ struct MapDirector : quark::Actor<MapDirector, quark::Sequential, quark::Priorit
             spawn_wave();
         }
 
-        // The heartbeat. Every chunk, every tick — including chunks with nothing in them, which is
-        // cheap precisely because an empty `Sequential` handler that touches three empty vectors is
-        // a few hundred nanoseconds and never contends with anything.
+        // The heartbeat. Every chunk and every player actor, every tick — including chunks with
+        // nothing in them, which is cheap precisely because an empty `Sequential` handler that
+        // touches a few empty vectors is a few hundred nanoseconds and never contends with anything.
         const Tick t{tick_, world_ms_, night};
         for (const ChunkCoord& c : chunks) {
             router->get<ChunkActor>(chunk_key(c)).tell(t);
         }
+        for (int slot = 0; slot < kMaxPlayers; ++slot) {
+            router->get<PlayerActor>(player_key(slot)).tell(t);
+        }
+
+        fan_beacons();
     }
 
     void handle(const Ask<GetWorldTick, std::uint64_t>& m) noexcept { m.respond(tick_); }
@@ -80,6 +86,47 @@ struct MapDirector : quark::Actor<MapDirector, quark::Sequential, quark::Priorit
     [[nodiscard]] std::int64_t world_ms() const noexcept { return world_ms_; }
 
 private:
+    // Tell the chunks around each player where that player is.
+    //
+    // WHY THE DIRECTOR AND NOT THE PLAYER ACTOR. A `PlayerActor` cannot address a `ChunkActor`
+    // without including chunk_actor.hpp, which includes player_actor.hpp — a genuine cycle, not a
+    // stylistic one. The director already depends on both and already fans one message to every
+    // chunk every tick, so the beacon rides the same fan-out it was always going to need. It reads
+    // positions from the published `PlayerBus` rather than asking, for the reason set out in
+    // snapshot.hpp: a tier-A actor must not block on N replies per tick.
+    //
+    // 5x5 CHUNKS, not 3x3. The radius has to cover what the client can SEE, not merely what a
+    // creature can reach, because the same roster is what tells a chunk it is being watched and may
+    // publish (chunk_actor.hpp, kIdlePublish). 5x5 is 160x160 tiles — comfortably more than a
+    // screen at minimum zoom, and 25 tells every third tick per player.
+    void fan_beacons() noexcept {
+        if (players == nullptr || router == nullptr) return;
+        if (tick_ % kBeaconPeriod != 0) return;
+        constexpr int kSpan = 2;  // chunks either side
+        for (int slot = 0; slot < kMaxPlayers; ++slot) {
+            PlayerViewPtr v = players->load(slot);
+            if (!v || !v->live()) continue;
+            PlayerBeacon b{};
+            b.player = v->id;
+            b.map = v->map;
+            b.x = v->x;
+            b.y = v->y;
+            b.hp = v->hp;
+            b.tick = tick_;
+            const ChunkCoord home = chunk_of(v->map, v->x, v->y);
+            for (int dy = -kSpan; dy <= kSpan; ++dy) {
+                for (int dx = -kSpan; dx <= kSpan; ++dx) {
+                    const int cx = static_cast<int>(home.cx) + dx;
+                    const int cy = static_cast<int>(home.cy) + dy;
+                    if (cx < 0 || cy < 0 || cx >= kMapChunks || cy >= kMapChunks) continue;
+                    const ChunkCoord c{v->map, static_cast<std::uint16_t>(cx),
+                                       static_cast<std::uint16_t>(cy)};
+                    router->get<ChunkActor>(chunk_key(c)).tell(b);
+                }
+            }
+        }
+    }
+
     // Raids come out of STRONGHOLDS, and only some of them, chosen at random each night.
     //
     // The old version emptied all five fixed camps every single night, which is a schedule, and a
@@ -105,15 +152,8 @@ private:
         std::uint32_t sent = 0;
         for (const auto& [tx, ty] : raid_sources) {
             if (rng.unit() > kRaidChance) continue;
-            SpawnWave w{};
-            w.count = per_source;
-            w.seed = static_cast<std::uint32_t>(rng.next());
-            w.kind = static_cast<std::uint8_t>(rng.below(3));
-            w.tx = static_cast<std::uint16_t>(tx);
-            w.ty = static_cast<std::uint16_t>(ty);
-            w.radius = 3;
             const ChunkCoord c = chunk_of(home, static_cast<float>(tx), static_cast<float>(ty));
-            router->get<ChunkActor>(chunk_key(c)).tell(w);
+            router->get<ChunkActor>(chunk_key(c)).tell(raid_at(tx, ty, per_source, rng));
             ++sent;
         }
         // A night on which nothing at all stirs is fine and intended, but a run that never spawns
@@ -122,17 +162,26 @@ private:
         if (sent == 0 && wave_ == 1) {
             const auto& [tx, ty] = raid_sources[rng.below(static_cast<std::uint32_t>(
                 raid_sources.size()))];
-            SpawnWave w{};
-            w.count = per_source;
-            w.seed = static_cast<std::uint32_t>(rng.next());
-            w.kind = static_cast<std::uint8_t>(rng.below(3));
-            w.tx = static_cast<std::uint16_t>(tx);
-            w.ty = static_cast<std::uint16_t>(ty);
-            w.radius = 3;
             router->get<ChunkActor>(chunk_key(chunk_of(home, static_cast<float>(tx),
                                                        static_cast<float>(ty))))
-                .tell(w);
+                .tell(raid_at(tx, ty, per_source, rng));
         }
+    }
+
+    // WHAT comes out of a stronghold depends on where the stronghold is. The outer rings do not
+    // merely field tougher slimes — they field different creatures, so a ring reads as a different
+    // place rather than the same place with bigger numbers on it. (The numbers get bigger too: the
+    // chunk scales HP and damage by ring when it creates each one.)
+    [[nodiscard]] SpawnWave raid_at(int tx, int ty, std::uint16_t count, Rng& rng) const noexcept {
+        SpawnWave w{};
+        w.count = count;
+        w.seed = static_cast<std::uint32_t>(rng.next());
+        w.kind = static_cast<std::uint8_t>(
+            raid_kind_of(ring_of(world_seed, tx, ty), static_cast<std::uint32_t>(rng.next() >> 8)));
+        w.tx = static_cast<std::uint16_t>(tx);
+        w.ty = static_cast<std::uint16_t>(ty);
+        w.radius = 3;
+        return w;
     }
 
     // Per stronghold, per night. Tuned so that with ~25 strongholds a typical night wakes two or

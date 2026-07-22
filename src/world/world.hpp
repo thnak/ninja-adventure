@@ -10,12 +10,18 @@
 // through `LocalRouter`. Swapping `LocalRouter` for the distributed router and handing each node a
 // subset of the chunk keys is the port to a real cluster; the actors themselves are already written
 // as if their peers were remote, because from inside a handler there is no way to tell.
+//
+// EVERY PLAYER VERB TAKES A KEY. There is no "the player" here, even though a single-process run
+// only ever has one. That is ROADMAP principle 2 held to: the shape that costs nothing today and
+// weeks at P6.
 #pragma once
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <memory>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -24,6 +30,7 @@
 #include "quark/core/engine.hpp"
 #include "quark/core/spawn.hpp"
 
+#include "world/account.hpp"
 #include "world/chunk_actor.hpp"
 #include "world/flow_field.hpp"
 #include "world/map_director.hpp"
@@ -35,13 +42,17 @@
 
 namespace mmo {
 
-inline constexpr std::uint64_t kPlayerKey = 1;
 inline constexpr std::uint64_t kDirectorKey = 1;
 
-[[nodiscard]] inline std::uint32_t count_mobs(const SnapshotBus& bus) noexcept {
+// How far from the player a spell may be aimed. The client says where the cursor is; the trusted
+// actor says where the player is; this clamps the difference. Without it the mouse would be a
+// sniper rifle with no cooldown.
+inline constexpr float kSpellRange = 8.0f;
+
+[[nodiscard]] inline std::uint32_t count_creatures(const SnapshotBus& bus) noexcept {
     std::uint32_t n = 0;
     for (int i = 0; i < kChunkCount; ++i) {
-        if (ChunkViewPtr v = bus.load_index(i)) n += static_cast<std::uint32_t>(v->mobs.size());
+        if (ChunkViewPtr v = bus.load_index(i)) n += static_cast<std::uint32_t>(v->creatures.size());
     }
     return n;
 }
@@ -68,8 +79,8 @@ public:
         cfg.worker_count = workers;
         cfg.shard_count = workers;
         cfg.drain_budget = 256;
-        cfg.band_count = 2;  // Priority<0> (director/player) and Priority<1> (chunks)
-        cfg.max_types = 16;
+        cfg.band_count = 2;  // Priority<0> (director/players) and Priority<1> (chunks)
+        cfg.max_types = 64;
         cfg.pool_capacity = 1u << 14;
         engine_ = std::make_unique<quark::Engine<quark::PriorityBands<2>>>(cfg);
 
@@ -83,7 +94,7 @@ public:
         for (const Village& v : layout_->villages()) targets.emplace_back(v.tx, v.ty);
         flow_[0].build(kWorldSeed, kOverworld, targets);
 
-        build_player();
+        build_players();
         build_chunks();
         build_director();
     }
@@ -92,11 +103,56 @@ public:
 
     void stop() { engine_->stop(); }
 
+    // --- accounts ---------------------------------------------------------------------------------
+
+    // Load an existing account table, if there is one. Missing file is not an error: the first run
+    // of a new world has no accounts, and the first name typed into it creates one.
+    void load_accounts(const char* path) { (void)accounts_.load(path); }
+    bool save_accounts(const char* path) const { return accounts_.save(path); }
+    [[nodiscard]] const AccountStore& accounts() const noexcept { return accounts_; }
+
+    // Authenticate (or create), then bind the account to a free session slot. Returns the slot, or
+    // -1 with `out` explaining why. Safe to call while the world is running: nothing is registered
+    // here, only bound.
+    int login(std::string_view name, std::string_view password, LoginOutcome& out) {
+        const AccountId id = accounts_.login(name, password, out);
+        if (id == kNoAccount) return -1;
+        int slot = -1;
+        for (int i = 0; i < kMaxPlayers; ++i) {
+            if (bound_[i] == kNoAccount) {
+                slot = i;
+                break;
+            }
+            if (bound_[i] == id) {  // already logged in — take the same slot back
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0) {
+            out = LoginOutcome::kFull;
+            return -1;
+        }
+        bound_[slot] = id;
+        BindAccount b{};
+        b.account = id;
+        // Open country, a good half-minute's walk from the nearest village. Not a farm, not a
+        // tutorial, not a hearth already lit — GAME.md §6b.
+        b.spawn_tx = static_cast<std::uint16_t>(layout_->spawn_tx());
+        b.spawn_ty = static_cast<std::uint16_t>(layout_->spawn_ty());
+        // Enough to light a fire and turn a few tiles of soil once you get somewhere. Deliberately
+        // not enough to live on: the point of the walk is that you arrive needing people.
+        b.wood = 40;
+        b.stone = 25;
+        b.seed = 12;
+        player_ref(slot).tell(b);
+        return slot;
+    }
+
+    [[nodiscard]] std::uint64_t key_of(int slot) const noexcept { return player_key(slot); }
+
     // One simulation step. The caller owns the pacing — a fixed-step loop in the headless runner, a
     // frame-rate-independent accumulator in the client.
-    void step(std::int64_t dt_ms) {
-        director_ref_.tell(DirectorTick{dt_ms});
-    }
+    void step(std::int64_t dt_ms) { director_ref_.tell(DirectorTick{dt_ms}); }
 
     // A FIFO barrier on the director: the reply proves it has drained every DirectorTick posted
     // before it, and therefore has already fanned every `Tick` it was going to fan. Used instead of
@@ -108,14 +164,17 @@ public:
     }
 
     // A barrier on the WHOLE world: the director first (so every Tick has been posted), then every
-    // chunk (so every Tick has been drained). After this returns, every published snapshot reflects
-    // the same tick — which is the only way a sampled number is worth printing.
+    // player and every chunk (so every Tick has been drained). After this returns, every published
+    // snapshot reflects the same tick — which is the only way a sampled number is worth printing.
     //
     // Note what this is NOT: the simulation does not need it. Chunks are free to run behind the
     // director and behind each other, and normally do — that lag IS the pipelining. It exists so a
     // *reader* can take a consistent sample.
     std::uint64_t sync_world() {
         const std::uint64_t t = sync_director();
+        for (int i = 0; i < kMaxPlayers; ++i) {
+            (void)quark::block_on(player_ref(i).ask<PlayerView>(GetPlayer{}));
+        }
         for (const ChunkCoord& c : chunk_coords_) {
             auto ref = router_->get<ChunkActor>(chunk_key(c));
             (void)quark::block_on(ref.ask<ChunkStats>(GetChunkStats{}));
@@ -129,93 +188,238 @@ public:
         return r.has_value() ? r.value() : ChunkStats{};
     }
 
-    [[nodiscard]] PlayerView player_view() {
-        quark::result<PlayerView> r = quark::block_on(player_ref_.ask<PlayerView>(GetPlayer{}));
+    // The authoritative read. Prefer `players().load(slot)` anywhere a stale-by-one-tick answer is
+    // acceptable — which is every renderer, and the reason `PlayerBus` exists.
+    [[nodiscard]] PlayerView player_view(int slot) {
+        quark::result<PlayerView> r = quark::block_on(player_ref(slot).ask<PlayerView>(GetPlayer{}));
         return r.has_value() ? r.value() : PlayerView{};
     }
 
     // --- player-driven actions ---------------------------------------------------------------
-    void move_player(float dx, float dy) { player_ref_.tell(MoveIntent{dx, dy}); }
-
-    void plant(std::uint16_t map, std::uint16_t tx, std::uint16_t ty, CropKind k,
-               std::int64_t now_ms) {
-        if (!in_map(tx, ty)) return;
-        chunk_ref(map, tx, ty).tell(PlantCrop{tx, ty, k, now_ms, kPlayerKey});
+    void move_player(std::uint64_t player, float dx, float dy) {
+        player_ref_by_key(player).tell(MoveIntent{dx, dy});
     }
 
-    void harvest(std::uint16_t map, std::uint16_t tx, std::uint16_t ty) {
+    void set_mounted(std::uint64_t player, bool on) {
+        player_ref_by_key(player).tell(SetMounted{on});
+    }
+
+    // A melee swing. Ask the TRUSTED actor whether it may happen and how hard it lands, then tell
+    // the chunks. The order is the whole security argument, and it is the same one `build_at` makes
+    // about wood: the untrusted side is told the outcome, never consulted about it.
+    bool swing(std::uint64_t player, bool heavy) {
+        const AttackPlan p = plan(player, heavy ? AttackKind::kHeavy : AttackKind::kLight);
+        if (!p.ok) return false;
+        MeleeSwing s{};
+        s.x = p.x;
+        s.y = p.y;
+        s.facing = p.facing;
+        s.reach = p.reach;
+        s.damage = p.damage;
+        s.heavy = heavy;
+        s.player = player;
+        fan_to_neighbours(p.x, p.y, s);
+        return true;
+    }
+
+    // An arrow, aimed by the client but launched from where the trusted actor says the player is.
+    bool shoot(std::uint64_t player, float aim_x, float aim_y) {
+        const AttackPlan p = plan(player, AttackKind::kShoot);
+        if (!p.ok) return false;
+        float dx = aim_x - p.x;
+        float dy = aim_y - p.y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 0.01f) {
+            dx = facing_x(p.facing);
+            dy = facing_y(p.facing);
+        } else {
+            dx /= len;
+            dy /= len;
+        }
+        LaunchArrow a{};
+        a.x = p.x;
+        a.y = p.y;
+        a.vx = dx * kArrowSpeed;
+        a.vy = dy * kArrowSpeed;
+        a.damage = p.damage;
+        a.player = player;
+        if (!in_map(p.x, p.y)) return false;
+        chunk_ref_at(kOverworld, p.x, p.y).tell(a);
+        return true;
+    }
+
+    // A spell, landing where the cursor is — but no further from the player than `kSpellRange`. The
+    // clamp happens against the position the TRUSTED actor reported, not the one the client claims.
+    bool cast(std::uint64_t player, Element element, float tx, float ty) {
+        const AttackPlan p = plan(player, AttackKind::kCast, element);
+        if (!p.ok) return false;
+        float dx = tx - p.x;
+        float dy = ty - p.y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len > kSpellRange) {
+            dx = dx / len * kSpellRange;
+            dy = dy / len * kSpellRange;
+        }
+        CastSpell s{};
+        s.x = p.x + dx;
+        s.y = p.y + dy;
+        s.element = p.element;
+        s.radius = kSpellRadius;
+        s.damage = p.damage;
+        s.player = player;
+        fan_to_neighbours(s.x, s.y, s);
+        return true;
+    }
+
+    void plant(std::uint64_t player, std::uint16_t map, std::uint16_t tx, std::uint16_t ty,
+               CropKind k, std::int64_t now_ms) {
         if (!in_map(tx, ty)) return;
-        chunk_ref(map, tx, ty).tell(HarvestAt{tx, ty, kPlayerKey});
+        chunk_ref(map, tx, ty).tell(PlantCrop{tx, ty, k, now_ms, player});
+    }
+
+    void harvest(std::uint64_t player, std::uint16_t map, std::uint16_t tx, std::uint16_t ty) {
+        if (!in_map(tx, ty)) return;
+        chunk_ref(map, tx, ty).tell(HarvestAt{tx, ty, player});
     }
 
     // Base expansion: reclaim a tile as farmland. Costs a little wood so it is a real choice
     // against building with it.
-    bool till(std::uint16_t map, std::uint16_t tx, std::uint16_t ty) {
+    bool till(std::uint64_t player, std::uint16_t map, std::uint16_t tx, std::uint16_t ty) {
         if (!in_map(tx, ty)) return false;
-        quark::result<bool> paid =
-            quark::block_on(player_ref_.ask<bool>(SpendItems{ItemKind::kWood, kTillCost}));
+        quark::result<bool> paid = quark::block_on(
+            player_ref_by_key(player).ask<bool>(SpendItems{ItemKind::kWood, kTillCost}));
         if (!paid.has_value() || !paid.value()) return false;
-        chunk_ref(map, tx, ty).tell(TillGround{tx, ty, kPlayerKey});
+        chunk_ref(map, tx, ty).tell(TillGround{tx, ty, player});
         return true;
     }
 
     // Upgrade whatever building is on this tile. Same ask-then-tell ordering as build_at: the
     // trusted inventory decides affordability before the (possibly untrusted) chunk is told.
-    bool upgrade(std::uint16_t map, std::uint16_t tx, std::uint16_t ty, BuildKind k,
-                 std::uint8_t current_level) {
+    bool upgrade(std::uint64_t player, std::uint16_t map, std::uint16_t tx, std::uint16_t ty,
+                 BuildKind k, std::uint8_t current_level) {
         if (!in_map(tx, ty) || current_level >= kMaxLevel) return false;
         const BuildCost c = upgrade_cost_of(k, current_level);
-        quark::result<bool> paid = quark::block_on(player_ref_.ask<bool>(SpendItems{c.kind, c.count}));
+        quark::result<bool> paid =
+            quark::block_on(player_ref_by_key(player).ask<bool>(SpendItems{c.kind, c.count}));
         if (!paid.has_value() || !paid.value()) return false;
-        chunk_ref(map, tx, ty).tell(UpgradeBuilding{tx, ty, kPlayerKey});
+        chunk_ref(map, tx, ty).tell(UpgradeBuilding{tx, ty, player});
         return true;
+    }
+
+    // Placement costs resources, so it is a two-step: ASK the trusted inventory to debit, and only
+    // tell the (possibly untrusted) chunk to build if the debit succeeded. Doing it in this order
+    // is what makes a compromised chunk host unable to mint free buildings.
+    bool build_at(std::uint64_t player, std::uint16_t map, std::uint16_t tx, std::uint16_t ty,
+                  BuildKind k) {
+        if (!in_map(tx, ty)) return false;
+        const BuildCost c = cost_of(k);
+        quark::result<bool> paid =
+            quark::block_on(player_ref_by_key(player).ask<bool>(SpendItems{c.kind, c.count}));
+        if (!paid.has_value() || !paid.value()) return false;
+        chunk_ref(map, tx, ty).tell(PlaceBuilding{tx, ty, k, player});
+        return true;
+    }
+
+    // Put creatures on the map at a point. This is the DIRECTOR's own message, exposed for tools:
+    // the headless runner uses it to stage a fight it can assert on, and the client binds it to a
+    // debug key. It deliberately does not bypass anything — the chunk validates the placement and
+    // scales the creature for its ring exactly as it does for a raid.
+    void spawn_wave_at(std::uint16_t tx, std::uint16_t ty, CreatureKind kind, std::uint16_t count,
+                       std::uint32_t seed = 1) {
+        if (!in_map(tx, ty)) return;
+        SpawnWave w{};
+        w.count = count;
+        w.seed = seed;
+        w.kind = static_cast<std::uint8_t>(kind);
+        w.tx = tx;
+        w.ty = ty;
+        w.radius = 2;
+        chunk_ref(kOverworld, tx, ty).tell(w);
     }
 
     // The generated world, for anything that needs to know where things ARE rather than what a
     // chunk currently holds: the renderer (which buildings to draw), the map exporter, the tests.
     [[nodiscard]] const WorldLayout& layout() const noexcept { return *layout_; }
 
-    // Placement costs resources, so it is a two-step: ASK the trusted inventory to debit, and only
-    // tell the (possibly untrusted) chunk to build if the debit succeeded. Doing it in this order
-    // is what makes a compromised chunk host unable to mint free buildings.
-    bool build_at(std::uint16_t map, std::uint16_t tx, std::uint16_t ty, BuildKind k) {
-        if (!in_map(tx, ty)) return false;
-        const BuildCost c = cost_of(k);
-        quark::result<bool> paid = quark::block_on(player_ref_.ask<bool>(SpendItems{c.kind, c.count}));
-        if (!paid.has_value() || !paid.value()) return false;
-        chunk_ref(map, tx, ty).tell(PlaceBuilding{tx, ty, k, kPlayerKey});
-        return true;
-    }
-
     [[nodiscard]] SnapshotBus& bus() noexcept { return bus_; }
     [[nodiscard]] const SnapshotBus& bus() const noexcept { return bus_; }
+    [[nodiscard]] PlayerBus& players() noexcept { return players_; }
+    [[nodiscard]] const PlayerBus& players() const noexcept { return players_; }
     [[nodiscard]] WorldStatus& status() noexcept { return status_; }
     [[nodiscard]] const WorldStatus& status() const noexcept { return status_; }
     [[nodiscard]] std::size_t chunk_count() const noexcept { return chunks_.size(); }
 
 private:
+    [[nodiscard]] AttackPlan plan(std::uint64_t player, AttackKind kind,
+                                  Element element = Element::kNone) {
+        quark::result<AttackPlan> r =
+            quark::block_on(player_ref_by_key(player).ask<AttackPlan>(PlanAttack{kind, element}));
+        return r.has_value() ? r.value() : AttackPlan{};
+    }
+
+    // A swing near a chunk border must reach across it, and a chunk only ever resolves hits against
+    // creatures it owns — so the message goes to the 3x3 neighbourhood and each recipient filters.
+    // Nothing can be hit twice because no two chunks own the same creature.
+    template <class M>
+    void fan_to_neighbours(float x, float y, const M& msg) {
+        if (!in_map(x, y)) return;
+        const ChunkCoord home = chunk_of(kOverworld, x, y);
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int cx = static_cast<int>(home.cx) + dx;
+                const int cy = static_cast<int>(home.cy) + dy;
+                if (cx < 0 || cy < 0 || cx >= kMapChunks || cy >= kMapChunks) continue;
+                router_
+                    ->get<ChunkActor>(chunk_key(ChunkCoord{kOverworld,
+                                                           static_cast<std::uint16_t>(cx),
+                                                           static_cast<std::uint16_t>(cy)}))
+                    .tell(msg);
+            }
+        }
+    }
+
+    [[nodiscard]] static constexpr float facing_x(Facing f) noexcept {
+        return f == Facing::kLeft ? -1.0f : (f == Facing::kRight ? 1.0f : 0.0f);
+    }
+    [[nodiscard]] static constexpr float facing_y(Facing f) noexcept {
+        return f == Facing::kUp ? -1.0f : (f == Facing::kDown ? 1.0f : 0.0f);
+    }
+
+    [[nodiscard]] quark::ActorRef<PlayerActor> player_ref(int slot) {
+        return router_->get<PlayerActor>(player_key(slot));
+    }
+
+    [[nodiscard]] quark::ActorRef<PlayerActor> player_ref_by_key(std::uint64_t key) {
+        return router_->get<PlayerActor>(key);
+    }
+
     [[nodiscard]] quark::ActorRef<ChunkActor> chunk_ref(std::uint16_t map, std::uint16_t tx,
                                                         std::uint16_t ty) {
         return router_->get<ChunkActor>(
             chunk_key(chunk_of(map, static_cast<float>(tx), static_cast<float>(ty))));
     }
 
-    void build_player() {
-        player_ = std::make_unique<PlayerActor>();
-        player_->id = kPlayerKey;
-        player_->map = kOverworld;
-        // Open country, a good half-minute's walk from the nearest village. Not a farm, not a
-        // tutorial, not a hearth already lit — GAME.md §6b.
-        player_->set_position(static_cast<float>(layout_->spawn_tx()) + 0.5f,
-                              static_cast<float>(layout_->spawn_ty()) + 0.5f);
-        // Enough to light a fire and turn a few tiles of soil once you get somewhere. Deliberately
-        // not enough to live on: the point of the walk is that you arrive needing people.
-        player_->set_start_items(/*wood*/ 40, /*stone*/ 25, /*seed*/ 12);
-        player_act_ = std::make_unique<quark::Activation>(player_.get(),
-                                                          PlayerActor::dispatch_table(),
-                                                          pool_->sink());
-        quark::register_actor<PlayerActor>(*engine_, kPlayerKey, *player_act_);
-        player_ref_ = router_->get<PlayerActor>(kPlayerKey);
+    [[nodiscard]] quark::ActorRef<ChunkActor> chunk_ref_at(std::uint16_t map, float x, float y) {
+        return router_->get<ChunkActor>(chunk_key(chunk_of(map, x, y)));
+    }
+
+    // The whole roster is registered before `start()`, because `Engine::register_activation` is
+    // cold-only (see player_actor.hpp). An unbound slot is inert — it ticks, ignores the tick, and
+    // publishes an empty view that says `account == 0`.
+    void build_players() {
+        for (int slot = 0; slot < kMaxPlayers; ++slot) {
+            auto p = std::make_unique<PlayerActor>();
+            p->id = player_key(slot);
+            p->slot = slot;
+            p->map = kOverworld;
+            p->bus = &players_;
+            p->publish_now();
+            auto act = std::make_unique<quark::Activation>(p.get(), PlayerActor::dispatch_table(),
+                                                           pool_->sink());
+            quark::register_actor<PlayerActor>(*engine_, player_key(slot), *act);
+            players_actors_.push_back(std::move(p));
+            player_acts_.push_back(std::move(act));
+        }
     }
 
     void build_chunks() {
@@ -233,10 +437,9 @@ private:
                     ch->router = router_.get();
                     ch->bus = &bus_;
                     ch->status = &status_;
-                    ch->player = player_ref_;
                     ch->flow = &flow_[static_cast<std::size_t>(map)];
-                    // Fallback heading for a mob the flow field cannot route (an island, a pocket
-                    // walled in by cliffs): the village nearest this chunk's own centre.
+                    // Fallback heading for a creature the flow field cannot route (an island, a
+                    // pocket walled in by cliffs): the village nearest this chunk's own centre.
                     const int mid_x = cx * kChunkTiles + kChunkTiles / 2;
                     const int mid_y = cy * kChunkTiles + kChunkTiles / 2;
                     if (const Village* v = layout_->nearest_village(mid_x, mid_y)) {
@@ -246,7 +449,8 @@ private:
                     ch->generate_terrain(kWorldSeed);
                     // Villages and roads are already in the terrain the line above cached — they
                     // are part of the world, not entities placed on top of it. Nothing is seeded
-                    // here: a new world starts with no player buildings anywhere in it.
+                    // here except wildlife: a new world starts with no player buildings anywhere.
+                    ch->seed_wildlife(kWorldSeed);
                     ch->publish_now();
 
                     auto act = std::make_unique<quark::Activation>(
@@ -265,6 +469,7 @@ private:
         director_ = std::make_unique<MapDirector>();
         director_->router = router_.get();
         director_->status = &status_;
+        director_->players = &players_;
         director_->world_seed = kWorldSeed;
         director_->chunks = chunk_coords_;
         for (const Stronghold& h : layout_->strongholds()) {
@@ -282,12 +487,15 @@ private:
 
     const WorldLayout* layout_ = nullptr;
     SnapshotBus bus_;
+    PlayerBus players_;
     WorldStatus status_;
     std::array<FlowField, kMapCount> flow_{};
 
-    std::unique_ptr<PlayerActor> player_;
-    std::unique_ptr<quark::Activation> player_act_;
-    quark::ActorRef<PlayerActor> player_ref_{};
+    AccountStore accounts_;
+    std::array<AccountId, kMaxPlayers> bound_{};
+
+    std::vector<std::unique_ptr<PlayerActor>> players_actors_;
+    std::vector<std::unique_ptr<quark::Activation>> player_acts_;
 
     std::vector<std::unique_ptr<ChunkActor>> chunks_;
     std::vector<std::unique_ptr<quark::Activation>> chunk_acts_;

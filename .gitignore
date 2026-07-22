@@ -9,3 +9,7 @@ compile_commands.json
 # The Ninja Adventure pack is downloaded manually — itch.io blocks scripted fetches.
 # assets/atlas.png IS committed: it is the only art the build needs.
 assets/_src/
+
+# The account table the client writes beside itself. Contains Argon2 hashes, not passwords —
+# but it is per-machine state, not source.
+accounts.dat
