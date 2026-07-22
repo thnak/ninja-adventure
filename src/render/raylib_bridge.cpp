@@ -29,6 +29,8 @@ namespace {
     return Terrain::kAsh;
 }
 
+// The FIRST of a terrain's variant run. Variants are packed consecutively (kTerrainGrass,
+// kTerrainGrass1, kTerrainGrass2), so `slot_of(t) + n` selects one.
 [[nodiscard]] Slot slot_of(Terrain t) {
     switch (t) {
         case Terrain::kGrass: return Slot::kTerrainGrass;
@@ -267,10 +269,16 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                     // Trees are drawn over the ring's own ground, so a forest in the snow ring
                     // stands on snow. Without this every wood looked like it had been transplanted
                     // onto a lawn.
-                    const Slot base = (t == Terrain::kTree)
-                                          ? slot_of(ground_under_tree(ring_of(kWorldSeed, gx, gy)))
-                                          : slot_of(t);
-                    im.tile(base, gx, gy, WHITE, tile_variant(c.map, gx, gy));
+                    const Slot first = (t == Terrain::kTree)
+                                           ? slot_of(ground_under_tree(ring_of(kWorldSeed, gx, gy)))
+                                           : slot_of(t);
+                    // Pick one of the terrain's textured variants, then mirror it. Mirroring alone
+                    // was not enough: these motifs are legible enough that a single repeated tile
+                    // reads as wallpaper no matter how it is flipped.
+                    const int v = tile_variant(c.map, gx, gy);
+                    const int pick = (v >> 2) % kTerrainVariants;
+                    const auto base = static_cast<Slot>(static_cast<int>(first) + pick);
+                    im.tile(base, gx, gy, WHITE, v & 3);
                 }
             }
             // Trees, top-down within the chunk so a nearer tree's canopy overlaps the one behind it.

@@ -448,7 +448,7 @@ private:
     Rng r((static_cast<std::uint64_t>(map) << 40) ^
           (static_cast<std::uint64_t>(static_cast<std::uint32_t>(gx)) << 20) ^
           static_cast<std::uint64_t>(static_cast<std::uint32_t>(gy)));
-    return static_cast<int>(r.below(4));
+    return static_cast<int>(r.below(64));  // low 2 bits = mirroring, higher bits = variant choice
 }
 
 // --- Spawn camps ---------------------------------------------------------------------------------

@@ -21,6 +21,12 @@ a gate when you feel like an adventure. Built on the [QuarkCpp](../QuarkCpp) act
 <sub>The whole 1024x1024 overworld, exported by `mmo_worldmap`. Difficulty radiates out from the
 centre: Meadow, Forest, Wetland (swamp west / desert east), Snow, Wasteland.</sub>
 
+### Screens
+
+| | |
+|---|---|
+| ![menu](docs/shot_menu.png) | ![journal](docs/shot_journal.png) |
+
 ### Biomes
 
 | | |

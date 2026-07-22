@@ -10,6 +10,9 @@
 namespace mmo {
 
 inline constexpr int kAtlasTile = 16;
+// Each terrain has this many textured variants, packed consecutively as
+// kTerrainX, kTerrainX1, kTerrainX2 — a single repeated motif tiles visibly.
+inline constexpr int kTerrainVariants = 3;
 
 struct AtlasRect {
     std::int16_t x;
@@ -18,13 +21,29 @@ struct AtlasRect {
 
 enum class Slot : std::uint8_t {
     kTerrainGrass,
+    kTerrainGrass1,
+    kTerrainGrass2,
     kTerrainDirt,
+    kTerrainDirt1,
+    kTerrainDirt2,
     kTerrainWater,
+    kTerrainWater1,
+    kTerrainWater2,
     kTerrainStone,
+    kTerrainStone1,
+    kTerrainStone2,
     kTerrainSand,
+    kTerrainSand1,
+    kTerrainSand2,
     kTerrainSnow,
+    kTerrainSnow1,
+    kTerrainSnow2,
     kTerrainMarsh,
+    kTerrainMarsh1,
+    kTerrainMarsh2,
     kTerrainAsh,
+    kTerrainAsh1,
+    kTerrainAsh2,
     kCropSeedling,
     kCropGrowing,
     kCropWheatRipe,
@@ -43,26 +62,42 @@ enum class Slot : std::uint8_t {
 
 inline constexpr AtlasRect kAtlasRects[static_cast<int>(Slot::kCount)] = {
     {1, 1},  // kTerrainGrass
-    {19, 1},  // kTerrainDirt
-    {37, 1},  // kTerrainWater
-    {55, 1},  // kTerrainStone
-    {73, 1},  // kTerrainSand
-    {91, 1},  // kTerrainSnow
-    {109, 1},  // kTerrainMarsh
-    {127, 1},  // kTerrainAsh
-    {1, 19},  // kCropSeedling
-    {19, 19},  // kCropGrowing
-    {37, 19},  // kCropWheatRipe
-    {55, 19},  // kCropCarrotRipe
-    {73, 19},  // kCropPumpkinRipe
-    {91, 19},  // kBuildHearth
-    {109, 19},  // kBuildWall
-    {127, 19},  // kBuildWallRun
-    {1, 37},  // kBuildTurret
-    {19, 37},  // kBuildPlot
-    {37, 37},  // kBuildFence
-    {55, 37},  // kBuildFencePost
-    {73, 37},  // kSpawnCamp
+    {19, 1},  // kTerrainGrass1
+    {37, 1},  // kTerrainGrass2
+    {55, 1},  // kTerrainDirt
+    {73, 1},  // kTerrainDirt1
+    {91, 1},  // kTerrainDirt2
+    {109, 1},  // kTerrainWater
+    {127, 1},  // kTerrainWater1
+    {1, 19},  // kTerrainWater2
+    {19, 19},  // kTerrainStone
+    {37, 19},  // kTerrainStone1
+    {55, 19},  // kTerrainStone2
+    {73, 19},  // kTerrainSand
+    {91, 19},  // kTerrainSand1
+    {109, 19},  // kTerrainSand2
+    {127, 19},  // kTerrainSnow
+    {1, 37},  // kTerrainSnow1
+    {19, 37},  // kTerrainSnow2
+    {37, 37},  // kTerrainMarsh
+    {55, 37},  // kTerrainMarsh1
+    {73, 37},  // kTerrainMarsh2
+    {91, 37},  // kTerrainAsh
+    {109, 37},  // kTerrainAsh1
+    {127, 37},  // kTerrainAsh2
+    {1, 55},  // kCropSeedling
+    {19, 55},  // kCropGrowing
+    {37, 55},  // kCropWheatRipe
+    {55, 55},  // kCropCarrotRipe
+    {73, 55},  // kCropPumpkinRipe
+    {91, 55},  // kBuildHearth
+    {109, 55},  // kBuildWall
+    {127, 55},  // kBuildWallRun
+    {1, 73},  // kBuildTurret
+    {19, 73},  // kBuildPlot
+    {37, 73},  // kBuildFence
+    {55, 73},  // kBuildFencePost
+    {73, 73},  // kSpawnCamp
 };
 
 [[nodiscard]] inline constexpr AtlasRect rect_of(Slot s) noexcept {
@@ -92,12 +127,12 @@ enum class Anim : std::uint8_t {
 };
 
 inline constexpr AtlasAnim kAtlasAnims[static_cast<int>(Anim::kCount)] = {
-    {1, 55, 4, 4},  // kPlayer
-    {1, 127, 4, 4},  // kMobSlime
-    {1, 199, 4, 4},  // kMobSpider
-    {1, 271, 4, 4},  // kMobSpirit
-    {1, 343, 2, 1},  // kChicken
-    {1, 361, 2, 1},  // kCow
+    {1, 91, 4, 4},  // kPlayer
+    {1, 163, 4, 4},  // kMobSlime
+    {1, 235, 4, 4},  // kMobSpider
+    {1, 307, 4, 4},  // kMobSpirit
+    {1, 379, 2, 1},  // kChicken
+    {1, 397, 2, 1},  // kCow
 };
 
 [[nodiscard]] inline constexpr const AtlasAnim& anim_of(Anim a) noexcept {
@@ -131,8 +166,8 @@ enum class Big : std::uint8_t {
 };
 
 inline constexpr AtlasBig kAtlasBigs[static_cast<int>(Big::kCount)] = {
-    {1, 379, 2, 3},  // kTreeBroad
-    {1, 429, 2, 3},  // kTreePine
+    {1, 415, 2, 3},  // kTreeBroad
+    {1, 465, 2, 3},  // kTreePine
 };
 
 [[nodiscard]] inline constexpr const AtlasBig& big_of(Big b) noexcept {
