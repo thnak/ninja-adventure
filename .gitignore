@@ -1,0 +1,11 @@
+build/
+build-*/
+compile_commands.json
+
+# Screenshots dropped in the repo root by `mmo_client --shot`.
+/*.png
+
+# Raw CC0 asset packs (~120 MB, mostly-unused tiles). Restore with tools/fetch_assets.sh.
+# The Ninja Adventure pack is downloaded manually — itch.io blocks scripted fetches.
+# assets/atlas.png IS committed: it is the only art the build needs.
+assets/_src/

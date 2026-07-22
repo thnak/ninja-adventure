@@ -1,0 +1,396 @@
+// World geometry, entity PODs and the deterministic RNG shared by every actor.
+//
+// Everything here is plain data with no engine dependency — the simulation actors (chunk_actor.hpp,
+// player_actor.hpp, map_director.hpp) and the renderer both include this and nothing else in common.
+// That is deliberate: the render seam carries only these types, so swapping raylib for another
+// backend touches no simulation code.
+//
+// COORDINATES. There is exactly one spatial unit in the simulation: the **tile**, as a float, in
+// map-global space (`0 .. kMapTiles`). Pixels exist only inside the renderer (`kTilePx`), and chunk
+// membership is a pure function of a tile coordinate (`chunk_of`). Keeping one unit removes the
+// whole class of "which space is this in?" bug that a client/server split usually invites.
+#pragma once
+
+#include <cmath>
+#include <cstdint>
+
+namespace mmo {
+
+// --- Geometry ------------------------------------------------------------------------------------
+// A chunk is the unit of ACTOR OWNERSHIP: one ChunkActor owns exactly one chunk and is the single
+// writer of everything inside it. Sizing is a trade — smaller chunks mean more actors (more
+// parallelism, more cross-chunk migration traffic), larger chunks mean fatter sequential handlers.
+// 32x32 keeps a chunk's snapshot comfortably under a page while still giving 64 actors per map.
+inline constexpr int kTilePx = 32;      // renderer-only: pixels per tile
+inline constexpr int kChunkTiles = 32;  // tiles per chunk edge
+inline constexpr int kMapChunks = 8;    // chunks per map edge
+inline constexpr int kMapTiles = kChunkTiles * kMapChunks;  // 256 tiles = 8192 px per map edge
+inline constexpr int kChunksPerMap = kMapChunks * kMapChunks;
+
+inline constexpr int kMapCount = 3;
+inline constexpr int kChunkCount = kMapCount * kChunksPerMap;
+
+enum class MapId : std::uint16_t { kHomeValley = 0, kDarkForest = 1, kCrystalCaves = 2 };
+
+// The farm sits at the centre of the home map, so every rim chunk is roughly equidistant and a wave
+// converges from all sides instead of forming a single queue. Its tilled apron is part of the
+// terrain *function* (below), not an edit applied afterwards — see `terrain_of`.
+inline constexpr int kCoreTx = kMapTiles / 2;
+inline constexpr int kCoreTy = kMapTiles / 2;
+inline constexpr int kFarmRadius = 6;
+
+// --- Terrain -------------------------------------------------------------------------------------
+enum class Terrain : std::uint8_t {
+    kGrass = 0,
+    kDirt = 1,   // tilled — the only terrain a crop may be planted on
+    kWater = 2,  // impassable
+    kStone = 3,
+    kSand = 4,
+    kTree = 5,  // impassable, harvestable for wood
+};
+
+[[nodiscard]] inline constexpr bool is_walkable(Terrain t) noexcept {
+    return t != Terrain::kWater && t != Terrain::kTree;
+}
+
+// --- Entities ------------------------------------------------------------------------------------
+enum class MobKind : std::uint8_t { kSlime = 0, kSpider = 1, kGhost = 2 };
+enum class CropKind : std::uint8_t { kWheat = 0, kCarrot = 1, kPumpkin = 2 };
+enum class BuildKind : std::uint8_t {
+    kCore = 0,
+    kWall = 1,
+    kTurret = 2,
+    kPlot = 3,
+    kFence = 4,  // cheap, weak, but it still stops a mob — the early-game perimeter
+    kCount = 5,
+};
+
+// Everything except a crop plot is solid: a mob cannot walk through it and must break it instead.
+// This is what makes a perimeter mean anything — before it existed, walls were decorative and mobs
+// walked straight past them to the core.
+[[nodiscard]] inline constexpr bool blocks_movement(BuildKind k) noexcept {
+    return k != BuildKind::kPlot;
+}
+
+// Buildings upgrade in place. Level is 1-based; kMaxLevel is the cap.
+inline constexpr std::uint8_t kMaxLevel = 3;
+enum class ItemKind : std::uint8_t { kWood = 0, kStone = 1, kSeed = 2, kProduce = 3, kCount = 4 };
+
+inline constexpr int kItemKinds = static_cast<int>(ItemKind::kCount);
+
+struct MobStats {
+    std::int16_t max_hp;
+    float speed;         // tiles per second
+    std::int16_t damage;  // per attack
+};
+
+[[nodiscard]] inline constexpr MobStats stats_of(MobKind k) noexcept {
+    switch (k) {
+        case MobKind::kSlime: return {30, 1.2f, 4};
+        case MobKind::kSpider: return {45, 2.6f, 7};
+        case MobKind::kGhost: return {80, 1.8f, 12};
+    }
+    return {30, 1.2f, 4};
+}
+
+// A mob lives in map-global tile space. Its owning chunk is derived, never stored — so migration is
+// "recompute the owner and forward", with no field to forget to update.
+struct Mob {
+    std::uint32_t id = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+    std::int16_t hp = 0;
+    MobKind kind = MobKind::kSlime;
+    std::uint8_t attack_cd = 0;  // ticks until this mob may strike again
+};
+
+struct Crop {
+    std::uint16_t tx = 0;  // map-global tile
+    std::uint16_t ty = 0;
+    CropKind kind = CropKind::kWheat;
+    std::uint8_t stage = 0;      // 0..kCropStages-1; kCropStages-1 == ripe
+    std::int64_t planted_ms = 0;
+    std::int64_t ripe_ms = 0;
+};
+
+inline constexpr std::uint8_t kCropStages = 4;
+
+[[nodiscard]] inline constexpr std::int64_t grow_ms_of(CropKind k) noexcept {
+    switch (k) {
+        case CropKind::kWheat: return 20'000;
+        case CropKind::kCarrot: return 35'000;
+        case CropKind::kPumpkin: return 60'000;
+    }
+    return 20'000;
+}
+
+struct Building {
+    std::uint16_t tx = 0;
+    std::uint16_t ty = 0;
+    BuildKind kind = BuildKind::kWall;
+    std::int16_t hp = 0;
+    std::uint8_t cooldown = 0;  // turret fire cooldown, in ticks
+    std::uint8_t level = 1;
+};
+
+[[nodiscard]] inline constexpr std::int16_t base_hp_of(BuildKind k) noexcept {
+    switch (k) {
+        case BuildKind::kCore: return 1000;
+        case BuildKind::kWall: return 200;
+        case BuildKind::kTurret: return 120;
+        case BuildKind::kPlot: return 20;
+        case BuildKind::kFence: return 60;
+        case BuildKind::kCount: break;
+    }
+    return 100;
+}
+
+// Level 1/2/3 -> x1 / x1.8 / x3. Upgrading is meant to beat rebuilding: three level-1 walls have
+// 600 HP spread over three tiles, one level-3 wall has 600 HP on the tile that matters.
+[[nodiscard]] inline constexpr std::int16_t max_hp_of(BuildKind k, std::uint8_t level = 1) noexcept {
+    const int base = base_hp_of(k);
+    const int scaled = (level >= 3) ? base * 3 : (level == 2 ? (base * 9) / 5 : base);
+    return static_cast<std::int16_t>(scaled);
+}
+
+// Turret stats per level. Range grows slowly and damage fast, so upgrading is about killing what
+// already walks into the field rather than covering more ground.
+[[nodiscard]] inline constexpr float turret_range(std::uint8_t level) noexcept {
+    return level >= 3 ? 8.5f : (level == 2 ? 7.0f : 6.0f);
+}
+[[nodiscard]] inline constexpr std::int16_t turret_damage(std::uint8_t level) noexcept {
+    return level >= 3 ? 34 : (level == 2 ? 22 : 14);
+}
+[[nodiscard]] inline constexpr std::uint8_t turret_cooldown(std::uint8_t level) noexcept {
+    return level >= 3 ? 4 : (level == 2 ? 5 : 6);
+}
+
+// --- Chunk addressing ----------------------------------------------------------------------------
+struct ChunkCoord {
+    std::uint16_t map = 0;
+    std::uint16_t cx = 0;
+    std::uint16_t cy = 0;
+
+    friend constexpr bool operator==(ChunkCoord, ChunkCoord) = default;
+};
+
+// The actor key. One flat integer so `router.get<ChunkActor>(key)` addresses a chunk directly, and
+// so the same key is a stable placement input once chunks are distributed across nodes.
+[[nodiscard]] inline constexpr std::uint64_t chunk_key(ChunkCoord c) noexcept {
+    return (static_cast<std::uint64_t>(c.map) << 32) | (static_cast<std::uint64_t>(c.cy) << 16) |
+           static_cast<std::uint64_t>(c.cx);
+}
+
+// Dense index into a flat per-chunk array (the snapshot bus). Distinct from `chunk_key`, which is
+// sparse-by-design because it doubles as a placement key.
+[[nodiscard]] inline constexpr int chunk_index(ChunkCoord c) noexcept {
+    return c.map * kChunksPerMap + c.cy * kMapChunks + c.cx;
+}
+
+[[nodiscard]] inline constexpr bool in_map(float tx, float ty) noexcept {
+    return tx >= 0.0f && ty >= 0.0f && tx < static_cast<float>(kMapTiles) &&
+           ty < static_cast<float>(kMapTiles);
+}
+
+// Which chunk owns this tile coordinate? Caller must have checked `in_map` first.
+[[nodiscard]] inline constexpr ChunkCoord chunk_of(std::uint16_t map, float tx, float ty) noexcept {
+    return ChunkCoord{map, static_cast<std::uint16_t>(static_cast<int>(tx) / kChunkTiles),
+                      static_cast<std::uint16_t>(static_cast<int>(ty) / kChunkTiles)};
+}
+
+// Tile index local to a chunk, for the terrain array.
+[[nodiscard]] inline constexpr int local_tile_index(int tx, int ty) noexcept {
+    return (ty % kChunkTiles) * kChunkTiles + (tx % kChunkTiles);
+}
+
+// --- Deterministic RNG ---------------------------------------------------------------------------
+// splitmix64. Every stochastic decision in the simulation draws from a seed derived from
+// (chunk key, tick) — so a replay of the same tick sequence produces the same world, on any node.
+// That property is what makes redundant execution across untrusted nodes checkable at all.
+class Rng {
+public:
+    explicit constexpr Rng(std::uint64_t seed) noexcept : s_(seed) {}
+
+    constexpr std::uint64_t next() noexcept {
+        std::uint64_t z = (s_ += 0x9E37'79B9'7F4A'7C15ull);
+        z = (z ^ (z >> 30)) * 0xBF58'476D'1CE4'E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D0'49BB'1331'11EBull;
+        return z ^ (z >> 31);
+    }
+
+    // Uniform in [0, n). Modulo bias is irrelevant at these magnitudes.
+    constexpr std::uint32_t below(std::uint32_t n) noexcept {
+        return n == 0 ? 0 : static_cast<std::uint32_t>(next() % n);
+    }
+
+    constexpr float unit() noexcept {  // [0,1)
+        return static_cast<float>(next() >> 40) * (1.0f / 16'777'216.0f);
+    }
+
+private:
+    std::uint64_t s_;
+};
+
+// --- Terrain generation --------------------------------------------------------------------------
+// Terrain is a PURE FUNCTION of (world seed, map, global tile) — no neighbour lookups, no smoothing
+// pass, no global state. Two consequences that matter more than the visual result:
+//
+//   * Any node can compute any tile without owning it. A chunk checking whether the tile a mob is
+//     about to step onto is walkable does not have to ask the neighbouring chunk — which would be a
+//     synchronous cross-actor (and eventually cross-machine) read on the movement hot path.
+//   * A chunk re-placed after a node failure regenerates its terrain from its key alone; only the
+//     mutable overlay (crops, buildings, mobs) has to be recovered from persistence.
+//
+// A chunk still caches its own 32x32 block, because the common case is a tile it owns.
+// One lattice sample in [0,1). The whole noise field is built from this, so it is the only place
+// randomness enters terrain.
+[[nodiscard]] inline float lattice(std::uint64_t seed, int ix, int iy) noexcept {
+    Rng r(seed ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ix)) * 0x9E37'79B9ull) ^
+          (static_cast<std::uint64_t>(static_cast<std::uint32_t>(iy)) * 0x85EB'CA6Bull));
+    return r.unit();
+}
+
+// Smoothstep-interpolated value noise. `scale` is the lattice spacing in tiles: bigger means
+// broader features. INTERPOLATION is the whole point — the previous version hashed each tile
+// independently, which has no spatial correlation at all, so water/stone came out as isolated
+// single-tile confetti instead of lakes and outcrops.
+[[nodiscard]] inline float value_noise(std::uint64_t seed, float x, float y, float scale) noexcept {
+    const float fx = x / scale;
+    const float fy = y / scale;
+    const float ffx = std::floor(fx);
+    const float ffy = std::floor(fy);
+    const int ix = static_cast<int>(ffx);
+    const int iy = static_cast<int>(ffy);
+
+    const float dx = fx - ffx;
+    const float dy = fy - ffy;
+    const float sx = dx * dx * (3.0f - 2.0f * dx);  // smoothstep: C1-continuous across lattice cells
+    const float sy = dy * dy * (3.0f - 2.0f * dy);
+
+    const float n00 = lattice(seed, ix, iy);
+    const float n10 = lattice(seed, ix + 1, iy);
+    const float n01 = lattice(seed, ix, iy + 1);
+    const float n11 = lattice(seed, ix + 1, iy + 1);
+
+    const float a = n00 + (n10 - n00) * sx;
+    const float b = n01 + (n11 - n01) * sx;
+    return a + (b - a) * sy;
+}
+
+// Two octaves: a broad shape plus a finer one, so coastlines and forest edges are not perfectly
+// smooth blobs.
+[[nodiscard]] inline float fbm(std::uint64_t seed, float x, float y, float scale) noexcept {
+    return 0.68f * value_noise(seed, x, y, scale) +
+           0.32f * value_noise(seed ^ 0xA5A5'5A5Aull, x, y, scale * 0.42f);
+}
+
+[[nodiscard]] inline Terrain terrain_of(std::uint64_t world_seed, std::uint16_t map, int gx,
+                                        int gy) noexcept {
+    // The farm apron is tilled soil by definition. Folding it into the function (rather than
+    // stamping it over a generated chunk afterwards) is what keeps the function total: a chunk
+    // querying a tile just across its border gets the same answer the owning chunk would give.
+    if (map == static_cast<std::uint16_t>(MapId::kHomeValley)) {
+        const int dx = gx - kCoreTx;
+        const int dy = gy - kCoreTy;
+        if (dx >= -kFarmRadius && dx <= kFarmRadius && dy >= -kFarmRadius && dy <= kFarmRadius) {
+            return Terrain::kDirt;
+        }
+    }
+
+    const std::uint64_t base = world_seed ^ (static_cast<std::uint64_t>(map) << 48);
+    const auto x = static_cast<float>(gx);
+    const auto y = static_cast<float>(gy);
+
+    // Three independent fields. Elevation carves lakes and highlands, forest clumps trees, and the
+    // beach is simply "low ground next to water" rather than its own field.
+    const float elevation = fbm(base ^ 0x1111'2222ull, x, y, 26.0f);
+    const float forest = fbm(base ^ 0x3333'4444ull, x, y, 11.0f);
+
+    // Thresholds are tuned against MEASURED coverage (tools: `mmo_probe` prints the histogram and a
+    // flood-fill reachability check). The first coherent-noise pass left 35% of the map impassable,
+    // which starved wave spawns at the rim and slowed every mob to a crawl; ~16% is the budget that
+    // keeps lakes and forests visible without turning the map into a maze.
+    if (elevation < 0.28f) return Terrain::kWater;   // ~6%
+    if (elevation < 0.32f) return Terrain::kSand;    // shoreline ring around every lake
+    if (elevation > 0.78f) return Terrain::kStone;   // rocky highland, walkable
+    if (forest > 0.68f) return Terrain::kTree;       // ~10%
+    return Terrain::kGrass;
+}
+
+// Which of four mirror orientations to draw a base terrain tile in. A single 16x16 grass tile
+// repeated across a 256x256 map shows an obvious grid; mirroring per-tile breaks the repeat at
+// zero cost (a negative source rect, no extra texture). Renderer-only — the simulation neither
+// knows nor cares.
+[[nodiscard]] inline int tile_variant(std::uint16_t map, int gx, int gy) noexcept {
+    Rng r((static_cast<std::uint64_t>(map) << 40) ^
+          (static_cast<std::uint64_t>(static_cast<std::uint32_t>(gx)) << 20) ^
+          static_cast<std::uint64_t>(static_cast<std::uint32_t>(gy)));
+    return static_cast<int>(r.below(4));
+}
+
+// --- Spawn camps ---------------------------------------------------------------------------------
+// Waves used to spawn at a random walkable tile in EVERY rim chunk, which meant monsters arrived
+// from all 360 degrees at once. That quietly made defence pointless: no wall matters if the only
+// way to use one is to enclose the entire perimeter. A small number of fixed camps turns the map
+// into a handful of approach lanes — and because mobs follow the flow field, those lanes are
+// predictable, so a wall placed across one actually changes the outcome.
+//
+// Camp positions are a pure function of (seed, map), like everything else about the world, so every
+// node agrees on where they are without exchanging a message.
+inline constexpr int kSpawnCamps = 5;
+inline constexpr int kCampInset = 6;    // tiles in from the map edge
+inline constexpr int kCampRadius = 3;   // mobs spawn within this many tiles of the camp
+
+[[nodiscard]] inline void camp_tile(std::uint64_t world_seed, std::uint16_t map, int index, int& tx,
+                                    int& ty) noexcept {
+    // Walk the map's border rectangle (inset by kCampInset) and take evenly spaced points, jittered
+    // per map so the three maps do not have identical layouts.
+    const int span = kMapTiles - 2 * kCampInset;
+    const int perimeter = 4 * span;
+    Rng r(world_seed ^ (static_cast<std::uint64_t>(map) << 32) ^ 0xCA'11'CA'11ull);
+    const int jitter = static_cast<int>(r.below(static_cast<std::uint32_t>(perimeter)));
+    int t = (jitter + (perimeter * index) / kSpawnCamps) % perimeter;
+
+    if (t < span) {  // top edge, left to right
+        tx = kCampInset + t;
+        ty = kCampInset;
+    } else if (t < 2 * span) {  // right edge, top to bottom
+        tx = kMapTiles - 1 - kCampInset;
+        ty = kCampInset + (t - span);
+    } else if (t < 3 * span) {  // bottom edge, right to left
+        tx = kMapTiles - 1 - kCampInset - (t - 2 * span);
+        ty = kMapTiles - 1 - kCampInset;
+    } else {  // left edge, bottom to top
+        tx = kCampInset;
+        ty = kMapTiles - 1 - kCampInset - (t - 3 * span);
+    }
+
+    // Nudge to the nearest walkable tile: a camp inside a lake would spawn nothing.
+    if (is_walkable(terrain_of(world_seed, map, tx, ty))) return;
+    for (int radius = 1; radius <= 12; ++radius) {
+        for (int dy = -radius; dy <= radius; ++dy) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                const int nx = tx + dx;
+                const int ny = ty + dy;
+                if (nx < 1 || ny < 1 || nx >= kMapTiles - 1 || ny >= kMapTiles - 1) continue;
+                if (!is_walkable(terrain_of(world_seed, map, nx, ny))) continue;
+                tx = nx;
+                ty = ny;
+                return;
+            }
+        }
+    }
+}
+
+// --- Simulation cadence --------------------------------------------------------------------------
+inline constexpr int kTicksPerSecond = 10;
+inline constexpr std::int64_t kTickMs = 1000 / kTicksPerSecond;
+inline constexpr std::int64_t kDayMs = 45'000;    // daylight: farm and build
+inline constexpr std::int64_t kNightMs = 30'000;  // night: waves attack the core
+inline constexpr std::int64_t kCycleMs = kDayMs + kNightMs;
+
+[[nodiscard]] inline constexpr bool is_night(std::int64_t world_ms) noexcept {
+    return (world_ms % kCycleMs) >= kDayMs;
+}
+
+}  // namespace mmo
