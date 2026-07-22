@@ -11,6 +11,7 @@ are villages, joined by roads. Walk until you find one. Built on the
 | [GAME.md](GAME.md) | world, story, and every gameplay system |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | technical plan (§0 = design errors being corrected) |
 | [ROADMAP.md](ROADMAP.md) | phased plan, P0 → P9 |
+| [RENDER_SPEC.md](RENDER_SPEC.md) | how the world is assembled on screen — and one measurement that turned out to be wrong |
 
 > **P0, P1 and P2 are done.** The world generates itself — **51 villages, 27 strongholds and 522
 > buildings** across a 1024×1024 overworld — and it is now inhabited: ~620 animals that mostly want

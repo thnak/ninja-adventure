@@ -96,6 +96,47 @@ The Kenney packs stay in `fetch_assets.sh` — some of them (Game Icons, Particl
 cover things Ninja Adventure does not, and those are still wanted for P4's inventory and crafting
 screens.
 
+### Two things this pack does not have, found by looking for them
+
+**Bare rock and scorched earth.** Every dark ground in Ninja Adventure is an *interior* masonry
+floor. `TilesetRelief`'s "cliff stone" is not ground either — it is a cliff **face**, drawn side-on
+to be seen from in front. So `Terrain::kStone` and `Terrain::kAsh` use `TilesetInteriorFloor`
+cobbles, they are the only two terrains with no plain fill, and they are the only two the renderer
+still mirrors per tile — see RENDER_SPEC.md §5.2. It shows: the wasteland reads as paving next to
+any other biome. This is art that has to be drawn, not found.
+
+**A sand-on-grass transition set.** `autotile_fit.py --scan` finds 31 candidate corner sets across
+all ten tilesets and exactly three that cover all 16 masks — none of them sand/grass, the boundary
+that dominates every outdoor shot in this game because the meadow puts a beach around every pond.
+The closest candidates cover 6 masks of 16. The pack's transition art is drawn for the pack's own
+world, which is grass, dirt paths and water; ours is eleven noise-thresholded terrains. Hence the
+generated edge sets in `tools/build_atlas.py`, which cut the pack's **own fills** to an irregular
+contour rather than inventing pixels.
+
+### The trees were cut in half for a whole phase
+
+`BIG_MANIFEST` declared `TreeBroad = NTree(5,2) 2x3` and `TreePine = NTree(1,2) 2x3`. Both trees are
+**four** tiles wide in `TilesetNature`: a canopy of three lobes over a root band spanning the full
+width. Taking the middle two columns kept the centre lobe and the trunk and threw both side lobes
+away, which is why every wood rendered as a palisade of narrow columns.
+
+`tools/check_sprite_rects.py` measures what fraction of each crop border cuts through non-outline
+pixels, and it is unambiguous:
+
+| | left | right | verdict |
+|---|---|---|---|
+| `TreeBroad (5,2) 2x3` | 58% | 58% | severed |
+| `TreePine (1,2) 2x3` | 60% | 60% | severed |
+| `TreeBroad (4,2) 4x3` | 0% | 0% | whole |
+| `TreePine (0,2) 4x3` | 0% | 0% | whole |
+
+> The tool earns its trust by having been wrong first. Its initial version flagged 9 of 17
+> rectangles, because sprites packed touching on a sheet also have opaque borders. Testing against
+> the 1px `141b1b` outline the pack always draws instead dropped all 13 building rectangles — the
+> ones already vetted by `verify_structures.py` — to 0%, while both trees stayed flagged. It still
+> flags `RuinA`/`RuinB`, and correctly: that region is a continuous mosaic of rubble rather than
+> discrete sprites, so any 3×3 window cuts through it.
+
 ### Choosing the P2 creatures: three plausible names ruled out by looking
 
 Wildlife needed a pack animal, a big neutral bruiser and a small timid critter. The obvious picks by

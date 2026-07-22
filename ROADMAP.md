@@ -326,6 +326,31 @@ Cân bằng, nhạc, hiệu ứng hạt, hướng dẫn, bách khoa, tối ưu, 
 - **Loot của quái** → P4. Sinh vật hoang dã rơi thịt; quái chưa rơi gì, vì bảng loot là việc của P4
   và đặt một bảng tạm bây giờ là đặt nó hai lần.
 
+## Xen giữa: R0–R3 — cách thế giới được ráp lại trên màn hình
+
+Không phải một phase trong P0–P9. Đây là việc dựng hình, làm sau P2 vì bốn ảnh GIF demo của chính
+tác giả bộ art cho thấy thế giới của chúng ta **cứng** hơn hẳn — cùng một bộ art, khác cách ráp.
+Chi tiết đầy đủ ở [RENDER_SPEC.md](RENDER_SPEC.md).
+
+| | Việc | Kết quả đo được |
+|---|---|---|
+| R0 | Hai hình chữ nhật cây bị cắt đôi (2×3 → 4×3) | 58% và 60% viền bị cắt → **0%** |
+| R1 | Hoạ tiết nền: mọi ô → ~24%, theo cụm | `density` 0.150 → **0.096** (dải của pack: 0.084–0.104) |
+| R2 | Địa hình quyết định theo **đỉnh góc**, một bộ viền cho mỗi địa hình | `shoreline_lock` 0.98 → **0.25** ở đầm lầy |
+| R3 | Y-sort: sinh vật, cây, nhà, người chơi vào **một danh sách, sắp một lần** | người chơi đi sau tán cây và trước gốc cây, không cần trường hợp đặc biệt |
+
+**Một điều phải nói rõ: con số mà RENDER_SPEC.md được viết quanh nó là sai.** `grid_lock` tách hai
+tập ảnh hoàn hảo (0.061 vs 0.127) nhưng nó đo **tỉ lệ phóng của bản ghi màn hình**, không đo cách
+dựng hình: bốn GIF demo là ảnh phóng nearest-neighbour đúng 4 lần, nên màu chỉ có thể đổi ở một cột
+trong bốn — và hai cột mà `grid_lock` lấy mẫu không nằm trong lớp pha đó. Không có lượng công việc
+tile nào kéo ảnh của chúng ta xuống 0.06 được. Xem RENDER_SPEC.md §0.2; `shoreline_lock` là phép đo
+thay thế, có tự dò pha.
+
+Còn nợ: **R4** — thay các bộ viền tự sinh bằng bộ vẽ tay của pack ở bốn cặp có nước (pack có sẵn,
+cùng một hình học 5×5, đã đo). Và **ash/stone vẫn là nền lát đá trong nhà** — bộ CC0 này không có
+đất cháy hay đá lộ thiên nào; đó là art phải tự vẽ, để lại cho P9.
+
 ## Không còn gì chặn đường
 
-Mọi quyết định đã chốt. **P0, P1 và P2 xong.** Việc tiếp theo là **P3 — hệ thống thế giới.**
+Mọi quyết định đã chốt. **P0, P1, P2 xong, và R0–R3 (dựng hình) xong.** Việc tiếp theo là
+**P3 — hệ thống thế giới.**

@@ -193,8 +193,8 @@ enum class Big : std::uint8_t {
 };
 
 inline constexpr AtlasBig kAtlasBigs[static_cast<int>(Big::kCount)] = {
-    {1, 685, 2, 3},  // kTreeBroad
-    {1, 735, 2, 3},  // kTreePine
+    {1, 685, 4, 3},  // kTreeBroad
+    {1, 735, 4, 3},  // kTreePine
     {1, 785, 4, 3},  // kHouseOrange
     {1, 835, 4, 3},  // kHouseCream
     {1, 885, 4, 3},  // kHouseAmber
@@ -267,6 +267,58 @@ inline constexpr AtlasFx kAtlasFx[static_cast<int>(Fx::kCount)] = {
     const AtlasFx& s = fx_of(f);
     const int i = (frame % s.frames + s.frames) % s.frames;
     return AtlasRect{static_cast<std::int16_t>(s.x + i * (s.w + 2)), s.y};
+}
+
+// --- Terrain transition sets ---------------------------------------------------------
+// One EDGE set per terrain, cut from that terrain's own fill (see TRANS_MANIFEST in the
+// packer). Where two terrains meet, the tile is filled with the lower-priority one and the
+// higher-priority terrain's edge tile is laid over it — so this is 11 sets rather than the
+// 55 a per-pair scheme would need, and it covers pairs the pack draws no art for.
+//
+// Indexed by `static_cast<int>(Terrain)` and by a four-bit CORNER mask: bit 0 = top-left
+// corner is this terrain, 1 = top-right, 2 = bottom-left, 3 = bottom-right. Masks 0 and 15
+// are the plain fills and are not stored, so a row holds masks 1..14.
+inline constexpr int kTransMasks = 14;
+inline constexpr int kTransTerrains = 11;
+
+inline constexpr AtlasRect kAtlasTrans[kTransTerrains] = {
+    {1, 1835},  // Grass
+    {1, 1853},  // Dirt
+    {1, 1871},  // Water
+    {1, 1889},  // Stone
+    {1, 1907},  // Sand
+    {1, 1925},  // Tree
+    {1, 1943},  // Snow
+    {1, 1961},  // Marsh
+    {1, 1979},  // Ash
+    {1, 1997},  // Path
+    {1, 2015},  // Building
+};
+
+// Whether this terrain's variant 0 is a genuinely PLAIN fill, derived from the manifest by
+// comparing it against variant 1 rather than restated by hand. Two terrains are false:
+// Ninja Adventure ships no flat ash and no bare rock, so stone and ash use a whole-tile
+// masonry motif for all three variants. The renderer needs to know, because an unmirrored
+// whole-tile motif tiles into a perfect brick lattice — see `ground` in raylib_bridge.cpp.
+inline constexpr bool kTerrainHasPlain[kTransTerrains] = {
+    true,  // Grass
+    true,  // Dirt
+    true,  // Water
+    false,  // Stone
+    true,  // Sand
+    true,  // Tree
+    true,  // Snow
+    true,  // Marsh
+    false,  // Ash
+    true,  // Path
+    true,  // Building
+};
+
+// `mask` must be 1..14; 0 and 15 have no transition tile because they are plain fills.
+[[nodiscard]] inline constexpr AtlasRect trans_rect(int terrain, int mask) noexcept {
+    const AtlasRect& row = kAtlasTrans[terrain];
+    return AtlasRect{static_cast<std::int16_t>(row.x + (mask - 1) * (kAtlasTile + 2)),
+                     row.y};
 }
 
 }  // namespace mmo

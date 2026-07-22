@@ -65,27 +65,46 @@ MANIFEST = [
     # ground rendered as a plain background colour rather than as art. Two were worse than plain:
     # ash was a swatch from the map-EDITOR marker sheet, and marsh was a vertical cliff face.
     # See assets/TILE_INDEX.md for how to query for replacements.
-    ("TerrainGrass", "NFloor",  1, 12),
-    ("TerrainGrass1", "NFloor",  2, 11),
+    #
+    # VARIANT 0 IS THE PLAIN FILL, variants 1 and 2 are textured. That order is load-bearing: the
+    # renderer draws variant 0 almost everywhere and only reaches for a textured one inside a
+    # clustered patch (see `decor_gate` in raylib_bridge.cpp). Stamping a motif on every tile was
+    # measured against the pack's own maps and is roughly four times their detail density — uniform
+    # detail everywhere reads as wallpaper, which is why our `density` metric came out nearly double
+    # the demos' while the screenshots looked emptier.
+    #
+    # Every plain pick sits next to its textured partner on the same sheet and is within a colour
+    # distance of 9 of it (queried from assets/tile_index.json by role `fill_plain`) — a plain tile
+    # from elsewhere in the pack would be a different shade of the same terrain, which repaints the
+    # hard seam this whole change exists to remove.
+    ("TerrainGrass", "NFloor",  0, 12),
+    ("TerrainGrass1", "NFloor",  1, 12),
     ("TerrainGrass2", "NFloor",  3, 12),
-    ("TerrainDirt", "NFloor", 12, 19),
-    ("TerrainDirt1", "NFloor", 14, 19),
-    ("TerrainDirt2", "NFloor", 13, 19),
-    ("TerrainWater", "NWater", 11,  2),
+    ("TerrainDirt", "NFloor", 11, 19),
+    ("TerrainDirt1", "NFloor", 12, 19),
+    ("TerrainDirt2", "NFloor", 14, 19),
+    # Water's plain fill is the still body inside the pack's own shore sets, and its two textured
+    # variants are the rippled tile that used to be all three. A whole-tile motif on every tile of a
+    # lake is the single largest source of grid-aligned edges in any shot with water in it.
+    ("TerrainWater", "NWater",  1,  7),
     ("TerrainWater1", "NWater", 11,  2),
-    ("TerrainWater2", "NWater", 11,  2),
+    ("TerrainWater2", "NWater", 11,  4),
+    # Stone and ash have no plain fill of their own shade anywhere in the pack — the nearest are 21
+    # and 17 away on other sheets, which is over the ~10 that starts to read as a second terrain. So
+    # these two keep a textured tile in slot 0 and simply stay busy. Written down rather than
+    # silently fudged, because it is the one place the rule above does not hold.
     ("TerrainStone", "NIntFloor",  5, 13),
     ("TerrainStone1", "NIntFloor",  8, 13),
     ("TerrainStone2", "NIntFloor", 10, 15),
-    ("TerrainSand", "NFloor",  1,  5),
-    ("TerrainSand1", "NFloor",  3,  5),
-    ("TerrainSand2", "NFloor",  2,  5),
-    ("TerrainSnow", "NFloor",  1, 19),
-    ("TerrainSnow1", "NFloor",  3, 19),
-    ("TerrainSnow2", "NFloor",  2, 19),
-    ("TerrainMarsh", "NFloor", 12, 12),
-    ("TerrainMarsh1", "NFloor", 14, 12),
-    ("TerrainMarsh2", "NFloor", 13, 12),
+    ("TerrainSand", "NFloor",  0,  5),
+    ("TerrainSand1", "NFloor",  1,  5),
+    ("TerrainSand2", "NFloor",  3,  5),
+    ("TerrainSnow", "NFloor",  0, 19),
+    ("TerrainSnow1", "NFloor",  1, 19),
+    ("TerrainSnow2", "NFloor",  3, 19),
+    ("TerrainMarsh", "NFloor", 11, 12),
+    ("TerrainMarsh1", "NFloor", 12, 12),
+    ("TerrainMarsh2", "NFloor", 14, 12),
     ("TerrainAsh", "NIntFloor", 16, 13),
     ("TerrainAsh1", "NIntFloor", 19, 13),
     ("TerrainAsh2", "NIntFloor", 16, 16),
@@ -97,12 +116,12 @@ MANIFEST = [
     # The RED set two columns to the left (cols 3-9) is the same shape and was the first pick, but
     # roads run through every ring: a red clay road is fine on grass and looks like a wound across a
     # snowfield. Neutral brown is the only one of the two that works everywhere the road goes.
-    ("TerrainPath", "NFloor", 19, 8),
+    ("TerrainPath", "NFloor", 12, 8),
     ("TerrainPath1", "NFloor", 19, 9),
     ("TerrainPath2", "NFloor", 16, 8),
     # A building's footprint is drawn as PATH and then covered by the building's own sprite, so
     # kBuilding needs a base tile that reads as trodden ground under an overhanging roof.
-    ("TerrainBuilding", "NFloor", 19, 8),
+    ("TerrainBuilding", "NFloor", 12, 8),
     ("TerrainBuilding1", "NFloor", 19, 9),
     ("TerrainBuilding2", "NFloor", 16, 8),
     # --- overlays (transparent, drawn over the base layer) ---
@@ -144,8 +163,13 @@ MANIFEST = [
 # maintaining a second switch that can drift out of step. There is a static_assert on the count.
 BIG_MANIFEST = [
     # (name, sheet, col, row, tiles wide, tiles tall)
-    ("TreeBroad", "NTree", 5, 2, 2, 3),
-    ("TreePine",  "NTree", 1, 2, 2, 3),
+    # Both trees are FOUR tiles wide, not two. The 2x3 rectangles that used to be here took the
+    # middle two columns: they kept the centre lobe and the trunk and threw away both side lobes,
+    # cutting through 58% and 60% of non-outline pixels on each border. That is why the forest read
+    # as a palisade of narrow columns rather than as a canopy. `tools/check_sprite_rects.py --rect
+    # NTree 4 2 4 3` reports 0% on all four borders; the old rectangle reports 58%.
+    ("TreeBroad", "NTree", 4, 2, 4, 3),
+    ("TreePine",  "NTree", 0, 2, 4, 3),
     # --- StructureKind order starts here ---
     ("HouseOrange", "NHouse",  0,  0, 4, 3),
     ("HouseCream",  "NHouse",  4,  0, 4, 3),
@@ -198,6 +222,120 @@ FX_MANIFEST = [
 ]
 
 COLS = 8  # atlas width in cells; keeps the texture small and squarish
+
+# --- Terrain transition sets --------------------------------------------------
+# ONE OVERLAY SET PER TERRAIN, NOT ONE SET PER PAIR. `Terrain` has 11 values, so a set for every
+# pair would be 55 x 14 = 770 tiles. Where two terrains meet, the renderer fills the tile with the
+# LOWER-priority one and lays the higher-priority terrain's own edge tile over it, so this costs
+# 11 x 14 = 154 tiles and covers every pair including ones that never occur.
+#
+# WHY THESE ARE GENERATED RATHER THAN TAKEN FROM THE PACK, which is a real departure from
+# RENDER_SPEC.md §5.1 and needs a reason. The pack ships 1113 tiles with role `transition_edge` and
+# they are good, but they are drawn for the pack's OWN world, which is grass with dirt paths and
+# water. Ours is eleven noise-thresholded terrains, and the boundary that dominates every outdoor
+# screenshot is sand against grass — a beach. `autotile_fit.py --scan` over all ten tilesets finds
+# exactly three sets covering all 16 corner masks, and not one of them is sand/grass; the closest
+# candidates (TilesetVillageAbandoned:0-1#1, TilesetNature:3-7#3) cover 6 masks of 16. So for the
+# single most visible boundary in the game the art does not exist, and a scheme that handles only
+# the pairs the pack happens to draw would leave it hard-edged.
+#
+# What is generated is only the SHAPE of the boundary. The pixels are still the pack's own fill
+# tiles, cut to an irregular contour — so this adds no new art, and re-arting a terrain changes its
+# transitions automatically.
+#
+# Masks 1..14 (0 and 15 are the plain fills, which already exist). Bit 0 = top-left corner is this
+# terrain, 1 = top-right, 2 = bottom-left, 3 = bottom-right — the convention autotile_fit.py uses.
+TRANS_MASKS = list(range(1, 15))
+
+# Which fill each terrain's edge set is cut from, in `Terrain` enum order. Index N here IS
+# `static_cast<int>(Terrain)` N, so the renderer indexes without a lookup table.
+TRANS_MANIFEST = [
+    ("Grass",    "NFloor",  0, 12),
+    ("Dirt",     "NFloor", 11, 19),
+    ("Water",    "NWater", 11,  2),
+    ("Stone",    "NIntFloor",  5, 13),
+    ("Sand",     "NFloor",  0,  5),
+    # kTree draws the ground of its own ring and never uses its own set; it is here to keep the
+    # index equal to the enum value.
+    ("Tree",     "NFloor",  0, 12),
+    ("Snow",     "NFloor",  0, 19),
+    ("Marsh",    "NFloor", 11, 12),
+    ("Ash",      "NIntFloor", 16, 13),
+    ("Path",     "NFloor", 12,  8),
+    ("Building", "NFloor", 12,  8),
+]
+
+# How far the boundary is allowed to wander from the straight interpolated contour, as a fraction of
+# a tile. Zero gives clean arcs and straight half-tile lines — better than a tile-edge staircase but
+# still visibly ruled. This is what turns it into a coastline.
+TRANS_WOBBLE = 0.17
+
+
+def _wrap_noise(seed: int, period: int) -> list[list[float]]:
+    """A TILE-tall value-noise field that wraps at `period`, so it repeats seamlessly.
+
+    Seamlessness is the whole point and it is not decorative. Adjacent tiles share two corners, so
+    the interpolated field already agrees along their shared edge; if the wobble did not agree
+    there too, every tile border would show a step — which is the artefact being removed. Wrapping
+    at a divisor of TILE makes the field identical on both sides of every edge.
+    """
+    n = TILE // period
+    lat = {}
+
+    def at(i: int, j: int) -> float:
+        key = (i % n, j % n)  # the wrap
+        if key not in lat:
+            h = (key[0] * 0x9E37_79B9 ^ key[1] * 0x85EB_CA6B ^ seed) & 0xFFFF_FFFF
+            h ^= h >> 15
+            h = (h * 0xC2B2_AE35) & 0xFFFF_FFFF
+            h ^= h >> 13
+            lat[key] = (h & 0xFFFF) / 65535.0
+        return lat[key]
+
+    out = []
+    for y in range(TILE):
+        row = []
+        for x in range(TILE):
+            fx, fy = x / period, y / period
+            ix, iy = int(fx), int(fy)
+            tx, ty = fx - ix, fy - iy
+            sx = tx * tx * (3.0 - 2.0 * tx)
+            sy = ty * ty * (3.0 - 2.0 * ty)
+            a = at(ix, iy) + (at(ix + 1, iy) - at(ix, iy)) * sx
+            b = at(ix, iy + 1) + (at(ix + 1, iy + 1) - at(ix, iy + 1)) * sx
+            row.append(a + (b - a) * sy)
+        out.append(row)
+    return out
+
+
+def transition_tile(fill: Image.Image, mask: int, noise: list[list[float]]) -> Image.Image:
+    """`fill`, cut to the region where the four corner bits of `mask` say this terrain wins.
+
+    The field is a bilinear interpolation of the four corner bits, thresholded at 0.5. That single
+    choice is what makes the whole scheme work:
+
+      * mask 15 is 1 everywhere and mask 0 is 0 everywhere, so the plain fills stay consistent;
+      * along any shared edge the field depends only on the two corners of that edge, which both
+        tiles agree on, so the contour is CONTINUOUS across tile borders;
+      * the diagonal masks 6 and 9 come out as two opposite corners, which is a shape no tileset in
+        the pack draws — the reason RENDER_SPEC.md §3.1 warns that per-tile sampling produces masks
+        with no art. Generating the set means all 16 exist and there is nothing to fall back on.
+
+    Threshold, never blend: a soft alpha ramp would put half-transparent pixels along every
+    coastline, and this is pixel art at a 2x zoom where that reads as blur, not as a gradient.
+    """
+    tl, tr, bl, br = mask & 1, (mask >> 1) & 1, (mask >> 2) & 1, (mask >> 3) & 1
+    out = Image.new("RGBA", (TILE, TILE), (0, 0, 0, 0))
+    src, dst = fill.load(), out.load()
+    for y in range(TILE):
+        v = (y + 0.5) / TILE
+        for x in range(TILE):
+            u = (x + 0.5) / TILE
+            a = (tl * (1 - u) * (1 - v) + tr * u * (1 - v) + bl * (1 - u) * v + br * u * v)
+            a += (noise[y][x] - 0.5) * 2.0 * TRANS_WOBBLE
+            if a > 0.5:
+                dst[x, y] = src[x, y]
+    return out
 
 # --- Animation sheets --------------------------------------------------------
 # Ninja Adventure ships each actor as its own file rather than as tiles in a shared sheet, and its
@@ -372,6 +510,68 @@ def main() -> int:
         fxs.append((name, PAD, anim_y + PAD, fw, fh, frames))
         anim_y += fh + 2 * PAD
 
+    # --- terrain transition sets, generated ---------------------------------------------------
+    # Two octaves of wrapping noise: the coarse one gives the boundary a shape, the fine one gives
+    # it a ragged pixel edge. One octave alone was either too smooth to read as a coastline or too
+    # busy to read as a boundary at all.
+    coarse = _wrap_noise(0x51A3, 8)
+    fine = _wrap_noise(0x2C77, 4)
+    noise = [[0.62 * coarse[y][x] + 0.38 * fine[y][x] for x in range(TILE)] for y in range(TILE)]
+
+    trans = []
+    for name, key_sheet, col, row in TRANS_MANIFEST:
+        sheet, stride = sheets[key_sheet]
+        sx, sy = col * stride, row * stride
+        if sx + TILE > sheet.width or sy + TILE > sheet.height:
+            print(f"Trans{name}: ({col},{row}) is outside {key_sheet}", file=sys.stderr)
+            return 1
+        fill = sheet.crop((sx, sy, sx + TILE, sy + TILE))
+        strip_w = len(TRANS_MASKS) * cell_px
+        new_h = anim_y + cell_px
+        if new_h > atlas.height or strip_w > atlas.width:
+            grown = Image.new("RGBA", (max(strip_w, atlas.width), max(new_h, atlas.height)),
+                              (0, 0, 0, 0))
+            grown.paste(atlas, (0, 0))
+            atlas = grown
+        for i, mask in enumerate(TRANS_MASKS):
+            cell = Image.new("RGBA", (cell_px, cell_px), (0, 0, 0, 0))
+            # No extrusion. Extrusion smears a tile's border colour outward so that sampling at a
+            # fractional texture coordinate cannot pick up the neighbour — but these tiles are
+            # deliberately transparent right up to their edge, and smearing that transparency
+            # outward is a no-op while smearing the OPAQUE side outward would thicken the coastline
+            # by a pixel wherever it touches a tile border. The 1px gap between cells is enough.
+            cell.paste(transition_tile(fill, mask, noise), (PAD, PAD))
+            atlas.paste(cell, (i * cell_px, anim_y))
+        trans.append((name, PAD, anim_y + PAD))
+        anim_y += cell_px
+
+    # Is each terrain's variant 0 actually PLAIN? MEASURED off the pixels, not asserted. Comparing
+    # the variant-0 and variant-1 coordinates was the first attempt and it answers a different
+    # question — they always differ, including for the two terrains that have no plain fill at all.
+    by_name = {n: (s, c, r) for n, s, c, r in MANIFEST}
+    has_plain = {}
+    for name, _, _, _ in TRANS_MANIFEST:
+        entry = by_name.get(f"Terrain{name}")
+        if entry is None:
+            # kTree has no fill of its own — it draws its ring's ground, so it inherits grass.
+            has_plain[name] = has_plain.get("Grass", True)
+            continue
+        sheet, stride = sheets[entry[0]]
+        crop = sheet.crop((entry[1] * stride, entry[2] * stride,
+                           entry[1] * stride + TILE, entry[2] * stride + TILE))
+        px = list(crop.convert("RGB").getdata())
+        n = len(px)
+        mean = [sum(p[i] for p in px) / n for i in range(3)]
+        sd = (sum(sum((p[i] - mean[i]) ** 2 for i in range(3)) for p in px) / n) ** 0.5
+        # The measured spread is three-way, not two-way, which is why the threshold is 15 and not
+        # the 6 first tried: the five real plain fills score 0.0, the road's earth grain scores 8.9,
+        # and the two masonry fills score 22-23. The road tile comes from the centre of an autotile
+        # set and therefore repeats seamlessly, so it belongs with the plain group. Printed below so
+        # the boundary can be checked rather than trusted.
+        has_plain[name] = sd < 15.0
+        print(f"  fill {name:9s} variant0 stddev {sd:5.1f}  -> "
+              f"{'plain' if has_plain[name] else 'WHOLE-TILE MOTIF, will be mirrored'}")
+
     out_png = ROOT / "assets" / "atlas.png"
     atlas.save(out_png)
 
@@ -514,6 +714,42 @@ def main() -> int:
         "    const AtlasFx& s = fx_of(f);",
         "    const int i = (frame % s.frames + s.frames) % s.frames;",
         "    return AtlasRect{static_cast<std::int16_t>(s.x + i * (s.w + 2)), s.y};",
+        "}",
+        "",
+        "// --- Terrain transition sets ---------------------------------------------------------",
+        "// One EDGE set per terrain, cut from that terrain's own fill (see TRANS_MANIFEST in the",
+        "// packer). Where two terrains meet, the tile is filled with the lower-priority one and the",
+        "// higher-priority terrain's edge tile is laid over it — so this is 11 sets rather than the",
+        "// 55 a per-pair scheme would need, and it covers pairs the pack draws no art for.",
+        "//",
+        "// Indexed by `static_cast<int>(Terrain)` and by a four-bit CORNER mask: bit 0 = top-left",
+        "// corner is this terrain, 1 = top-right, 2 = bottom-left, 3 = bottom-right. Masks 0 and 15",
+        "// are the plain fills and are not stored, so a row holds masks 1..14.",
+        f"inline constexpr int kTransMasks = {len(TRANS_MASKS)};",
+        f"inline constexpr int kTransTerrains = {len(TRANS_MANIFEST)};",
+        "",
+        "inline constexpr AtlasRect kAtlasTrans[kTransTerrains] = {",
+    ]
+    lines += [f"    {{{x}, {y}}},  // {name}" for name, x, y in trans]
+    lines += [
+        "};",
+        "",
+        "// Whether this terrain's variant 0 is a genuinely PLAIN fill, derived from the manifest by",
+        "// comparing it against variant 1 rather than restated by hand. Two terrains are false:",
+        "// Ninja Adventure ships no flat ash and no bare rock, so stone and ash use a whole-tile",
+        "// masonry motif for all three variants. The renderer needs to know, because an unmirrored",
+        "// whole-tile motif tiles into a perfect brick lattice — see `ground` in raylib_bridge.cpp.",
+        "inline constexpr bool kTerrainHasPlain[kTransTerrains] = {",
+    ]
+    lines += [f"    {str(has_plain[name]).lower()},  // {name}" for name, _, _ in trans]
+    lines += [
+        "};",
+        "",
+        "// `mask` must be 1..14; 0 and 15 have no transition tile because they are plain fills.",
+        "[[nodiscard]] inline constexpr AtlasRect trans_rect(int terrain, int mask) noexcept {",
+        "    const AtlasRect& row = kAtlasTrans[terrain];",
+        "    return AtlasRect{static_cast<std::int16_t>(row.x + (mask - 1) * (kAtlasTile + 2)),",
+        "                     row.y};",
         "}",
         "",
         "}  // namespace mmo",

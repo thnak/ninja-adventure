@@ -61,6 +61,85 @@ bool g_atlas_ok = false;
     return Slot::kTerrainGrass;
 }
 
+// --- Terrain corners and transitions ---------------------------------------------------------
+// Which terrain is drawn ON TOP where two meet. Where the corners of a tile disagree, the tile is
+// filled with the lower-priority terrain and the higher one's edge tile is laid over it, so this
+// order is the whole per-pair table: 11 numbers instead of 55 hand-authored sets.
+//
+// The order reads as "what sits on what" in the world, not as a preference. Water is at the bottom
+// because a bank overhangs a shore rather than the other way round; the two terrains world
+// GENERATION writes are at the top because a road that fades into the grass under it is a road that
+// was not built.
+[[nodiscard]] int terrain_priority(Terrain t) {
+    switch (t) {
+        case Terrain::kWater: return 0;
+        case Terrain::kMarsh: return 1;
+        case Terrain::kSand: return 2;
+        case Terrain::kAsh: return 3;
+        case Terrain::kSnow: return 4;
+        case Terrain::kStone: return 5;
+        case Terrain::kGrass: return 6;
+        case Terrain::kTree: return 6;  // a tree stands ON ground; see corner_terrain
+        case Terrain::kDirt: return 7;
+        case Terrain::kPath: return 8;
+        case Terrain::kBuilding: return 9;
+        case Terrain::kCount: break;
+    }
+    return 0;
+}
+
+// The terrain at a CORNER VERTEX, on the (kMapTiles+1)² lattice of corners rather than the tile
+// grid.
+//
+// This is the crux of the whole change, and it costs nothing because of an accident of how terrain
+// is defined: `terrain_base` evaluates its noise fields at (gx, gy) — the tile's TOP-LEFT CORNER,
+// not its centre. The sample lattice was always the corner lattice. Deciding terrain per tile and
+// then inferring corners from the neighbours is the obvious alternative and it is wrong: it
+// produces arrangements the art has to fudge back to a flat fill, which puts the hard edges
+// straight back.
+//
+// THE OVERLAY NEEDS A DIFFERENT RULE and it is the one thing here that is not free. Roads, village
+// squares and building footprints are placed per TILE by world generation; they are not a noise
+// field and have no value at a corner at all. Leaving them out was the first attempt, and a village
+// then rendered as a flat brown rectangle with a staircase border — the exact defect this change
+// removes from the coastlines, now the most visible thing on screen.
+//
+// So a corner takes the highest-priority overlay among the FOUR TILES that meet at it. That grows a
+// placed region by half a tile in every direction, which is what turns a hand-drawn road into one
+// with a soft wandering edge. It is the "infer corners from neighbours" rule §3.1 of the spec warns
+// against — and the warning does not apply, because it is a warning about producing corner
+// arrangements no tileset draws. Our sets are generated, so all sixteen exist.
+[[nodiscard]] Terrain corner_terrain(std::uint16_t map, int vx, int vy) {
+    for (int dy = -1; dy <= 0; ++dy) {
+        for (int dx = -1; dx <= 0; ++dx) {
+            const Terrain o = terrain_of(kWorldSeed, map, vx + dx, vy + dy);
+            // A footprint and the square around it are the same trodden earth and share art, so
+            // they are one terrain as far as the boundary is concerned. Keeping them separate put a
+            // seam between every house and the ground it stands on.
+            if (o == Terrain::kPath || o == Terrain::kBuilding) return Terrain::kPath;
+        }
+    }
+    const Terrain t = terrain_base(kWorldSeed, map, vx, vy);
+    // A tree is not a terrain you can stand on — it is something standing on one. Resolving it to
+    // its ring's ground here is what lets a forest floor take part in transitions at all.
+    return (t == Terrain::kTree) ? ground_under_tree(ring_of(kWorldSeed, vx, vy)) : t;
+}
+
+// --- The Y-sorted draw list -------------------------------------------------------------------
+// Everything that STANDS on the ground, in one list. Terrain is not here — it is flat, so nothing
+// can be in front of it — and neither are combat flashes, which are meant to be read over the top
+// of whatever they hit.
+enum class SpriteKind : std::uint8_t { kCrop, kBuilding, kCreature, kShot, kBig, kPlayer };
+
+struct Sprite {
+    float sort;     // world-pixel Y of this sprite's FEET; the sort key, see the sorted pass
+    float x, y;     // world-pixel draw position
+    const void* p;  // the source record for the kinds that have one, else null
+    std::uint16_t a;      // Big id, or player slot
+    std::uint16_t frame;  // animation frame, for creatures
+    SpriteKind kind;
+};
+
 // A generated structure to its sprite. The two enums are kept in the same order on purpose (see the
 // note over BIG_MANIFEST in tools/build_atlas.py) so this is an offset rather than a switch that
 // could silently drift out of step with the art.
@@ -78,10 +157,17 @@ static_assert(static_cast<int>(Big::kCount) - static_cast<int>(Big::kHouseOrange
 // that is a CHECKERBOARD, not a left-edge test, so trees landed diagonally on top of each other and
 // every other tree tile drew nothing at all. That is the overlapping-and-sliced look.
 //
-// A tile is an anchor iff it is a tree and an EVEN number of trees precede it in its row, so a run
-// of N tree tiles yields floor(N/2) non-overlapping trees. Terrain is a pure function, so this can
-// be asked about any tile without a chunk view — including tiles just off-screen, which is what
-// stops canopies being clipped at the view edge.
+// A tile is an anchor iff it is a tree and a MULTIPLE OF `kTreeStride` trees precede it in its row,
+// so a run of N tree tiles yields ceil(N/3) trees. Terrain is a pure function, so this can be asked
+// about any tile without a chunk view — including tiles just off-screen, which is what stops
+// canopies being clipped at the view edge.
+//
+// The stride is 3 while the sprite is 4 wide, deliberately. Spacing them at their own width gives an
+// orchard: even gaps, every canopy separate. One tile of overlap is what makes neighbouring crowns
+// read as a single mass, which is what a wood looks like — and it is only affordable because the
+// canopies are now whole (see BIG_MANIFEST). Two half-trees overlapping just looked broken.
+inline constexpr int kTreeStride = 3;
+
 [[nodiscard]] bool tree_at(std::uint16_t map, int x, int y) {
     if (x < 0 || y < 0 || x >= kMapTiles || y >= kMapTiles) return false;
     return terrain_of(kWorldSeed, map, x, y) == Terrain::kTree;
@@ -91,7 +177,41 @@ static_assert(static_cast<int>(Big::kCount) - static_cast<int>(Big::kHouseOrange
     if (!tree_at(map, x, y)) return false;
     int run = 0;
     while (run < 64 && tree_at(map, x - 1 - run, y)) ++run;
-    return (run % 2) == 0;
+    return (run % kTreeStride) == 0;
+}
+
+// A stable per-tile pixel offset, so trees do not sit on the 32px lattice in rows and columns. The
+// range is deliberately small: ±5px at kTilePx=32 is enough to break the grid without letting a
+// trunk drift off the tile the simulation says is blocked.
+[[nodiscard]] std::uint32_t scatter_hash(int x, int y, std::uint32_t salt) {
+    std::uint32_t h = static_cast<std::uint32_t>(x) * 0x9E37'79B9u ^
+                      static_cast<std::uint32_t>(y) * 0x85EB'CA6Bu ^ salt;
+    h ^= h >> 15;
+    h *= 0xC2B2'AE35u;
+    h ^= h >> 13;
+    return h;
+}
+
+[[nodiscard]] float scatter_offset(int x, int y, std::uint32_t salt, float range) {
+    const auto v = static_cast<float>(scatter_hash(x, y, salt) & 0xFFFFu) / 65535.0f;
+    return (v * 2.0f - 1.0f) * range;
+}
+
+// Whether this tile shows a TEXTURED fill rather than a plain one.
+//
+// The old rule was "always", and that is the whole of defect D4: a grass tuft on every grass tile,
+// at the same offset, is wallpaper. The author's own hand-built village map runs about one
+// non-ground element per four ground tiles, and clumps them.
+//
+// Two stages, and the first is the one that matters. A per-tile roll alone gives uniform scatter,
+// which at 24% looks exactly like the 100% case with holes in it — still no shape. The coarse noise
+// field decides WHERE detail lives, so the ground gets bare stretches and thick patches, and the
+// roll then breaks up the patch edge so it does not read as a blob with a boundary of its own.
+[[nodiscard]] bool textured_here(std::uint16_t map, int gx, int gy) {
+    const float patch = fbm(kWorldSeed ^ 0xDEC0'0DEC'0DEC'0DECull, static_cast<float>(gx),
+                            static_cast<float>(gy), 9.0f);
+    if (patch < 0.52f) return false;
+    return (scatter_hash(gx, gy, 0xD3C0u + map) & 3u) != 0u;
 }
 
 [[nodiscard]] Anim anim_of(CreatureKind k) {
@@ -218,6 +338,45 @@ struct RaylibBridge::Impl {
     int last_creatures = 0;
     const WorldLayout* layout = nullptr;
 
+    // Per-frame scratch, kept as members so a frame costs no allocations once the vectors have
+    // reached their working size. `frame_views` and `frame_players` exist to keep the shared_ptrs
+    // alive: `frame_sprites` holds RAW pointers into the creature and building vectors they own,
+    // and the sorted pass runs after the loop that loaded them has gone out of scope.
+    std::vector<ChunkViewPtr> frame_views;
+    std::vector<Sprite> frame_sprites;
+    std::vector<std::uint32_t> frame_structures;
+    PlayerViewPtr frame_players[kMaxPlayers];
+
+    // The corner lattice for this frame's view rect, one Terrain per vertex.
+    //
+    // Not an optimisation for its own sake: every corner is shared by four tiles, so evaluating it
+    // where it is used costs four times what it should — and a corner is not cheap. `terrain_base`
+    // runs three two-octave noise fields and `ring_of` a fourth, so a naive `ground()` would do
+    // about thirty noise evaluations per tile. Filling the lattice once cuts that to eight.
+    std::vector<std::uint8_t> corners;
+    int corner_x0 = 0, corner_y0 = 0, corner_w = 0, corner_h = 0;
+
+    void build_corners(std::uint16_t map, int x0, int y0, int x1, int y1) {
+        corner_x0 = x0;
+        corner_y0 = y0;
+        corner_w = x1 - x0 + 1;
+        corner_h = y1 - y0 + 1;
+        corners.resize(static_cast<std::size_t>(corner_w) * corner_h);
+        for (int vy = y0; vy <= y1; ++vy) {
+            for (int vx = x0; vx <= x1; ++vx) {
+                corners[static_cast<std::size_t>(vy - y0) * corner_w + (vx - x0)] =
+                    static_cast<std::uint8_t>(corner_terrain(map, vx, vy));
+            }
+        }
+    }
+
+    [[nodiscard]] Terrain corner(int vx, int vy) const {
+        const int cx = vx - corner_x0;
+        const int cy = vy - corner_y0;
+        if (cx < 0 || cy < 0 || cx >= corner_w || cy >= corner_h) return Terrain::kGrass;
+        return static_cast<Terrain>(corners[static_cast<std::size_t>(cy) * corner_w + cx]);
+    }
+
     // One sprite, scaled from the atlas' 16px cell to whatever world size the caller wants.
     // `size` in pixels, `cx/cy` the CENTRE in world pixels — centring is what lets a crop grow by
     // drawing bigger without drifting off its tile.
@@ -269,6 +428,82 @@ struct RaylibBridge::Impl {
         DrawTexturePro(atlas, src, dst, Vector2{w * 0.5f, h}, 0.0f, tint);
     }
 
+    // One ground tile, resolved from its four CORNERS rather than from its own terrain value.
+    //
+    // The tile the simulation reports is still what decides the common case — a tile of grass whose
+    // corners are all grass draws a grass fill, exactly as before. What changes is the boundary: a
+    // tile with two grass corners and two sand corners is drawn as sand with grass laid over the
+    // half that is grass, and because both tiles either side of that edge read the SAME two shared
+    // corners, the contour runs straight through the tile border instead of stopping at it.
+    //
+    // Roads and building footprints are exempt. They are placed per tile by world generation and
+    // have no value at a corner at all, so they draw flat — see `corner_terrain`.
+    void ground(std::uint16_t map, int gx, int gy) const {
+        // NOT MIRRORED, and that is a reversal worth explaining. Mirroring a fill per tile is free
+        // and used to be here to break the repeat of a single motif — but a motif that reaches the
+        // tile's edge does not survive being flipped: the two halves of the pattern no longer meet,
+        // so mirroring writes a discontinuity onto EVERY tile boundary. On a lake, where the fill is
+        // one large rippling motif, that is thousands of colour boundaries pinned exactly to the
+        // grid, which is the defect this whole change is measured against. Seamless repetition beats
+        // mirrored variety; the clustered textured patches supply the variety instead.
+        const int variant = tile_variant(map, gx, gy);
+        const int pick = textured_here(map, gx, gy) ? 1 + ((variant >> 2) & 1) : 0;
+
+        const Terrain c[4] = {corner(gx, gy), corner(gx + 1, gy), corner(gx, gy + 1),
+                              corner(gx + 1, gy + 1)};
+
+        // Highest priority wins the overlay; the runner-up becomes the fill. Three or more terrains
+        // can meet at one tile, and the third is simply drawn as the second — a lie confined to the
+        // handful of tiles where three biomes touch at a point, and invisible at any zoom.
+        Terrain top = c[0];
+        for (const Terrain q : c) {
+            if (terrain_priority(q) > terrain_priority(top)) top = q;
+        }
+        int mask = 0;
+        Terrain base = top;
+        for (int i = 0; i < 4; ++i) {
+            if (c[i] == top) {
+                mask |= 1 << i;
+            } else if (base == top || terrain_priority(c[i]) > terrain_priority(base)) {
+                base = c[i];
+            }
+        }
+
+        if (mask == 0b1111) {
+            im_tile_fill(top, gx, gy, pick);
+            return;
+        }
+        im_tile_fill(base, gx, gy, pick);
+        trans(top, mask, gx, gy);
+    }
+
+    // The plain-or-textured fill for one terrain, with the variant run resolved.
+    //
+    // The mirror is the exception that proves the rule above. Mirroring is off everywhere it can be,
+    // because it writes a discontinuity onto every tile boundary — but stone and ash have no plain
+    // fill anywhere in the pack (`kTerrainHasPlain`, derived from the manifest), so their three
+    // variants are all whole-tile masonry. Left unmirrored those tile into a flawless brick lattice
+    // and the wasteland reads as a cathedral floor. Mirrored, the seams are the lesser evil: broken
+    // rubble is at least the right kind of wrong for scorched ground. The real fix is art this CC0
+    // pack does not contain.
+    void im_tile_fill(Terrain t, int gx, int gy, int pick) const {
+        const auto first = static_cast<int>(slot_of(t));
+        const int mirror = kTerrainHasPlain[static_cast<int>(t)] ? 0 : (tile_variant(0, gx, gy) & 3);
+        tile(static_cast<Slot>(first + (pick % kTerrainVariants)), gx, gy, WHITE, mirror);
+    }
+
+    // One transition tile: `t`'s own art, cut to the corners `mask` says belong to it, over
+    // whatever has already been drawn on this tile. Never mirrored — the mask IS the orientation.
+    void trans(Terrain t, int mask, int tx, int ty) const {
+        if (!atlas_ok) return;
+        const AtlasRect r = trans_rect(static_cast<int>(t), mask);
+        const float a = static_cast<float>(kAtlasTile);
+        const Rectangle src{static_cast<float>(r.x), static_cast<float>(r.y), a, a};
+        const Rectangle dst{static_cast<float>(tx * kTilePx), static_cast<float>(ty * kTilePx),
+                            static_cast<float>(kTilePx), static_cast<float>(kTilePx)};
+        DrawTexturePro(atlas, src, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+    }
+
     // A full tile at its grid position.
     void tile(Slot s, int tx, int ty, Color tint = WHITE, int variant = 0,
               float rotation = 0.0f) const {
@@ -312,6 +547,117 @@ struct RaylibBridge::Impl {
     // watching the same place see leaves in the same position, and a screenshot taken at world
     // t=20s is reproducible. That property costs nothing here and is the difference between an
     // effect you can debug and one you cannot.
+    // One entry of the Y-sorted list. Each case draws exactly what its old dedicated pass drew —
+    // the change is WHEN it runs, not what it paints.
+    void draw_sprite(const Sprite& sp, const PlayerBus& players, int local_slot) const {
+        switch (sp.kind) {
+            case SpriteKind::kCrop: {
+                const auto& cr = *static_cast<const Crop*>(sp.p);
+                // Size tracks growth: a seedling is drawn at 45% of a tile, a ripe crop fills it.
+                const float ratio = 0.45f + 0.55f * (static_cast<float>(cr.stage) /
+                                                     static_cast<float>(kCropStages - 1));
+                sprite(slot_of(cr), sp.x, sp.y, kTilePx * ratio);
+                return;
+            }
+            case SpriteKind::kBuilding: {
+                const auto& b = *static_cast<const Building*>(sp.p);
+                tile(b.kind == BuildKind::kHearth ? Slot::kBuildHearth : Slot::kBuildPlot, b.tx,
+                     b.ty);
+                // Level pips: one small dot per level above 1, so an upgraded building is
+                // identifiable at a glance without a UI panel.
+                for (int lv = 1; lv < b.level; ++lv) {
+                    DrawRectangle(b.tx * kTilePx + 3 + (lv - 1) * 6, b.ty * kTilePx + 2, 4, 4,
+                                  Color{255, 220, 90, 255});
+                }
+                // Health bar, only when damaged — no clutter on an untouched base.
+                const std::int16_t full = max_hp_of(b.kind);
+                if (b.hp < full && full > 0) {
+                    const int w = std::max(1, (b.hp * kTilePx) / full);
+                    DrawRectangle(b.tx * kTilePx, b.ty * kTilePx - 4, w, 3,
+                                  Color{220, 70, 70, 255});
+                }
+                return;
+            }
+            case SpriteKind::kCreature: {
+                const auto& m = *static_cast<const Creature*>(sp.p);
+                // A flat ellipse under each creature: with no height in the art, this is what stops
+                // the sprites reading as decals lying on the ground.
+                DrawEllipse(static_cast<int>(sp.x), static_cast<int>(sp.y + 6), kTilePx * 0.28f,
+                            kTilePx * 0.14f, Color{0, 0, 0, 70});
+                anim(anim_of(m.kind), static_cast<int>(m.facing), sp.frame, sp.x, sp.y,
+                     kTilePx * 1.0f, tint_of(m.status));
+                // A health bar only once it has been hurt: an untouched field of animals with bars
+                // over every one of them reads as a bestiary rather than as a meadow.
+                if (m.hp < m.max_hp && m.max_hp > 0) {
+                    const int w = std::max(1, (m.hp * (kTilePx - 6)) / m.max_hp);
+                    DrawRectangle(static_cast<int>(sp.x) - kTilePx / 2 + 3,
+                                  static_cast<int>(sp.y) - kTilePx / 2 - 3, kTilePx - 6, 3,
+                                  Color{0, 0, 0, 120});
+                    DrawRectangle(static_cast<int>(sp.x) - kTilePx / 2 + 3,
+                                  static_cast<int>(sp.y) - kTilePx / 2 - 3, w, 3,
+                                  Color{220, 70, 70, 255});
+                }
+                // One pixel of intent: an angry creature gets a mark. Disposition is state, and
+                // state the player cannot see is state that might as well not exist — this is the
+                // difference between "the boar attacked me for no reason" and "I annoyed a boar".
+                if (m.anger_ticks > 0 && m.disposition != Disposition::kTimid) {
+                    DrawRectangle(static_cast<int>(sp.x) - 1,
+                                  static_cast<int>(sp.y) - kTilePx / 2 - 9, 3, 5,
+                                  Color{255, 90, 60, 230});
+                }
+                return;
+            }
+            case SpriteKind::kShot: {
+                // Arrows, pointed the way they are travelling. `Fx::kArrow` is one sprite drawn
+                // rotated — the only rotated sprite in the game, and the reason arrows live in the
+                // FX strip rather than the tile grid.
+                const auto& s = *static_cast<const Projectile*>(sp.p);
+                fx(Fx::kArrow, 0, sp.x, sp.y, 1.0f,
+                   std::atan2(s.vy, s.vx) * 57.2957795f + 90.0f);
+                return;
+            }
+            case SpriteKind::kBig:
+                big_at(static_cast<Big>(sp.a), sp.x, sp.y);
+                return;
+            case SpriteKind::kPlayer: {
+                PlayerViewPtr pv = players.load(sp.a);
+                if (!pv) return;
+                const PlayerView& p = *pv;
+                // A dead player is a faint ghost lying where they fell, not an absence: watching a
+                // friend go down and waiting for them is a moment, and despawning them deletes it.
+                const bool dead = p.dead_ticks > 0;
+                DrawEllipse(static_cast<int>(sp.x), static_cast<int>(sp.y + 7), kTilePx * 0.30f,
+                            kTilePx * 0.15f,
+                            Color{0, 0, 0, static_cast<unsigned char>(dead ? 40 : 80)});
+                if (p.mounted) {
+                    // The mount is drawn under the rider, one tile lower and slightly larger.
+                    anim(Anim::kHorse, static_cast<int>(p.facing), static_cast<int>(p.steps / 5),
+                         sp.x, sp.y + 3.0f, kTilePx * 1.3f);
+                }
+                // `steps` is the authoritative move counter from PlayerActor, not a local frame
+                // timer — so the walk cycle stays in step with the simulation rather than with this
+                // client's frame rate. It is also what makes a REMOTE player's animation correct
+                // for free.
+                anim(Anim::kPlayer, static_cast<int>(p.facing), static_cast<int>(p.steps / 4), sp.x,
+                     sp.y - (p.mounted ? 5.0f : 0.0f), kTilePx * 1.1f,
+                     dead ? Color{255, 255, 255, 90} : WHITE);
+                if (static_cast<int>(sp.a) != local_slot) {
+                    // Somebody else's health bar, always shown — you cannot help a stranger you
+                    // cannot read.
+                    const int w =
+                        std::max(1, (p.hp * (kTilePx - 4)) / std::max<int>(1, p.max_hp));
+                    DrawRectangle(static_cast<int>(sp.x) - kTilePx / 2 + 2,
+                                  static_cast<int>(sp.y) - kTilePx / 2 - 6, kTilePx - 4, 3,
+                                  Color{0, 0, 0, 140});
+                    DrawRectangle(static_cast<int>(sp.x) - kTilePx / 2 + 2,
+                                  static_cast<int>(sp.y) - kTilePx / 2 - 6, w, 3,
+                                  Color{90, 220, 120, 255});
+                }
+                return;
+            }
+        }
+    }
+
     void draw_ambience(std::uint16_t map, float cam_x, float cam_y, double t) const {
         const Weather w = weather_of(ring_of(kWorldSeed, static_cast<int>(cam_x / kTilePx),
                                              static_cast<int>(cam_y / kTilePx)));
@@ -466,6 +812,15 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
     // hide. Deleting an entire cross-chunk pre-pass is what "buildings are whole structures" buys
     // in the renderer.)
 
+    // --- Layer 1: the floor -------------------------------------------------------------------
+    // The only pass that is NOT Y-sorted, and the only one that does not need to be: ground is flat,
+    // so nothing can stand in front of it. Every chunk view loaded here is kept alive in
+    // `im.frame_views` for the rest of the frame, because the sorted pass below holds raw pointers
+    // into their creature and building vectors.
+    im.frame_views.clear();
+    im.frame_sprites.clear();
+    // One extra vertex past each edge: a tile at the view's right edge reads the corner beyond it.
+    im.build_corners(player.map, min_tx, min_ty, max_tx + 1, max_ty + 1);
     for (int cy = min_cy; cy <= max_cy; ++cy) {
         for (int cx = min_cx; cx <= max_cx; ++cx) {
             const ChunkCoord c{player.map, static_cast<std::uint16_t>(cx),
@@ -473,113 +828,55 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
             ChunkViewPtr v = bus.load(c);
             if (!v) continue;  // this chunk has not ticked yet (or is still in flight from a peer)
             ++drawn_chunks;
+            im.frame_views.push_back(v);
 
             const int base_x = cx * kChunkTiles;
             const int base_y = cy * kChunkTiles;
 
-            // Base terrain first, in its own pass. Trees follow in a second pass because a tree is
-            // two tiles tall — its canopy occupies the tile ABOVE, which must already be painted.
             for (int ly = 0; ly < kChunkTiles; ++ly) {
                 const int gy = base_y + ly;
                 if (gy < min_ty || gy > max_ty) continue;
                 for (int lx = 0; lx < kChunkTiles; ++lx) {
                     const int gx = base_x + lx;
                     if (gx < min_tx || gx > max_tx) continue;
-                    const auto t = static_cast<Terrain>(v->terrain[ly * kChunkTiles + lx]);
-                    // Trees are drawn over the ring's own ground, so a forest in the snow ring
-                    // stands on snow. Without this every wood looked like it had been transplanted
-                    // onto a lawn.
-                    const Slot first = (t == Terrain::kTree)
-                                           ? slot_of(ground_under_tree(ring_of(kWorldSeed, gx, gy)))
-                                           : slot_of(t);
-                    // Pick one of the terrain's textured variants, then mirror it. Mirroring alone
-                    // was not enough: these motifs are legible enough that a single repeated tile
-                    // reads as wallpaper no matter how it is flipped.
-                    const int v = tile_variant(c.map, gx, gy);
-                    const int pick = (v >> 2) % kTerrainVariants;
-                    const auto base = static_cast<Slot>(static_cast<int>(first) + pick);
-                    im.tile(base, gx, gy, WHITE, v & 3);
+                    im.ground(c.map, gx, gy);
                 }
             }
+            // --- Layer 2: everything that stands on the ground ------------------------------
+            // Gathered, not drawn. See the sorted pass below.
             for (const Crop& cr : v->crops) {
-                // Size tracks growth: a seedling is drawn at 45% of a tile, a ripe crop fills it.
-                const float ratio = 0.45f + 0.55f * (static_cast<float>(cr.stage) /
-                                                     static_cast<float>(kCropStages - 1));
-                im.sprite(slot_of(cr), (static_cast<float>(cr.tx) + 0.5f) * kTilePx,
-                          (static_cast<float>(cr.ty) + 0.5f) * kTilePx, kTilePx * ratio);
+                im.frame_sprites.push_back(
+                    Sprite{static_cast<float>(cr.ty + 1) * kTilePx,
+                           (static_cast<float>(cr.tx) + 0.5f) * kTilePx,
+                           (static_cast<float>(cr.ty) + 0.5f) * kTilePx, &cr, 0, 0,
+                           SpriteKind::kCrop});
             }
-
             for (const Building& b : v->buildings) {
-                im.tile(b.kind == BuildKind::kHearth ? Slot::kBuildHearth : Slot::kBuildPlot,
-                        b.tx, b.ty);
-
-                // Level pips: one small dot per level above 1, so an upgraded building is
-                // identifiable at a glance without a UI panel.
-                for (int lv = 1; lv < b.level; ++lv) {
-                    DrawRectangle(b.tx * kTilePx + 3 + (lv - 1) * 6, b.ty * kTilePx + 2, 4, 4,
-                                  Color{255, 220, 90, 255});
-                }
-                // Health bar, only when damaged — no clutter on an untouched base.
-                const std::int16_t full = max_hp_of(b.kind);
-                if (b.hp < full && full > 0) {
-                    const int w = std::max(1, (b.hp * kTilePx) / full);
-                    DrawRectangle(b.tx * kTilePx, b.ty * kTilePx - 4, w, 3, Color{220, 70, 70, 255});
-                }
+                im.frame_sprites.push_back(Sprite{static_cast<float>(b.ty + 1) * kTilePx, 0.0f,
+                                                  0.0f, &b, 0, 0, SpriteKind::kBuilding});
             }
-
             for (const Creature& m : v->creatures) {
-                // A flat ellipse under each creature: with no height in the art, this is what stops
-                // the sprites reading as decals lying on the ground.
-                DrawEllipse(static_cast<int>(m.x * kTilePx), static_cast<int>(m.y * kTilePx + 6),
-                            kTilePx * 0.28f, kTilePx * 0.14f, Color{0, 0, 0, 70});
                 // Offsetting the frame by the id keeps a whole wave from stepping in unison, which
                 // reads as one organism rather than a crowd.
-                const int frame = static_cast<int>((v->tick / 3 + m.id) & 0xFF);
-                im.anim(anim_of(m.kind), static_cast<int>(m.facing), frame, m.x * kTilePx,
-                        m.y * kTilePx, kTilePx * 1.0f, tint_of(m.status));
-
-                // A health bar only once it has been hurt: an untouched field of animals with bars
-                // over every one of them reads as a bestiary rather than as a meadow.
-                if (m.hp < m.max_hp && m.max_hp > 0) {
-                    const int w = std::max(1, (m.hp * (kTilePx - 6)) / m.max_hp);
-                    DrawRectangle(static_cast<int>(m.x * kTilePx) - kTilePx / 2 + 3,
-                                  static_cast<int>(m.y * kTilePx) - kTilePx / 2 - 3, kTilePx - 6, 3,
-                                  Color{0, 0, 0, 120});
-                    DrawRectangle(static_cast<int>(m.x * kTilePx) - kTilePx / 2 + 3,
-                                  static_cast<int>(m.y * kTilePx) - kTilePx / 2 - 3, w, 3,
-                                  Color{220, 70, 70, 255});
-                }
-                // One pixel of intent: an angry creature gets a mark. Disposition is state, and
-                // state the player cannot see is state that might as well not exist — this is the
-                // difference between "the boar attacked me for no reason" and "I annoyed a boar".
-                if (m.anger_ticks > 0 && m.disposition != Disposition::kTimid) {
-                    DrawRectangle(static_cast<int>(m.x * kTilePx) - 1,
-                                  static_cast<int>(m.y * kTilePx) - kTilePx / 2 - 9, 3, 5,
-                                  Color{255, 90, 60, 230});
-                }
+                const auto frame = static_cast<std::uint16_t>((v->tick / 3 + m.id) & 0xFF);
+                im.frame_sprites.push_back(Sprite{m.y * kTilePx + kTilePx * 0.5f, m.x * kTilePx,
+                                                  m.y * kTilePx, &m, 0, frame,
+                                                  SpriteKind::kCreature});
                 ++drawn_creatures;
             }
-
-            // Arrows, pointed the way they are travelling. `Fx::kArrow` is one sprite drawn
-            // rotated — the only rotated sprite in the game, and the reason arrows live in the FX
-            // strip rather than the tile grid.
-            for (const Projectile& p : v->shots) {
-                const float deg = std::atan2(p.vy, p.vx) * 57.2957795f;
-                im.fx(Fx::kArrow, 0, p.x * kTilePx, p.y * kTilePx, 1.0f, deg + 90.0f);
+            for (const Projectile& shot : v->shots) {
+                im.frame_sprites.push_back(Sprite{shot.y * kTilePx + kTilePx * 0.5f,
+                                                  shot.x * kTilePx, shot.y * kTilePx, &shot, 0, 0,
+                                                  SpriteKind::kShot});
             }
         }
     }
 
-    // --- Tall things: trees and buildings ---------------------------------------------------------
-    // One pass over the whole visible rect rather than per chunk, EXPANDED by the sprite footprint
-    // so a tree or a house anchored just off-screen still paints the part that reaches into view.
-    //
-    // Trees and structures are interleaved by ROW rather than drawn in two passes, because they
-    // stand in the same world: a house behind a tree has to be drawn first, and a house in front of
-    // one has to be drawn second. Two separate passes get one of those two cases wrong no matter
-    // which order they run in.
-    std::vector<std::uint32_t> vis;
+    // Structures. Gathered over the chunks that overlap the view, EXPANDED downward by one chunk
+    // because a house anchored below the view still paints its roof into it.
     if (im.layout != nullptr) {
+        std::vector<std::uint32_t>& vis = im.frame_structures;
+        vis.clear();
         for (int cy = min_cy; cy <= max_cy + 1; ++cy) {
             for (int cx = min_cx; cx <= max_cx; ++cx) {
                 const auto& list = im.layout->structures_in_chunk(cx, cy);
@@ -592,36 +889,73 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
         std::sort(vis.begin(), vis.end());
         vis.erase(std::unique(vis.begin(), vis.end()), vis.end());
         const auto& all = im.layout->structures();
-        std::stable_sort(vis.begin(), vis.end(), [&](std::uint32_t a, std::uint32_t b) {
-            return all[a].ty < all[b].ty;
-        });
+        for (const std::uint32_t idx : vis) {
+            const Structure& st = all[idx];
+            const StructureSize sz = size_of(st.kind);
+            // Anchored bottom-LEFT of its footprint, unlike a tree: a structure occupies a known
+            // rectangle of tiles and the sprite must land exactly on it.
+            im.frame_sprites.push_back(
+                Sprite{static_cast<float>(st.ty + sz.h) * kTilePx,
+                       (static_cast<float>(st.tx) + static_cast<float>(sz.w) * 0.5f) * kTilePx,
+                       static_cast<float>(st.ty + sz.h) * kTilePx, nullptr,
+                       static_cast<std::uint16_t>(big_of_structure(st.kind)), 0,
+                       SpriteKind::kBig});
+        }
     }
 
-    std::size_t next_structure = 0;
-    for (int gy = min_ty; gy <= max_ty + 3; ++gy) {
-        if (im.layout != nullptr) {
-            const auto& all = im.layout->structures();
-            while (next_structure < vis.size() && all[vis[next_structure]].ty < gy) {
-                ++next_structure;  // anchored above the view; its art does not reach in
-            }
-            while (next_structure < vis.size() && all[vis[next_structure]].ty == gy) {
-                const Structure& s = all[vis[next_structure]];
-                const StructureSize sz = size_of(s.kind);
-                // Anchored bottom-LEFT of its footprint, unlike a tree: a structure occupies a
-                // known rectangle of tiles and the sprite must land exactly on it.
-                im.big_at(big_of_structure(s.kind),
-                          (static_cast<float>(s.tx) + static_cast<float>(sz.w) * 0.5f) * kTilePx,
-                          static_cast<float>(s.ty + sz.h) * kTilePx);
-                ++next_structure;
-            }
-        }
-        for (int gx = min_tx - 2; gx <= max_tx; ++gx) {
+    // Trees. Expanded by the full sprite footprint on every side, so a 4-wide, 3-tall tree anchored
+    // just outside the view still paints the part that reaches in.
+    for (int gy = min_ty - 1; gy <= max_ty + 3; ++gy) {
+        for (int gx = min_tx - 4; gx <= max_tx; ++gx) {
             if (!tree_anchor(player.map, gx, gy)) continue;
-            im.big((tile_variant(player.map, gx, gy) & 1) ? Big::kTreePine : Big::kTreeBroad, gx, gy);
+            // Centred over the middle of the three tiles it claims, then jittered. Anchoring at
+            // tx+0.5 was right for a 2-wide sprite and puts a 4-wide one a tile to the left.
+            const float bottom =
+                static_cast<float>(gy + 1) * kTilePx + scatter_offset(gx, gy, 0x1EAFu, 7.0f);
+            im.frame_sprites.push_back(
+                Sprite{bottom,
+                       (static_cast<float>(gx) + 0.5f * kTreeStride) * kTilePx +
+                           scatter_offset(gx, gy, 0x7EEEu, 6.0f),
+                       bottom, nullptr,
+                       static_cast<std::uint16_t>((tile_variant(player.map, gx, gy) & 1)
+                                                      ? Big::kTreePine
+                                                      : Big::kTreeBroad),
+                       0, SpriteKind::kBig});
         }
     }
 
-    // --- Cursor (drawn BEFORE the player, so the build preview never hides them) ------------------------------------------------------------------------------------
+    // Players. Every live slot, not just the local one — read from the same published bus the
+    // camera uses, so a second player costs one shared_ptr load per frame and nothing else.
+    for (int s = 0; s < kMaxPlayers; ++s) {
+        PlayerViewPtr pv = players.load(s);
+        if (!pv || !pv->live() || pv->map != player.map) continue;
+        im.frame_players[s] = pv;  // keeps it alive for the sorted pass
+        im.frame_sprites.push_back(Sprite{pv->y * kTilePx + kTilePx * 0.55f, pv->x * kTilePx,
+                                          pv->y * kTilePx, nullptr,
+                                          static_cast<std::uint16_t>(s), 0, SpriteKind::kPlayer});
+    }
+
+    // --- The sorted pass ------------------------------------------------------------------------
+    // ONE list, sorted once, drawn once. This is the structural difference between this renderer and
+    // the one it replaces, and no amount of art substitutes for it: with terrain, then props, then
+    // actors in three fixed passes, a player can only ever be in front of every tree or behind every
+    // tree. Sorting them together means walking north puts you behind a trunk and walking south puts
+    // you in front of it, with no special case for either.
+    //
+    // The key is the sprite's FEET, not its top-left corner — `Sprite::sort` is set by each producer
+    // above, because where a sprite's feet are is a property of that sprite and not a global
+    // constant. A tree's feet are at the bottom of its trunk, three tiles below the top of its art.
+    //
+    // stable_sort, not sort: two things standing on exactly the same row must keep the order they
+    // were gathered in, otherwise they swap depth from frame to frame and flicker.
+    std::stable_sort(im.frame_sprites.begin(), im.frame_sprites.end(),
+                     [](const Sprite& a, const Sprite& b) { return a.sort < b.sort; });
+    for (const Sprite& sp : im.frame_sprites) im.draw_sprite(sp, players, local_slot);
+
+    // --- Cursor ---------------------------------------------------------------------------------
+    // Over the sorted pass, not inside it. The ghost building and the aim ring are UI drawn in world
+    // space, not objects standing in the world, so giving them a depth would be a category error —
+    // an aim ring that a tree can hide is an aim ring you cannot aim with.
     const Vector2 mw = GetScreenToWorld2D(GetMousePosition(), im.camera);
     const int ctx = static_cast<int>(mw.x) / kTilePx;
     const int cty = static_cast<int>(mw.y) / kTilePx;
@@ -642,42 +976,6 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
         // would cover before spending the mana.
         DrawCircleLines(static_cast<int>(mw.x), static_cast<int>(mw.y), kSpellRadius * kTilePx,
                         Color{200, 220, 255, 110});
-    }
-
-    // --- Players ---------------------------------------------------------------------------------
-    // Every live slot, not just the local one. They are read from the same published bus the camera
-    // uses, so a second player costs one more shared_ptr load per frame and nothing else.
-    for (int s = 0; s < kMaxPlayers; ++s) {
-        PlayerViewPtr pv = players.load(s);
-        if (!pv || !pv->live() || pv->map != player.map) continue;
-        const PlayerView& p = *pv;
-        // A dead player is a faint ghost lying where they fell, not an absence: watching a friend
-        // go down and waiting for them is a moment, and despawning them deletes it.
-        const bool dead = p.dead_ticks > 0;
-        DrawEllipse(static_cast<int>(p.x * kTilePx), static_cast<int>(p.y * kTilePx + 7),
-                    kTilePx * 0.30f, kTilePx * 0.15f,
-                    Color{0, 0, 0, static_cast<unsigned char>(dead ? 40 : 80)});
-        if (p.mounted) {
-            // The mount is drawn under the rider, one tile lower and slightly larger.
-            im.anim(Anim::kHorse, static_cast<int>(p.facing), static_cast<int>(p.steps / 5),
-                    p.x * kTilePx, p.y * kTilePx + 3.0f, kTilePx * 1.3f);
-        }
-        // `steps` is the authoritative move counter from PlayerActor, not a local frame timer — so
-        // the walk cycle stays in step with the simulation rather than with this client's frame
-        // rate. It is also what makes a REMOTE player's animation correct for free.
-        im.anim(Anim::kPlayer, static_cast<int>(p.facing), static_cast<int>(p.steps / 4),
-                p.x * kTilePx, p.y * kTilePx - (p.mounted ? 5.0f : 0.0f), kTilePx * 1.1f,
-                dead ? Color{255, 255, 255, 90} : WHITE);
-        if (s != local_slot) {
-            // Somebody else's health bar, always shown — you cannot help a stranger you cannot read.
-            const int w = std::max(1, (p.hp * (kTilePx - 4)) / std::max<int>(1, p.max_hp));
-            DrawRectangle(static_cast<int>(p.x * kTilePx) - kTilePx / 2 + 2,
-                          static_cast<int>(p.y * kTilePx) - kTilePx / 2 - 6, kTilePx - 4, 3,
-                          Color{0, 0, 0, 140});
-            DrawRectangle(static_cast<int>(p.x * kTilePx) - kTilePx / 2 + 2,
-                          static_cast<int>(p.y * kTilePx) - kTilePx / 2 - 6, w, 3,
-                          Color{90, 220, 120, 255});
-        }
     }
 
     // --- Combat effects, over the fighters ---------------------------------------------------------
