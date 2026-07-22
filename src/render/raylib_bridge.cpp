@@ -655,7 +655,8 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
         // go down and waiting for them is a moment, and despawning them deletes it.
         const bool dead = p.dead_ticks > 0;
         DrawEllipse(static_cast<int>(p.x * kTilePx), static_cast<int>(p.y * kTilePx + 7),
-                    kTilePx * 0.30f, kTilePx * 0.15f, Color{0, 0, 0, dead ? 40 : 80});
+                    kTilePx * 0.30f, kTilePx * 0.15f,
+                    Color{0, 0, 0, static_cast<unsigned char>(dead ? 40 : 80)});
         if (p.mounted) {
             // The mount is drawn under the rider, one tile lower and slightly larger.
             im.anim(Anim::kHorse, static_cast<int>(p.facing), static_cast<int>(p.steps / 5),
