@@ -549,7 +549,7 @@ struct RaylibBridge::Impl {
     // effect you can debug and one you cannot.
     // One entry of the Y-sorted list. Each case draws exactly what its old dedicated pass drew —
     // the change is WHEN it runs, not what it paints.
-    void draw_sprite(const Sprite& sp, const PlayerBus& players, int local_slot) const {
+    void draw_sprite(const Sprite& sp, int local_slot) const {
         switch (sp.kind) {
             case SpriteKind::kCrop: {
                 const auto& cr = *static_cast<const Crop*>(sp.p);
@@ -620,7 +620,11 @@ struct RaylibBridge::Impl {
                 big_at(static_cast<Big>(sp.a), sp.x, sp.y);
                 return;
             case SpriteKind::kPlayer: {
-                PlayerViewPtr pv = players.load(sp.a);
+                // From the frame's own snapshot, not a second `players.load()`. Re-loading would be
+                // a fresh atomic read of a bus the simulation is still writing, so a player could
+                // be gathered at one position and drawn at another — sorted by where they were and
+                // painted where they now are.
+                const PlayerViewPtr& pv = frame_players[sp.a];
                 if (!pv) return;
                 const PlayerView& p = *pv;
                 // A dead player is a faint ghost lying where they fell, not an absence: watching a
@@ -819,6 +823,7 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
     // into their creature and building vectors.
     im.frame_views.clear();
     im.frame_sprites.clear();
+    for (PlayerViewPtr& slot : im.frame_players) slot.reset();
     // One extra vertex past each edge: a tile at the view's right edge reads the corner beyond it.
     im.build_corners(player.map, min_tx, min_ty, max_tx + 1, max_ty + 1);
     for (int cy = min_cy; cy <= max_cy; ++cy) {
@@ -950,7 +955,7 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
     // were gathered in, otherwise they swap depth from frame to frame and flicker.
     std::stable_sort(im.frame_sprites.begin(), im.frame_sprites.end(),
                      [](const Sprite& a, const Sprite& b) { return a.sort < b.sort; });
-    for (const Sprite& sp : im.frame_sprites) im.draw_sprite(sp, players, local_slot);
+    for (const Sprite& sp : im.frame_sprites) im.draw_sprite(sp, local_slot);
 
     // --- Cursor ---------------------------------------------------------------------------------
     // Over the sorted pass, not inside it. The ghost building and the aim ring are UI drawn in world
