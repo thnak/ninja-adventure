@@ -62,6 +62,16 @@ if(MMO_BUILD_CLIENT)
     GIT_SHALLOW TRUE)
   FetchContent_MakeAvailable(raygui)
 
+  # raylib vs <windows.h>: Win32 declares `Rectangle`, `CloseWindow` and `ShowCursor` as FUNCTIONS,
+  # which collide with raylib's type and functions of the same names. windows.h arrives indirectly
+  # through QuarkCpp's Windows PAL (winsock2), so it is already included by the time raylib.h is
+  # read. NOGDI drops the GDI drawing API (which is where `Rectangle` lives) and NOUSER drops the
+  # user32 API — neither is used by this game or by Quark's PAL, which needs winsock, bcrypt and
+  # mincore only. Verified by building on win-thanh; without these the client does not compile.
+  if(WIN32)
+    add_compile_definitions(NOGDI NOUSER)
+  endif()
+
   add_executable(mmo_client
     src/client_main.cpp
     src/render/raylib_bridge.cpp
