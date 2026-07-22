@@ -30,12 +30,15 @@ int main(int argc, char** argv) {
     const char* shot_path = nullptr;
     int look_camp = -1;            // --camp N: point the camera at spawn camp N instead of the farm
     const char* shot_screen = nullptr;  // --screen NAME: force a shell screen for the screenshot
+    int look_ring = -1;                 // --ring N: park the camera in biome ring N
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--shot") == 0 && i + 2 < argc) {
             shot_seconds = std::atoi(argv[i + 1]);
             shot_path = argv[i + 2];
         } else if (std::strcmp(argv[i], "--camp") == 0 && i + 1 < argc) {
             look_camp = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--ring") == 0 && i + 1 < argc) {
+            look_ring = std::atoi(argv[i + 1]);  // 0..4 — put the camera in that biome ring
         } else if (std::strcmp(argv[i], "--screen") == 0 && i + 1 < argc) {
             shot_screen = argv[i + 1];  // menu | journal | paused — for verifying the shell
         }
@@ -128,6 +131,22 @@ int main(int argc, char** argv) {
 
         // The camera follows the player, so looking at a spawn camp means walking there. The move
         // is relative, hence the delta.
+        // Park the camera at the MIDDLE radius of the requested ring. An earlier version walked
+        // outward a step at a time and capped the step count, which could not physically reach the
+        // outer rings along a diagonal — rings 2, 3 and 4 all produced the same screenshot.
+        if (look_ring >= 0 && look_ring < kRingCount) {
+            const float inner = look_ring == 0 ? 0.0f : kRingEdge[look_ring - 1];
+            const float outer = std::min(kRingEdge[look_ring], 0.99f);
+            const float mid = (inner + outer) * 0.5f;
+            const float half = static_cast<float>(kMapTiles) * 0.5f;
+            // Chebyshev radius `mid` means max(|dx|,|dy|) == mid*half; lead with x and take a
+            // fraction of it in y so the shot is not on a perfect diagonal.
+            const float bx = half + mid * half;
+            const float by = half + mid * half * 0.35f;
+            world.move_player(bx - player.x, by - player.y);
+            world.sync_world();
+            player = world.player_view();
+        }
         if (look_camp >= 0 && look_camp < kSpawnCamps) {
             const auto camps = World::camps(player.map);
             const auto [ctx, cty] = camps[static_cast<std::size_t>(look_camp)];

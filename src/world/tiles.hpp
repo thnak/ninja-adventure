@@ -35,6 +35,10 @@ inline constexpr int kChunkCount = kMapCount * kChunksPerMap;
 
 inline constexpr std::uint16_t kOverworld = 0;
 
+// The world seed lives here, not in world.hpp, because `terrain_of` is the thing that consumes it
+// and the renderer needs it too (to know which ring a tile is in without asking an actor).
+inline constexpr std::uint64_t kWorldSeed = 0x5EED'0BEEF'CAFEull;
+
 // Where a new player is dropped: the centre of the map, which is also the easiest ring. The tilled
 // apron there is part of the terrain *function* (below), not an edit applied afterwards — see
 // `terrain_of`. Once world generation lands (ROADMAP P1) this becomes "the starting village", and
@@ -400,7 +404,7 @@ private:
             if (wet < 0.26f) return Terrain::kWater;
             if (wet < 0.30f) return Terrain::kSand;
             if (rock > 0.80f) return Terrain::kStone;
-            if (flora > 0.55f) return Terrain::kTree;  // dense
+            if (flora > 0.63f) return Terrain::kTree;  // dense, but with gaps you can walk through
             return Terrain::kGrass;
 
         case Ring::kWetland: {

@@ -34,7 +34,6 @@
 
 namespace mmo {
 
-inline constexpr std::uint64_t kWorldSeed = 0x5EED'0BEEF'CAFEull;
 inline constexpr std::uint64_t kPlayerKey = 1;
 inline constexpr std::uint64_t kDirectorKey = 1;
 

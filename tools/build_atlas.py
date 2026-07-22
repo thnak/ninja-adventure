@@ -29,6 +29,15 @@ SHEETS = {
     "RL": (SRC / "roguelike/Spritesheet/roguelikeSheet_transparent.png", 17),
     "TT": (SRC / "tinytown/Tilemap/tilemap_packed.png", 16),
     "TD": (SRC / "tinydungeon/Tilemap/tilemap_packed.png", 16),
+    # Ninja Adventure tilesets. No gutter, so stride 16. Fill tiles were located by scanning every
+    # sheet for low-variance (flat) tiles and matching mean colour against the terrain palette —
+    # eyeballing 500 tiles per sheet is not a method.
+    "NFloor": (SRC / "ninja/Backgrounds/Tilesets/TilesetFloor.png", 16),
+    "NWater": (SRC / "ninja/Backgrounds/Tilesets/TilesetWater.png", 16),
+    "NDesert": (SRC / "ninja/Backgrounds/Tilesets/TilesetDesert.png", 16),
+    "NRelief": (SRC / "ninja/Backgrounds/Tilesets/TilesetRelief.png", 16),
+    "NLogic": (SRC / "ninja/Backgrounds/Tilesets/TilesetLogic.png", 16),
+    "NTree": (SRC / "ninja/Backgrounds/Tilesets/TilesetNature.png", 16),
 }
 
 TILE = 16
@@ -41,21 +50,23 @@ KEY_COLOR = {"TD": (63, 38, 49, 255)}
 
 # slot name -> (sheet, col, row).  Order defines the generated enum order.
 MANIFEST = [
-    # --- terrain (opaque, drawn as the base layer) ---
-    ("TerrainGrass",     "RL",  5,  1),
-    ("TerrainDirt",      "RL",  6,  1),
-    ("TerrainWater",     "RL",  1,  0),
-    ("TerrainStone",     "RL",  7,  1),
-    ("TerrainSand",      "RL",  8,  1),
-    # --- overlays (transparent, drawn over grass) ---
-    # The roguelike pack's tall tree is TWO tiles: canopy dome on top of canopy-base-plus-trunk.
-    # Row 9 holds a complete one-tile tree, but the two-tile version is what reads as a forest.
-    ("TreeTop",          "RL", 13, 10),
-    ("Tree",             "RL", 13, 11),
-    # A second species, picked per tile by hash. One repeated tree sprite made a forest read as a
-    # stamped grid; two silhouettes plus mirroring breaks the pattern without more art.
-    ("TreeTopPine",      "RL", 16, 10),
-    ("TreePine",         "RL", 16, 11),
+    # --- terrain (opaque, drawn as the base layer) — all Ninja Adventure ---
+    ("TerrainGrass",     "NFloor",   0, 12),
+    ("TerrainDirt",      "NFloor",  11, 19),
+    ("TerrainWater",     "NWater",   1,  1),
+    ("TerrainStone",     "NFloor",  20, 14),
+    ("TerrainSand",      "NDesert", 15,  8),
+    ("TerrainSnow",      "NFloor",   0, 19),
+    ("TerrainMarsh",     "NRelief",  8,  1),
+    ("TerrainAsh",       "NLogic",   6,  0),
+    # --- overlays (transparent, drawn over the base layer) ---
+    # Ninja Adventure's trees are two tiles as well: canopy on top of trunk.
+    ("TreeTop",          "NTree",    5,  3),
+    ("Tree",             "NTree",    5,  4),
+    # A second species, picked per tile by hash — one repeated sprite makes a forest read as a
+    # stamped grid.
+    ("TreeTopPine",      "NTree",    1,  3),
+    ("TreePine",         "NTree",    1,  4),
     # --- crops: stage 0-1 use the seedling, 2 the growing plant, 3 the ripe per-kind sprite ---
     ("CropSeedling",     "RL", 44, 23),
     ("CropGrowing",      "RL", 44, 24),

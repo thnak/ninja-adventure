@@ -21,6 +21,19 @@ a gate when you feel like an adventure. Built on the [QuarkCpp](../QuarkCpp) act
 <sub>The whole 1024x1024 overworld, exported by `mmo_worldmap`. Difficulty radiates out from the
 centre: Meadow, Forest, Wetland (swamp west / desert east), Snow, Wasteland.</sub>
 
+### Biomes
+
+| | |
+|---|---|
+| ![meadow](docs/biomes/ring0.png) | ![forest](docs/biomes/ring1.png) |
+| **Meadow** — the chill ring, 26% of the map | **Forest** |
+| ![wetland](docs/biomes/ring2.png) | ![snow](docs/biomes/ring3.png) |
+| **Wetland** — desert east, swamp west | **Snow** |
+| ![wasteland](docs/biomes/ring4.png) | |
+| **Wasteland** | |
+
+<sub>`./build/mmo_client --shot 20 out.png --ring N` parks the camera in biome ring N.</sub>
+
 ![farm](docs/shot_farm.png)
 
 <sub>Day: the walled farm, turrets (gold pips mark upgrade level), flanking fences, crops at four

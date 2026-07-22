@@ -32,8 +32,17 @@ things walking around in it as another.
 
 This is not a licensing problem (both are CC0) but it is a quality one, and it is being fixed in P1
 rather than left, because P1 rewrites the terrain system anyway (radial biome rings) and the tileset
-has to be touched regardless. Ninja Adventure ships a complete 16x16 tileset family that covers
-everything Kenney was doing here:
+has to be touched regardless.
+
+**Done so far: terrain and trees.** All nine terrain types and both tree species now come from Ninja
+Adventure. **Still Kenney: buildings** — wall, turret, fence, hearth, plot — and the crop sprites.
+
+Fill tiles were located by *scanning* every sheet for low-variance (flat) tiles and matching mean
+colour against the terrain palette, rather than by eyeballing five hundred tiles per sheet. The one
+tile picked by eye instead, `TilesetTowers (0,0)`, turned out to be a tower roof rather than a tree
+and looked exactly like what it was.
+
+Ninja Adventure ships a complete 16x16 tileset family that covers everything Kenney was doing here:
 
 | Need | Ninja Adventure tileset |
 |---|---|

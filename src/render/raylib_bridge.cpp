@@ -15,6 +15,20 @@ namespace {
 // The only place game concepts meet sprites. WHICH pixels a slot points at is decided by the
 // manifest in tools/build_atlas.py, not here — so re-arting the game never touches this file.
 
+// What a tree stands on, per ring — so a wood in the snow ring is rooted in snow rather than
+// transplanted onto a lawn.
+[[nodiscard]] Terrain ground_under_tree(Ring r) {
+    switch (r) {
+        case Ring::kMeadow:
+        case Ring::kForest: return Terrain::kGrass;
+        case Ring::kWetland: return Terrain::kMarsh;
+        case Ring::kSnow: return Terrain::kSnow;
+        case Ring::kWasteland:
+        case Ring::kCount: break;
+    }
+    return Terrain::kAsh;
+}
+
 [[nodiscard]] Slot slot_of(Terrain t) {
     switch (t) {
         case Terrain::kGrass: return Slot::kTerrainGrass;
@@ -22,7 +36,13 @@ namespace {
         case Terrain::kWater: return Slot::kTerrainWater;
         case Terrain::kStone: return Slot::kTerrainStone;
         case Terrain::kSand: return Slot::kTerrainSand;
-        case Terrain::kTree: return Slot::kTerrainGrass;  // tree is an OVERLAY drawn over grass
+        case Terrain::kSnow: return Slot::kTerrainSnow;
+        case Terrain::kMarsh: return Slot::kTerrainMarsh;
+        case Terrain::kAsh: return Slot::kTerrainAsh;
+        // A tree is an OVERLAY: the base layer under it is whatever the surrounding ring uses, so
+        // a forest in the snow ring stands on snow rather than on grass.
+        case Terrain::kTree: return Slot::kTerrainGrass;
+        case Terrain::kCount: break;
     }
     return Slot::kTerrainGrass;
 }
@@ -229,7 +249,13 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                     const int gx = base_x + lx;
                     if (gx < min_tx || gx > max_tx) continue;
                     const auto t = static_cast<Terrain>(v->terrain[ly * kChunkTiles + lx]);
-                    im.tile(slot_of(t), gx, gy, WHITE, tile_variant(c.map, gx, gy));
+                    // Trees are drawn over the ring's own ground, so a forest in the snow ring
+                    // stands on snow. Without this every wood looked like it had been transplanted
+                    // onto a lawn.
+                    const Slot base = (t == Terrain::kTree)
+                                          ? slot_of(ground_under_tree(ring_of(kWorldSeed, gx, gy)))
+                                          : slot_of(t);
+                    im.tile(base, gx, gy, WHITE, tile_variant(c.map, gx, gy));
                 }
             }
             // Trees, top-down within the chunk so a nearer tree's canopy overlaps the one behind it.

@@ -84,7 +84,9 @@ Dựng sân khấu thật, trước khi tune bất cứ thứ gì lên trên nó
 | 1024×1024 ô = **1024 chunk actor** | ✅ 700 tick chạy trong **1,9 giây** |
 | 5 vòng đồng tâm + 3 địa hình mới (tuyết, đầm lầy, tro) | ✅ |
 | Gỡ `kMapCount = 3` → một mặt đất `kOverworld` | ✅ |
-| Thống nhất art sang Ninja Adventure | ⬜ tileset đã khảo sát, xem `assets/CREDITS.md` |
+| Thống nhất art: **địa hình + cây** sang Ninja Adventure | ✅ 9 loại địa hình, cây 2 mảnh mọc trên nền đúng vòng |
+| Thống nhất art: **công trình** (tường, tháp, rào, lò sưởi, luống) | ⬜ vẫn còn Kenney |
+| Ảnh từng quần xã (`--ring N`) | ✅ `docs/biomes/` |
 | Worldgen đặt làng / cứ điểm / cổng / mỏ / đường | ⬜ |
 | BFS đa nguồn + `PathfieldActor` debounce | ⬜ |
 | LOD chunk (10 Hz / 1 Hz / ngủ) | ⬜ |
