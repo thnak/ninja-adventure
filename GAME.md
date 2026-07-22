@@ -491,6 +491,70 @@ không phải nhiễu sinh ngẫu nhiên mỗi lần chạy.
 
 ---
 
+## 6b. Khởi đầu: tay trắng giữa đồng không
+
+> **Quyết định 2026-07-22.** Người chơi **không** bắt đầu với một nông trại dựng sẵn. Họ tỉnh dậy ở
+> giữa đồng không mông quạnh và phải **đi tìm ngôi làng gần nhất**.
+
+Quyết định này đến từ một bế tắc rất cụ thể về art, và nó giải bế tắc đó một cách sạch sẽ.
+
+### Bế tắc
+
+Công trình người chơi tự xây (tường, tháp, rào) cần sprite **vừa đúng một ô**, vì người chơi đặt
+từng ô một. Nhưng Ninja Adventure **không có ô tường hay tháp đơn lẻ nào** — `TilesetHouse` (759 ô)
+và `TilesetTowers` (144 ô) toàn là *mảnh* của công trình lớn hơn. Rào cũng cao 2 ô.
+
+Ta đã thử ép và kết quả xấu hơn thứ nó thay thế (xem `assets/CREDITS.md`).
+
+### Lời giải: công trình đến từ làng, không từ ô lẻ
+
+Nếu người chơi không bắt đầu bằng việc xây, thì **không cần sprite một ô**:
+
+- **Làng** là công trình **nhiều ô, đặt nguyên khối** bởi bộ sinh thế giới — đúng thứ bộ art này
+  dựng sẵn để làm. Nhà, tường thành, tháp canh, quầy hàng, hàng rào quanh làng.
+- Người chơi **học nghề xây từ làng**, và những gì họ dựng về sau cũng là **công trình nhiều ô**
+  đặt nguyên khối (một cái lều, một cái chòi, một đoạn rào 3 mảnh) — chứ không phải tô từng ô như
+  vẽ pixel.
+
+Đổi từ "đặt từng ô" sang "đặt nguyên công trình" **vừa hợp art vừa hợp cảm giác**: bạn dựng một
+*cái lán*, không phải tô 9 ô tường.
+
+### Hệ quả
+
+| | |
+|---|---|
+| **Bỏ nông trại khởi đầu** | Gỡ luôn mảng đất 13×13 đang bị nhét cứng trong `terrain_of`. Người chơi rơi xuống đất tự nhiên |
+| **Bỏ tường/tháp/rào đặt-từng-ô** | Chúng là thứ đang chặn đường, và giờ không cần nữa |
+| **Làng thành thiết yếu, không phải trang trí** | Không tới được làng thì không có gì để làm. Đây là lý do worldgen đặt làng phải lên trước mọi thứ khác |
+| **Mở đầu game có hình dạng rõ** | Tỉnh dậy → nhìn quanh → đi. Không menu, không hướng dẫn, không thanh nhiệm vụ |
+
+Cũng hợp tông chill: bạn bắt đầu bằng một chuyến đi bộ, không phải bằng một danh sách việc.
+
+---
+
+## 6c. Không khí: lá bay, mưa, gió
+
+Ví dụ của bộ art có **lá bay ngang màn hình**, và đó là thứ rẻ nhất để một thế giới trông như đang
+sống thay vì đang chờ.
+
+| Lớp | Nội dung | Nguồn |
+|---|---|---|
+| **Hạt môi trường** | lá bay theo gió, bụi ở sa mạc, tuyết rơi, đom đóm ban đêm | `FX/` (105 file) |
+| **Thời tiết** | mưa, bão, sương mù — do MapDirector phát, xem [§9](GAME.md) | `FX/` + overlay |
+| **Ô động** | gợn nước, cỏ lay, cờ bay, cối xay quay | `Backgrounds/Animated/` |
+
+Hai điểm kỹ thuật đáng nói:
+
+1. **Hạt là thuần trang trí — không đi qua mô phỏng.** Chúng sống trong renderer, sinh từ
+   `(seed, vị trí camera, thời gian)`. Không actor nào biết chúng tồn tại, nên chúng không tốn gì
+   về kiến trúc và không bao giờ cần đồng bộ giữa các node.
+2. **Ô động là hàm của thời gian thế giới**, không phải của frame — nên gợn nước ở hai máy khác nhau
+   vẫn cùng pha, và ảnh chụp vẫn tái lập được.
+
+Đây là thứ trả lại nhiều nhất trên mỗi dòng code trong toàn bộ danh sách còn lại.
+
+---
+
 ## 7. Nhân vật và kỹ năng
 
 ### Không có class cứng

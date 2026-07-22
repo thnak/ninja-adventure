@@ -106,7 +106,14 @@ Dựng sân khấu thật, trước khi tune bất cứ thứ gì lên trên nó
   loanh quanh trong 1000 chunk không ai nhìn.
 - **Di chuyển**: ngựa (hoặc lướt kiểu ninja) + điểm dịch chuyển ở làng. Ở 1024² đây là **thiết yếu**,
   không phải tiện nghi — đi bộ chéo bản đồ mất gần 4 phút.
-- Làng ở mức "nhà cửa + NPC đứng đó". Chưa bậc, chưa quân đội.
+- **Làng là hạng mục BẮT BUỘC của P1, không phải trang trí** ([GAME.md §6b](GAME.md)): người chơi
+  bắt đầu tay trắng giữa đồng không và phải đi tới làng, nên không có làng thì không có game. Làng
+  được đặt **nguyên khối** từ `TilesetHouse` — đó cũng là cách duy nhất dùng được bộ art này, vì nó
+  không có ô tường/tháp đơn lẻ nào.
+- **Gỡ nông trại khởi đầu** khỏi `terrain_of` (mảng đất 13×13 đang nhét cứng), và gỡ tường/tháp/rào
+  đặt-từng-ô. Về sau xây dựng là **đặt nguyên công trình**, không phải tô từng ô.
+- **Lớp không khí**: lá bay, mưa, tuyết, gợn nước ([GAME.md §6c](GAME.md)). Hạt sống trong renderer,
+  sinh từ `(seed, camera, thời gian)` — không actor nào biết, nên không tốn gì về kiến trúc.
 - Truyền tham số `season` vào `terrain_of` ngay bây giờ — nó đụng flow field, làm một lần rẻ hơn hai.
 
 **Xong khi:** sinh một thế giới mới, cưỡi ngựa từ tâm ra rìa và **thấy được** độ khó tăng dần qua
