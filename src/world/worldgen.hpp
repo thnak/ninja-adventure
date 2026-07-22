@@ -112,7 +112,13 @@ struct Stronghold {
 // always plausibly "over there" rather than in sight of the last one.
 inline constexpr int kVillageCell = 112;
 inline constexpr int kStrongholdCell = 124;
-inline constexpr int kVillageEdgeMargin = 40;     // keep settlements off the map border
+// Keep settlements off the map border — but this number is not free to choose. The outermost ring
+// starts at 0.9274 of the map's half-width, which puts the wasteland band within ~37 tiles of the
+// edge. A margin of 40 was therefore WIDER THAN THE RING, and the wasteland could not hold a
+// village no matter what its density said: the map reported 0 there and the density knob had no
+// effect at all, which is what gave the bug away. 18 leaves room for a village's houses (which
+// reach ~15 tiles out) and still lets the outer ring be inhabited.
+inline constexpr int kVillageEdgeMargin = 18;
 inline constexpr int kStrongholdKeepOut = 34;     // no stronghold this close to a village
 inline constexpr int kMaxRoadLength = 300;        // do not join villages further apart than this
 
@@ -183,6 +189,34 @@ private:
         return terrain_base(seed_, kOverworld, x, y);
     }
 
+    // --- Coherent noise, in integers only ------------------------------------------------------
+    // Every value in this file that shapes the world comes through here, and the reason is a
+    // measured cross-platform divergence, not caution:
+    //
+    //   Linux/GCC and Windows/MSVC generated the SAME 49 villages, the SAME 23 strongholds, the
+    //   same 493 buildings and the same spawn tile — and 266 different road tiles. The road carver
+    //   compared a float `fbm(...) - 0.5f` against a threshold, and the two compilers disagreed on
+    //   a handful of those comparisons (contraction, x87 spills, library sin/cos — it does not
+    //   matter which). One flipped comparison does not move a road by one tile: it changes the
+    //   step, and every step after it, so the road walks somewhere else entirely and 267 tiles that
+    //   one machine left as lake the other paved as causeway.
+    //
+    // TERRAIN gets away with floats because a disagreement there is LOCAL — a threshold flip moves
+    // one tile and stops. (Verified: ring and terrain tallies are identical on both toolchains.)
+    // Anything ITERATIVE amplifies instead, and worldgen is iterative by nature: roads walk, houses
+    // are placed by rejection, and each decision moves the state the next one reads.
+    //
+    // So generation uses this instead. `block` gives it spatial coherence — one value across a
+    // block of tiles, which is what makes a road bend over a stretch instead of jittering per
+    // tile — and it is pure integer arithmetic, which every compiler on every platform agrees on.
+    [[nodiscard]] std::uint32_t block_noise(std::uint64_t salt, int x, int y, int block,
+                                            std::uint32_t n) const noexcept {
+        const auto bx = static_cast<std::uint64_t>(static_cast<std::uint32_t>(x / block));
+        const auto by = static_cast<std::uint64_t>(static_cast<std::uint32_t>(y / block));
+        Rng r(seed_ ^ salt ^ (bx * 0x9E37'79B9'7F4A'7C15ull) ^ (by * 0xC2B2'AE3D'27D4'EB4Full));
+        return r.below(n);
+    }
+
     // --- 1. village sites ----------------------------------------------------------------------
     void place_villages() {
         const int cells = kMapTiles / kVillageCell;
@@ -211,7 +245,7 @@ private:
                 // ring against five in the forest — precisely backwards. Snow is *easy* ground to
                 // build on (open, flat, no trees) and forest is hard, so terrain-only filtering
                 // rewards exactly the hostile places that should be emptiest.
-                if (r.unit() > village_chance(ring)) continue;
+                if (r.below(100) >= village_chance(ring)) continue;
 
                 Village v{};
                 v.tx = static_cast<std::uint16_t>(tx);
@@ -247,16 +281,18 @@ private:
 
     // How likely a viable site actually gets settled, by ring. See the note at the call site: this
     // is the knob that makes the outer map lonely, and it has to be separate from buildability.
-    [[nodiscard]] static float village_chance(Ring ring) noexcept {
+    // Percent, not a float. `Rng::unit()` happens to be exact (an integer scaled by 2^-24), but
+    // "happens to be exact" is not the standard this file holds itself to — see `block_noise`.
+    [[nodiscard]] static std::uint32_t village_chance(Ring ring) noexcept {
         switch (ring) {
-            case Ring::kMeadow: return 1.00f;
-            case Ring::kForest: return 0.85f;
-            case Ring::kWetland: return 0.62f;
-            case Ring::kSnow: return 0.42f;
+            case Ring::kMeadow: return 100;
+            case Ring::kForest: return 85;
+            case Ring::kWetland: return 62;
+            case Ring::kSnow: return 42;
             case Ring::kWasteland:
             case Ring::kCount: break;
         }
-        return 0.28f;  // the wasteland keeps a few holdouts, and they are worth finding
+        return 45;  // the wasteland keeps a few holdouts, and they are worth finding
     }
 
     // Difficulty radiates outward, so prosperity radiates inward: the sheltered middle of the map
@@ -326,18 +362,16 @@ private:
         for (int step = 0; step < budget; ++step) {
             if (std::abs(gx - x) <= 2 && std::abs(gy - y) <= 2) break;
 
-            // A COARSE noise field here (scale 48) turned the map into a circuit board: fbm varies
-            // slowly, so one axis stayed suppressed for dozens of steps at a time and every road
-            // came out as two long right-angled runs. A finer field with a lower threshold flips
-            // the suppressed axis every few tiles instead, which is what makes a road read as a
-            // diagonal that wanders rather than as plumbing.
-            const float wobble = fbm(seed_ ^ 0x2EED'C0DEull, static_cast<float>(x),
-                                     static_cast<float>(y), 19.0f) - 0.5f;
+            // Half the blocks go diagonally, a quarter each hold one axis. A COARSE field turned
+            // the map into a circuit board — one axis stayed suppressed for dozens of steps and
+            // every road came out as two long right-angled runs — so the block is small (7 tiles),
+            // which makes a road read as a diagonal that wanders rather than as plumbing.
+            const std::uint32_t wobble = block_noise(0x2EED'C0DEull, x, y, 7, 4);
             int sx = (gx > x) - (gx < x);
             int sy = (gy > y) - (gy < y);
             if (sx != 0 && sy != 0) {
-                if (wobble > 0.09f) sy = 0;
-                else if (wobble < -0.09f) sx = 0;
+                if (wobble == 2) sy = 0;
+                else if (wobble == 3) sx = 0;
             }
 
             const int cand[3][2] = {{x + sx, y + sy}, {x + sx, y}, {x, y + sy}};
@@ -378,14 +412,14 @@ private:
             const int plaza = 3 + v.tier;  // tier 1 -> 4 tiles, tier 5 -> 8
 
             // The square. Its edge is noisy so it reads as trodden ground rather than as a stamp.
+            // Compared as SQUARED distances against an integer radius, so there is no sqrt and no
+            // float threshold anywhere in it — see `block_noise`.
             for (int dy = -plaza; dy <= plaza; ++dy) {
                 for (int dx = -plaza; dx <= plaza; ++dx) {
-                    const float r = std::sqrt(static_cast<float>(dx * dx + dy * dy));
-                    const float edge = static_cast<float>(plaza) +
-                                       (fbm(seed_ ^ 0x9101'ACE5ull,
-                                            static_cast<float>(v.tx + dx),
-                                            static_cast<float>(v.ty + dy), 7.0f) - 0.5f) * 3.0f;
-                    if (r > edge) continue;
+                    const int wob =
+                        static_cast<int>(block_noise(0x9101'ACE5ull, v.tx + dx, v.ty + dy, 3, 5)) - 2;
+                    const int edge = plaza + wob;
+                    if (dx * dx + dy * dy > edge * edge) continue;
                     if (terrain_base(seed_, kOverworld, v.tx + dx, v.ty + dy) == Terrain::kWater) {
                         continue;  // never pave over open water
                     }
@@ -401,12 +435,17 @@ private:
             int placed = 0;
             bool hall = false;
             for (int attempt = 0; attempt < want * 14 && placed < want; ++attempt) {
-                // An annulus just outside the square: close enough to belong to it, far enough that
-                // the square itself stays open.
-                const float ang = r.unit() * 6.2831853f;
-                const float rad = static_cast<float>(plaza) + 1.5f + r.unit() * 6.0f;
-                const int hx = v.tx + static_cast<int>(std::cos(ang) * rad);
-                const int hy = v.ty + static_cast<int>(std::sin(ang) * rad);
+                // A SQUARE annulus just outside the square: close enough to belong to it, far
+                // enough that the square itself stays open. Rejection sampling over integer offsets
+                // rather than polar cos/sin, for the reason in `block_noise` — trig is the other
+                // place two compilers are free to disagree, and one disagreement here shifts a
+                // house, which shifts every later rejection test in the village.
+                const int span = plaza + 7;
+                const int hx = v.tx - span + static_cast<int>(r.below(
+                                                static_cast<std::uint32_t>(2 * span + 1)));
+                const int hy = v.ty - span + static_cast<int>(r.below(
+                                                static_cast<std::uint32_t>(2 * span + 1)));
+                if (std::max(std::abs(hx - v.tx), std::abs(hy - v.ty)) < plaza + 1) continue;
 
                 StructureKind kind = house_for(v.ring, r);
                 if (!hall && v.tier >= 3 && placed == 0) {
@@ -500,7 +539,7 @@ private:
                 if (tx < 12 || ty < 12 || tx >= kMapTiles - 12 || ty >= kMapTiles - 12) continue;
 
                 const Ring ring = ring_of(seed_, tx, ty);
-                if (r.unit() > stronghold_chance(ring)) continue;
+                if (r.below(100) >= stronghold_chance(ring)) continue;
                 if (!buildable_site(tx, ty, 5)) continue;
                 if (too_close_to_village(tx, ty, kStrongholdKeepOut)) continue;
 
@@ -525,12 +564,10 @@ private:
                 static constexpr StructureKind kTents[] = {
                     StructureKind::kTentA, StructureKind::kTentB, StructureKind::kTentC};
                 for (int i = 0, tries = 0; i < tents && tries < 24; ++tries) {
-                    const float ang = r.unit() * 6.2831853f;
-                    const float rad = 2.0f + r.unit() * 4.0f;
-                    if (try_place(tx + static_cast<int>(std::cos(ang) * rad),
-                                  ty + static_cast<int>(std::sin(ang) * rad), kTents[r.below(3)])) {
-                        ++i;
-                    }
+                    const int ox = -5 + static_cast<int>(r.below(11));
+                    const int oy = -5 + static_cast<int>(r.below(11));
+                    if (std::max(std::abs(ox), std::abs(oy)) < 2) continue;  // keep the middle clear
+                    if (try_place(tx + ox, ty + oy, kTents[r.below(3)])) ++i;
                 }
                 h.count = static_cast<std::uint16_t>(structures_.size() - h.first);
                 if (h.count == 0) continue;  // nowhere to pitch a tent — not a stronghold
@@ -539,16 +576,16 @@ private:
         }
     }
 
-    [[nodiscard]] static float stronghold_chance(Ring ring) noexcept {
+    [[nodiscard]] static std::uint32_t stronghold_chance(Ring ring) noexcept {
         switch (ring) {
-            case Ring::kMeadow: return 0.18f;  // the chill ring keeps a couple, for flavour
-            case Ring::kForest: return 0.45f;
-            case Ring::kWetland: return 0.70f;
-            case Ring::kSnow: return 0.88f;
+            case Ring::kMeadow: return 18;  // the chill ring keeps a couple, for flavour
+            case Ring::kForest: return 45;
+            case Ring::kWetland: return 70;
+            case Ring::kSnow: return 88;
             case Ring::kWasteland:
             case Ring::kCount: break;
         }
-        return 1.0f;
+        return 100;
     }
 
     [[nodiscard]] bool too_close_to_village(int tx, int ty, int dist) const noexcept {
@@ -593,10 +630,12 @@ private:
         }
         Rng r(seed_ ^ 0x57A1'7000ull);
         for (int attempt = 0; attempt < 256; ++attempt) {
-            const float ang = r.unit() * 6.2831853f;
-            const float rad = 28.0f + r.unit() * 14.0f;
-            const int x = home->tx + static_cast<int>(std::cos(ang) * rad);
-            const int y = home->ty + static_cast<int>(std::sin(ang) * rad);
+            const int ox = -42 + static_cast<int>(r.below(85));
+            const int oy = -42 + static_cast<int>(r.below(85));
+            const int cheb = std::max(std::abs(ox), std::abs(oy));
+            if (cheb < 28 || cheb > 42) continue;  // a square annulus, in integers
+            const int x = home->tx + ox;
+            const int y = home->ty + oy;
             if (x < 2 || y < 2 || x >= kMapTiles - 2 || y >= kMapTiles - 2) continue;
             if (peek(x, y) != kNoOverlay) continue;  // not on a road, and not inside a house
             if (!is_walkable(ground(x, y))) continue;
