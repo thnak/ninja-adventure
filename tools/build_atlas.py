@@ -718,6 +718,25 @@ def _prefab_camel(stem: str) -> str:
 # optional cluster.
 PREFAB_LAYER = {"Floor": 0, "Snow": 1, "FloorDetail": 1, "House": 2, "Element": 3}
 
+
+def _prefab_has_door(li: int, c: dict) -> bool:
+    """Is this cell a DWELLING -- a whole house sprite the player can walk into?
+
+    A door needs two things nothing else in the parcel data records: that a cell is a house at all,
+    and which of its columns is the doorway. Both come free here, because a prefab house is not a new
+    kind of art -- it is one of the very TilesetHouse sprites world/village.hpp already measured. That
+    measurement (see kDoorDx) put the doorway in COLUMN 1 of every one of this pack's fifteen building
+    sprites, 3-wide and 4-wide alike, so a prefab house is enterable at that same column and no
+    second scan is needed.
+
+    So a dwelling is a House-layer cell (layer 2) cut from TilesetHouse.png, at least a full
+    house-sized crop (>= 48px each way) and taken from the sheet's house band (sy == 0). The roof and
+    wall FRAGMENTS a parcel is patched with are < 48px in one axis; the stair block of stairs_plaza is
+    16px tiles from far down the sheet: neither is a dwelling, neither gets a door.
+    """
+    return (li == 2 and c["sheet"].endswith("TilesetHouse.png")
+            and c["w"] >= 48 and c["h"] >= 48 and c["sy"] == 0)
+
 # Whether a parcel may be stamped mirrored (flip_h) for variety. Default True; a parcel is False only
 # when it bakes in readable glyphs, because a mirrored letter reads instantly as wrong. Only
 # street_houses qualifies -- its DOJO building has the word "DOJO" painted on the sign. The other
@@ -905,6 +924,7 @@ def pack_prefabs(atlas: Image.Image, anim_y: int, cell_px: int):
                     "dx": c["x"], "dy": c["y"], "layer": li,
                     "ax": ax, "ay": ay, "pw": c["w"], "ph": c["h"],
                     "centred": c["origin"] == 1,
+                    "has_door": _prefab_has_door(li, c),
                 })
                 if li == 2:  # a House sprite blocks its full footprint in tiles, clipped to rect
                     tw = (c["w"] + TILE - 1) // TILE
@@ -961,6 +981,10 @@ def write_prefabs_header(prefabs) -> None:
         "    std::int16_t ax, ay;        // pixel rect in atlas.png",
         "    std::uint8_t pw, ph;        // pixel size (16x16 for floor tiles; up to 64x48 for houses)",
         "    bool centred;               // true: draw centred on the anchor cell (Godot origin=1)",
+        "    bool has_door;              // dwelling: a house sprite a villager lives in and a player",
+        "                                // can enter. Its doorway is column 1 of the footprint (the",
+        "                                // measurement kDoorDx records in world/village.hpp), so a",
+        "                                // village that stamps this parcel gives the house a door.",
         "};",
         "",
         "struct PrefabDef {",
@@ -979,7 +1003,7 @@ def write_prefabs_header(prefabs) -> None:
         for c in p["cells"]:
             lines.append(f"    {{{c['dx']}, {c['dy']}, {c['layer']}, {c['group']}, "
                          f"{c['ax']}, {c['ay']}, {c['pw']}, {c['ph']}, "
-                         f"{str(c['centred']).lower()}}},")
+                         f"{str(c['centred']).lower()}, {str(c['has_door']).lower()}}},")
         lines.append("};")
         blk = ", ".join(f"0x{b:08x}u" for b in p["blocks"])
         lines.append(f"inline constexpr std::uint32_t kPrefabBlocks_{p['cpp']}[] = {{{blk}}};")

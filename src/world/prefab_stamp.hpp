@@ -46,6 +46,27 @@ inline constexpr int kPrefabTilePx = 16;
     return (c.ph + kPrefabTilePx - 1) / kPrefabTilePx;
 }
 
+// --- Doors, for parcels a village lays as furniture -------------------------------------------
+// A prefab house is one of the pack's own TilesetHouse sprites (tagged `has_door` at pack time), and
+// those are the very sprites world/village.hpp measured a doorway for: the dark run in the bottom
+// row sits in COLUMN 1 of every one of them, which is what `kDoorDx` records. So a prefab dwelling
+// is enterable at that same column, and needs no second measurement. These helpers give a village
+// builder the door tile of a dwelling cell in PARCEL-LOCAL coordinates; the builder leaves that tile
+// walkable under the sprite and worldgen emits a Door pointing at it, exactly as it does for a
+// Structure house. They assume the UNMIRRORED footprint, which is all a village ever stamps (see the
+// note where the builder clears the mirror bit).
+inline constexpr int kPrefabDoorDx = 1;
+
+[[nodiscard]] inline constexpr bool prefab_cell_is_dwelling(const PrefabCell& c) noexcept {
+    return c.has_door;
+}
+[[nodiscard]] inline constexpr int prefab_door_dx(const PrefabCell& c) noexcept {
+    return static_cast<int>(c.dx) + kPrefabDoorDx;
+}
+[[nodiscard]] inline constexpr int prefab_door_dy(const PrefabCell& c) noexcept {
+    return static_cast<int>(c.dy) + prefab_cell_th(c) - 1;
+}
+
 // Is this instance drawn flipped left-to-right? Only when the parcel is safe to mirror (no readable
 // glyphs baked into its art — `mirrorable`), and then on the low bit of the variant, so about half
 // of the mirrorable ones are. Bit 0 is spent here and nowhere else.
@@ -65,6 +86,22 @@ inline constexpr int kPrefabTilePx = 16;
     return ((variant >> (2 + group)) & 3u) != 0u;
 }
 
+// Force EVERY optional cluster of an instance to survive, by setting the low group bit
+// prefab_group_kept reads (one bit is enough — a non-zero pair keeps the cluster). Some parcels
+// only read right whole: a fort whose ring of walls has a gap dropped is not a fort, a cottage
+// whose one house was the dropped cluster is an empty lawn. Those set allow_group_drop=false in the
+// placement table, and placement runs the variant through here BEFORE storing it in PlacedPrefab.
+// Because the MASKED variant is what both the sim's blocking and the renderer's picture then read,
+// neither side has to know the policy — the variant stays the whole of the shared state, exactly as
+// this file's header insists.
+[[nodiscard]] inline constexpr std::uint32_t prefab_force_groups(const PrefabDef& def,
+                                                                 std::uint32_t variant) noexcept {
+    for (int group = 1; group <= static_cast<int>(def.group_count); ++group) {
+        variant |= (1u << (2 + group));
+    }
+    return variant;
+}
+
 // Is this cell drawn at all for this instance? Two independent reasons a cell is dropped:
 //
 //   * its cluster was dropped (see prefab_group_kept), or
@@ -74,6 +111,12 @@ inline constexpr int kPrefabTilePx = 16;
 //     cells — the tent, the crates, the props — never feather: a floating half-tent is worse than a
 //     square edge, and the props are already scattered inside the parcel where no border touches them.
 //
+// EXCEPT under a prop. A border floor cell that a kept layer-2/3 cell stands on is exempt from the
+// feather. Green-on-green hid why this matters; the snow pond showed it: its east-side barrels are
+// border props, and feathering the snow out from under them left them floating on the ring's bare
+// stone. The pedestal search is O(cell_count) per border cell, paid only by the few dozen border
+// cells of the handful of parcels on screen.
+//
 // The feather is hashed from (variant, dx, dy): deterministic, so the sim's blocking and the
 // renderer's picture agree, and per-instance, so two camps feather differently.
 [[nodiscard]] inline bool prefab_cell_visible(const PrefabDef& def, const PrefabCell& c,
@@ -82,6 +125,20 @@ inline constexpr int kPrefabTilePx = 16;
     if (c.layer >= 2) return true;  // structures and props never feather
     const bool border = c.dx == 0 || c.dy == 0 || c.dx + 1 >= def.w || c.dy + 1 >= def.h;
     if (!border) return true;
+    for (std::uint16_t i = 0; i < def.cell_count; ++i) {
+        const PrefabCell& s = def.cells[i];
+        if (s.layer < 2 || !prefab_group_kept(def, variant, s.group)) continue;
+        // The prop's tile footprint, one tile wider on each side when it draws centred — a centred
+        // sprite overhangs its anchor cell by up to half its width, and a pedestal that is merely
+        // approximate errs on keeping ground, never on dropping it.
+        const int tw = prefab_cell_tw(s);
+        const int th = prefab_cell_th(s);
+        const int pad = s.centred ? 1 : 0;
+        if (c.dx >= s.dx - pad && c.dx < s.dx + tw + pad &&
+            c.dy >= s.dy - pad && c.dy < s.dy + th + pad) {
+            return true;
+        }
+    }
     Rng r(static_cast<std::uint64_t>(variant) ^
           (static_cast<std::uint64_t>(c.dx) * 0x9E37'79B9'7F4A'7C15ull) ^
           (static_cast<std::uint64_t>(c.dy) * 0xC2B2'AE3D'27D4'EB4Full));

@@ -231,6 +231,42 @@ int main(int argc, char** argv) {
         world.teleport_player(me, kOverworld, spawn.x, spawn.y);
     }
 
+    // --- A prefab house has a door too ---------------------------------------------------------
+    // The door test above steps through `doors().front()`, which is whichever door sorts lowest —
+    // in practice a Structure house near the map's corner, NOT one of the houses a village stamps as
+    // part of a hand-composed block. Those blocks are the whole of P2's village work, and "every
+    // house has a door" has to hold for their houses or the block regresses it. So this finds an
+    // actual prefab dwelling — a street_houses or market_yard parcel exists ONLY inside a village, so
+    // its id alone identifies one — and proves its door teleports exactly as a Structure's does.
+    {
+        int dtx = -1;
+        int dty = -1;
+        for (const PlacedPrefab& pp : layout.prefabs()) {
+            if (pp.id != PrefabId::kStreetHouses && pp.id != PrefabId::kMarketYard) continue;
+            const PrefabDef& def = kPrefabs[static_cast<int>(pp.id)];
+            for (std::uint16_t i = 0; i < def.cell_count; ++i) {
+                const PrefabCell& c = def.cells[i];
+                if (!prefab_cell_is_dwelling(c)) continue;
+                if (!prefab_cell_visible(def, c, pp.variant)) continue;
+                dtx = pp.tx + prefab_door_dx(c);
+                dty = pp.ty + prefab_door_dy(c);
+                break;
+            }
+            if (dtx >= 0) break;
+        }
+        chk.expect(dtx >= 0, "a village laid a prefab block with a house in it");
+        if (dtx >= 0) {
+            // The doorway is walkable — the arch you step into — and stepping onto it goes indoors.
+            chk.expect(is_walkable(terrain_of(kWorldSeed, kOverworld, dtx, dty)),
+                       "a prefab house's doorway is left walkable under the sprite");
+            world.teleport_player(me, kOverworld, static_cast<float>(dtx) + 0.5f,
+                                  static_cast<float>(dty) + 0.5f);
+            const PlayerView in = world.player_view(slot);
+            chk.expect(in.map == kInterior, "stepping into a prefab house's door puts the player indoors");
+            world.teleport_player(me, kOverworld, spawn.x, spawn.y);
+        }
+    }
+
     // An unbound slot must be genuinely inert, not merely undrawn.
     const PlayerView empty_slot = world.player_view(kMaxPlayers - 1);
     chk.expect(!empty_slot.live(), "a slot nobody logged into is not a player");

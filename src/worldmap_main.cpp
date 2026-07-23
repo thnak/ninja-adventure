@@ -208,8 +208,8 @@ int main(int argc, char** argv) {
     }
     cross(px, w, h, (layout.spawn_tx() - ox) * scale, (layout.spawn_ty() - oy) * scale, 7 * scale,
           Rgb{90, 240, 240});
-    // Forest camps in magenta, boxed to their footprint. Loud on purpose: the question asked of them
-    // is whether they sit only in the forest band and clear of everything else.
+    // Placed prefabs in magenta, boxed to their footprint. Loud on purpose: the question asked of
+    // them is whether each sits only in its own ring and clear of everything else.
     for (const PlacedPrefab& pp : layout.prefabs()) {
         const PrefabDef& def = kPrefabs[static_cast<int>(pp.id)];
         box(px, w, h, (pp.tx - ox) * scale, (pp.ty - oy) * scale, def.w * scale, def.h * scale,
@@ -271,26 +271,50 @@ int main(int argc, char** argv) {
         std::printf("  %-10s %8d %12d\n", kRingNames[i], by_ring[i], holds_by_ring[i]);
     }
 
-    // Camps, tallied by the ring of their anchor. They are placed forest-only by construction, so a
-    // non-zero count in any other ring is a bug in `camp_fits`, not a curiosity — which is exactly
-    // why the tally is printed per ring rather than as a bare total.
-    int camps_by_ring[kRingCount] = {};
+    // Placed prefabs, tallied per TYPE and, within a type, per ring. Each landmark is placed in ONE
+    // ring by construction (see kPoiTable), so a count outside a type's home ring is a bug in
+    // `prefab_fits`, not a curiosity — which is why the tally is split per type AND per ring rather
+    // than printed as a bare total, and why an off-ring line is flagged loudly.
+    int poi_by_type[static_cast<int>(PrefabId::kCount)] = {};
+    int poi_by_type_ring[static_cast<int>(PrefabId::kCount)][kRingCount] = {};
     for (const PlacedPrefab& pp : layout.prefabs()) {
         const PrefabDef& def = kPrefabs[static_cast<int>(pp.id)];
-        ++camps_by_ring[static_cast<int>(ring_of(seed, pp.tx + def.w / 2, pp.ty + def.h / 2))];
+        const int rr = static_cast<int>(ring_of(seed, pp.tx + def.w / 2, pp.ty + def.h / 2));
+        ++poi_by_type[static_cast<int>(pp.id)];
+        ++poi_by_type_ring[static_cast<int>(pp.id)][rr];
     }
-    std::printf("\nforest camps: %zu total\n", layout.prefabs().size());
-    for (int i = 0; i < kRingCount; ++i) {
-        std::printf("  %-10s %8d\n", kRingNames[i], camps_by_ring[i]);
+    std::printf("\nplaced prefabs: %zu total\n", layout.prefabs().size());
+    for (const PoiPlacement& row : kPoiTable) {
+        const int ti = static_cast<int>(row.id);
+        std::printf("  %-16s %4d   home ring %s\n", kPrefabs[ti].name, poi_by_type[ti],
+                    kRingNames[static_cast<int>(row.ring)]);
+        for (int i = 0; i < kRingCount; ++i) {
+            if (poi_by_type_ring[ti][i] == 0) continue;
+            std::printf("      %-10s %4d%s\n", kRingNames[i], poi_by_type_ring[ti][i],
+                        static_cast<int>(row.ring) == i ? "" : "   <-- OUT OF RING (bug)");
+        }
     }
-    // Two anchors for `mmo_client --shot ... --at TX TY`, spaced apart so their variants differ.
-    if (!layout.prefabs().empty()) {
-        const PlacedPrefab& a = layout.prefabs().front();
-        const PlacedPrefab& b = layout.prefabs().back();
-        const PrefabDef& da = kPrefabs[static_cast<int>(a.id)];
-        const PrefabDef& db = kPrefabs[static_cast<int>(b.id)];
-        std::printf("  sample camps for --at:  (%d %d)  (%d %d)\n", a.tx + da.w / 2,
-                    a.ty + da.h / 2 + 5, b.tx + db.w / 2, b.ty + db.h / 2 + 5);
+    // The parcels a village lays as furniture, tallied apart from the scattered landmarks — they are
+    // in `prefabs()` too (one list, one draw path), but they are placed by the village builder against
+    // its plan, not by `kPoiTable`, so they belong under their own heading. A type is village-owned
+    // when it is not a row of the placement table (`poi_gap` is zero for exactly those).
+    std::printf("\nvillage parcels (laid by the builder, not scattered):\n");
+    for (int ti = 0; ti < static_cast<int>(PrefabId::kCount); ++ti) {
+        if (poi_by_type[ti] == 0 || poi_gap(static_cast<PrefabId>(ti)) != 0) continue;
+        std::printf("  %-18s %4d   village-laid\n", kPrefabs[ti].name, poi_by_type[ti]);
+    }
+
+    // One `--shot ... --at TX TY` sample per type, aimed at the parcel's centre-x and a few tiles
+    // SOUTH of its centre — so the player stands near the parcel's lower edge, which is also the
+    // cross-chunk case (a tall parcel straddles the chunk border below the player) worth eyeballing.
+    std::printf("\nsample --at per type (mmo_client --shot 2 <name>.png --at TX TY):\n");
+    for (const PoiPlacement& row : kPoiTable) {
+        for (const PlacedPrefab& pp : layout.prefabs()) {
+            if (pp.id != row.id) continue;
+            const PrefabDef& def = kPrefabs[static_cast<int>(pp.id)];
+            std::printf("  %-16s --at %d %d\n", def.name, pp.tx + def.w / 2, pp.ty + def.h / 2 + 5);
+            break;
+        }
     }
     if (const Village* home = layout.nearest_village(layout.spawn_tx(), layout.spawn_ty())) {
         const double d = std::sqrt(

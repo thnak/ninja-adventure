@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "world/prefab_stamp.hpp"
 #include "world/tiles.hpp"
 
 namespace mmo {
@@ -210,8 +211,14 @@ static_assert((2 * 11 - 7) / kLogH % 2 == 1 && (2 * 16 - 7) / kLogH % 2 == 1 &&
 // the road that was already carved through it.
 class VillageBuilder {
 public:
-    VillageBuilder(std::uint64_t seed, std::uint8_t* overlay, std::vector<Structure>& out) noexcept
-        : seed_(seed), overlay_(overlay), out_(&out) {}
+    // `parcels` collects the hand-composed blocks a village lays as furniture — the street of houses,
+    // the market yard, the treeline well, the stair approach. They are PlacedPrefab exactly like a
+    // scattered landmark, so the renderer draws them through the one prefab path and worldgen emits
+    // their doors alongside a Structure's. A stronghold builder passes the same vector (it lays no
+    // parcels, so it stays empty) rather than a second null-checked overload.
+    VillageBuilder(std::uint64_t seed, std::uint8_t* overlay, std::vector<Structure>& out,
+                   std::vector<PlacedPrefab>& parcels) noexcept
+        : seed_(seed), overlay_(overlay), out_(&out), parcels_(&parcels) {}
 
     // Builds one settlement and returns how many structures it added.
     //
@@ -228,6 +235,13 @@ public:
 
         rampart(cx, cy, p);
         clear_trees(cx, cy, p, ring);
+        // The hand-composed blocks go down AFTER the ground is cleared and BEFORE the square and the
+        // streets. Before, because a block writes its houses' footprints as `kBuilding`, and both the
+        // square (which skips built tiles) and the street loop (whose `place` rejects them) then flow
+        // AROUND the block instead of through it — a generated house drawn on top of the street of
+        // houses would double every roof, and the parcel must SUPPLANT the houses it stands in for,
+        // not stack on them. After clearing, so a block is not fighting a tree for its floor.
+        parcels(cx, cy, p, tier);
         square(cx, cy, p);
         streets(cx, cy, p, ring, tier, r);
         gardens(cx, cy, p, ring, r);
@@ -252,6 +266,18 @@ public:
                 if (peek(x, y) == static_cast<std::uint8_t>(Terrain::kBuilding)) return false;
                 const Terrain base = terrain_base(seed_, kOverworld, x, y);
                 if (base == Terrain::kWater || base == Terrain::kTree) return false;
+            }
+        }
+        // A generated house is SUPPRESSED over the whole rectangle of any block this village already
+        // laid — not merely off its houses' `kBuilding` tiles, but off its floor and its yards too.
+        // A block IS the side of the village it stands on; a lone generated cottage sprouting inside
+        // the market or between the street houses would double the very roofs the block replaces.
+        // (A stronghold's builder shares this verb but lays no parcels, so its range is empty.)
+        for (std::size_t i = vp_first_; i < parcels_->size(); ++i) {
+            const PlacedPrefab& q = (*parcels_)[i];
+            const PrefabDef& qd = kPrefabs[static_cast<int>(q.id)];
+            if (tx < q.tx + qd.w && q.tx < tx + s.w && ty < q.ty + qd.h && q.ty < ty + s.h) {
+                return false;
             }
         }
         for (int dy = 0; dy < s.h; ++dy) {
@@ -315,6 +341,126 @@ private:
         }
         out_->push_back(Structure{static_cast<std::uint16_t>(tx), static_cast<std::uint16_t>(ty),
                                   kind});
+        return true;
+    }
+
+    // --- 1b. the hand-composed blocks ---------------------------------------------------------
+    // The pack author drew whole village set-pieces in his own `Village.tscn` — a fenced street of
+    // houses, a market yard, a well among a row of trees, a grand staircase. `tools/import_prefabs.py`
+    // cut them out and `prefabs.hpp` holds them. Scattered across the wild they are landmarks
+    // (`kPoiTable`); laid INSIDE a village they are furniture, and this is where a village lays them.
+    //
+    // They go against the PLAN, not at random: the street of houses fills one side of the square, the
+    // market sits on the other, the treeline runs the inside of the north wall, and the staircase
+    // straddles the road out of the south gate — which is what its art is, an approach. A block that
+    // does not fit its slot is simply not laid, the same failure a house that will not fit is.
+    void parcels(int cx, int cy, const VillagePlan& p, int tier) {
+        vp_first_ = parcels_->size();
+        const PrefabDef& street = kPrefabs[static_cast<int>(PrefabId::kStreetHouses)];
+        // The inside of the north rampart: a row of trees and a well, no dwellings. Tucked below the
+        // corner LOG POSTS, which stand five tiles tall from one row proud of the wall band and so
+        // reach one row deeper than the band itself — seat the treeline at that depth or it lands on a
+        // post. tier>=3, where the enclosure is deep enough north of the square to hold it clear of
+        // both the wall and the hall.
+        if (tier >= 3) {
+            const PrefabDef& d = kPrefabs[static_cast<int>(PrefabId::kNorthTreelineWell)];
+            place_parcel(cx - d.w / 2, cy - p.hh + kLogH - 1, PrefabId::kNorthTreelineWell);
+        }
+        // South of the square: the street of houses, the block that most makes an interior read as
+        // hand-made. From tier 3, the tier at which a village first has the depth south of its plaza
+        // to hold a 9-tile block clear of the wall.
+        if (tier >= 3) {
+            place_parcel(cx - street.w / 2, cy + p.plaza + 2, PrefabId::kStreetHouses);
+        }
+        // The market yard, from tier 2. WHERE it goes turns on the hall: a tier-2 hamlet has none, and
+        // its north terrace is free, so the market sits north of the square there. A tier-3+ town keeps
+        // that terrace for the hall that faces the square (see streets()), so the market drops in south
+        // of the street houses instead — and only where the enclosure is tall enough to hold it clear
+        // of the south wall, which it is from tier 5. A market that fits nowhere is simply not built,
+        // the same failure a house that will not fit is.
+        {
+            const PrefabDef& d = kPrefabs[static_cast<int>(PrefabId::kMarketYard)];
+            if (tier == 2) {
+                place_parcel(cx - d.w / 2, cy - p.plaza - 2 - d.h, PrefabId::kMarketYard);
+            } else if (tier >= 3) {
+                place_parcel(cx - d.w / 2, cy + p.plaza + 2 + street.h + 1, PrefabId::kMarketYard);
+            }
+        }
+        // Outside the south gate, on the approach: the grand staircase. Beyond the wall band on
+        // purpose — the art is an approach to a gate, not a thing that stands in a square.
+        if (tier >= 4) {
+            const PrefabDef& d = kPrefabs[static_cast<int>(PrefabId::kStairsPlaza)];
+            place_parcel(cx - d.w / 2, cy + p.hh + 3, PrefabId::kStairsPlaza);
+        }
+    }
+
+    // Lay one parcel with its top-left at (tx,ty), or lay nothing. All-or-nothing like `place`: the
+    // whole footprint plus its margin must be inside the map, dry, clear of anything already built
+    // (the rampart, a house, an earlier block this village laid), and clear of a block that wrote no
+    // blocking of its own (the treeline is all props — it must be kept off by its recorded rectangle,
+    // since `peek` would see nothing under it). The FLOOR is renderer-side, drawn from `prefabs.hpp`
+    // exactly as a camp's is; what this writes to the overlay is the blocking and a walkable doorway
+    // punched under each house — the same two writes `place` makes for a single Structure.
+    bool place_parcel(int tx, int ty, PrefabId id) {
+        const PrefabDef& def = kPrefabs[static_cast<int>(id)];
+        // The instance's variant, from the village seed and this anchor — pure, like `stake_kind`.
+        // Two masks make a village parcel simpler than a scattered one: every optional cluster is
+        // FORCED to survive (a market missing its cart cluster, or a street missing a house, reads as
+        // broken, not as variety), and the mirror bit is CLEARED. Unmirrored keeps a door in plain
+        // column 1 with no reflection arithmetic, keeps street_houses' DOJO sign readable, and stops
+        // two blocks in one village reading as a mirrored pair. street_houses is already
+        // non-mirrorable; the others are held unmirrored here for that uniformity.
+        Rng vr(seed_ ^ 0xB10C'5EED'0000ull ^
+               (static_cast<std::uint64_t>(static_cast<std::uint32_t>(tx)) * 0x9E37'79B9'7F4A'7C15ull) ^
+               (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ty)) * 0xC2B2'AE3D'27D4'EB4Full));
+        std::uint32_t variant = (prefab_force_groups(def, static_cast<std::uint32_t>(vr.next()))) & ~1u;
+
+        for (int y = 0; y < def.h; ++y) {
+            for (int x = 0; x < def.w; ++x) {
+                const int gx = tx + x;
+                const int gy = ty + y;
+                if (gx < 1 || gy < 1 || gx >= kMapTiles - 1 || gy >= kMapTiles - 1) return false;
+                if (peek(gx, gy) == static_cast<std::uint8_t>(Terrain::kBuilding)) return false;
+                if (wet(gx, gy)) return false;
+            }
+        }
+        // A block that writes no blocking (the treeline is props only) leaves nothing for `peek` to
+        // catch, so guard against overlapping one already laid THIS village by its rectangle.
+        for (std::size_t i = vp_first_; i < parcels_->size(); ++i) {
+            const PlacedPrefab& q = (*parcels_)[i];
+            const PrefabDef& qd = kPrefabs[static_cast<int>(q.id)];
+            if (tx < q.tx + qd.w && q.tx < tx + def.w && ty < q.ty + qd.h && q.ty < ty + def.h) {
+                return false;
+            }
+        }
+
+        // Fell the wood over the footprint, exactly as `stamp_prefab` and `clear_trees` do — a tree
+        // left standing inside a laid block reads as the generator having given up.
+        for (int y = 0; y < def.h; ++y) {
+            for (int x = 0; x < def.w; ++x) {
+                const int gx = tx + x;
+                const int gy = ty + y;
+                if (peek(gx, gy) != kNoOverlay) continue;
+                if (terrain_base(seed_, kOverworld, gx, gy) == Terrain::kTree) put(gx, gy, Terrain::kGrass);
+            }
+        }
+        // The blocking. One `kBuilding` per tile this variant blocks — the same overlay a Structure
+        // house writes, so collision and picture agree.
+        for (int y = 0; y < def.h; ++y) {
+            for (int x = 0; x < def.w; ++x) {
+                if (prefab_blocks(def, variant, x, y)) put(tx + x, ty + y, Terrain::kBuilding);
+            }
+        }
+        // The doorways. Every kept dwelling cell gets its door tile punched back to walkable under the
+        // sprite — the arch you step into — and worldgen (`index_doors`) emits a Door there from the
+        // record pushed below, so the interior room is allocated the same way a Structure's is.
+        for (std::uint16_t i = 0; i < def.cell_count; ++i) {
+            const PrefabCell& c = def.cells[i];
+            if (!prefab_cell_is_dwelling(c)) continue;
+            if (!prefab_cell_visible(def, c, variant)) continue;
+            put(tx + prefab_door_dx(c), ty + prefab_door_dy(c), Terrain::kPath);
+        }
+        parcels_->push_back(PlacedPrefab{tx, ty, id, variant});
         return true;
     }
 
@@ -695,6 +841,8 @@ private:
     std::uint64_t seed_;
     std::uint8_t* overlay_;
     std::vector<Structure>* out_;
+    std::vector<PlacedPrefab>* parcels_;
+    std::size_t vp_first_ = 0;  // where THIS village's parcels start in *parcels_, for overlap tests
 };
 
 }  // namespace mmo

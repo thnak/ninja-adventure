@@ -87,19 +87,103 @@ inline constexpr int kVillageEdgeMargin = 13;
 inline constexpr int kStrongholdKeepOut = 46;
 inline constexpr int kMaxRoadLength = 300;        // do not join villages further apart than this
 
-// Forest camps are scattered on their own jittered grid, the same poor-man's-Poisson the villages
-// use. The cell is much smaller than a village's because a camp is a landmark you stumble on, not a
-// settlement you travel to — it wants to be COMMON in the forest ring, not spaced a walk apart. The
-// cell is deliberately DENSER than the spacing floor below wants: candidates are cheap, and letting
-// kCampMinGap do the thinning packs the band close to its floor instead of leaving lottery gaps
-// where a sparse grid rolled empty. Tuned against `mmo_worldmap`'s per-ring tally.
-inline constexpr int kCampCell = 32;
-// The jitter alone lets two camps in neighbouring cells land back to back (observed 19 tiles apart —
-// both clearings on one screen, which reads as a copy-paste even when their variants differ). The
-// floor is set by what a screen shows: ~40 tiles wide at default zoom, so anchors at least 56 apart
-// can never share one. Enforced against already-accepted camps, in scan order, so it stays a pure
-// function of the seed.
-inline constexpr int kCampMinGap = 56;
+// --- table-driven POI placement ----------------------------------------------------------------
+// Each landmark prefab is scattered across the world in its NATIVE ring, one row per type. The
+// placement loop in the constructor walks this table in order and drops each type on its own
+// jittered grid — a poor-man's Poisson-disc, same as villages and camps — so adding a landmark is a
+// table row, not a new code path. The ring is the constraint that carries the meaning: a camp is a
+// forest thing, a frozen pond a snow thing, an orchard a meadow thing, and putting each only where
+// it belongs is the world's one difficulty axis said a second way.
+//
+// ORDER MATTERS in exactly one way: kCampClearing is FIRST, and that is load-bearing, not
+// cosmetic. When camps are placed nothing else has been scattered yet, so their fit test and their
+// spacing test see precisely what they saw when this was camp-only code — the refactor moves no
+// camp. Every later type is spaced against the camps too (the gap rule below is cross-type), which
+// is the point: a cottage inside a camp's clearing would be wrong.
+struct PoiPlacement {
+    PrefabId id;
+    Ring ring;                  // the only ring this prefab may land in
+    int cell;                   // jittered-grid cell = the spacing floor, near enough (see kVillageCell)
+    int gap;                    // min Chebyshev gap, enforced pairwise as max(gapA,gapB) against
+                                // EVERY already-placed prefab — cross-type included
+    std::uint8_t present_in_4;  // keep a cell's candidate this-many-times-in-four; the rest of a
+                                // type's rarity comes from its cell and its gap
+    bool allow_group_drop;      // false forces every optional cluster to survive (masked into the
+                                // variant at placement) — for parcels that only read right whole
+    std::uint16_t base_allow;   // bit per Terrain value: the base terrains the footprint may stand
+                                // on. Not a nicety — the feather exposes the base at every dropped
+                                // border cell, so a parcel on the wrong base shows it (the snow
+                                // pond's white floor on the ring's tan stone was the tell).
+};
+
+// The footprint whitelists for the table below. Every mask includes kTree (clearing wood is what
+// placing a parcel in the wild means — stamp_prefab fells it) and none includes kWater.
+[[nodiscard]] inline constexpr std::uint16_t terrain_mask() noexcept { return 0; }
+template <typename... T>
+[[nodiscard]] inline constexpr std::uint16_t terrain_mask(Terrain t, T... rest) noexcept {
+    return static_cast<std::uint16_t>(1u << static_cast<int>(t)) | terrain_mask(rest...);
+}
+// "Any dry ground" — what the water-only veto used to mean, for the parcels whose own floor art is
+// generic enough to sit on whatever the ring offers.
+inline constexpr std::uint16_t kBaseAnyDry =
+    terrain_mask(Terrain::kGrass, Terrain::kDirt, Terrain::kStone, Terrain::kSand, Terrain::kTree,
+                 Terrain::kSnow, Terrain::kMarsh, Terrain::kAsh);
+
+// The one place a landmark's placement is tuned. Counts land in the ranges the design asks for by
+// the interplay of cell (how many candidates), present_in_4 (how many of those are even tried) and
+// gap (how many survive spacing) — measured against `mmo_worldmap`'s per-type tally.
+inline constexpr PoiPlacement kPoiTable[] = {
+    // kCampClearing MUST stay first (see the note above). cell 32 / gap 56 / 3-in-4 is the tuning
+    // the camp-only code shipped with, kept verbatim so no camp moves. A camp is COMMON — the small
+    // cell is deliberately DENSER than the gap floor wants (candidates are cheap; letting the gap do
+    // the thinning packs the band near its floor rather than leaving lottery holes a sparse grid
+    // rolled empty). The gap of 56 is set by what one screen shows (~40 tiles at default zoom, plus
+    // margin), so two camps can never share it and read as a copy-paste.
+    {PrefabId::kCampClearing, Ring::kForest, 32, 56, 3, true, kBaseAnyDry},
+    // A lone dwelling you remember stumbling on. Its rarity is EARNED, not dialled: the forest ring
+    // is already blanketed by camps at gap 56, so a cottage only lands in the rare pocket no camp
+    // claimed — the gap is set just above a camp's own spacing (max(60,56)=60), enough that a cottage
+    // sits in its own clearing rather than sharing a camp's, and the dense camps do the thinning down
+    // to a handful. A wider gap does not read as "rarer", it reads as "none": there is no 100-tile
+    // camp-free pocket in that ring to find.
+    {PrefabId::kForestCottage, Ring::kForest, 40, 60, 4, true, kBaseAnyDry},
+    // Frozen ponds to break up the snowfield. The pond is FLOOR art over walkable ice — the stamp
+    // writes no kWater under it, so you skate across (deliberate; see prefab_fits and the note
+    // there). Snowfield ONLY: the snow ring's base is a mix of snow and tan stone, and a white
+    // parcel feathered over stone reads as a paper cut-out — the pond must sit where its own edge
+    // colour IS the ground colour.
+    // Cell 48, denser than the pond's own gap wants, for the camp reason: the snow-only base rule
+    // rejects most candidates (the ring is half tan stone), so the grid over-generates and the base
+    // test plus the gap do the thinning.
+    {PrefabId::kSnowPond, Ring::kSnow, 48, 80, 4, true,
+     terrain_mask(Terrain::kSnow, Terrain::kTree)},
+    // Orchard rows to interrupt the open meadow grass. Grass only, for the same reason the pond
+    // wants snow: the meadow's ponds ring themselves with sand, and an orchard feathered into a
+    // beach shows tan holes between its trees.
+    {PrefabId::kSouthOrchard, Ring::kMeadow, 72, 80, 4, true,
+     terrain_mask(Terrain::kGrass, Terrain::kTree)},
+
+    // DEFERRED — deliberately not in the table, each its own task:
+    //   kLakeIslands       its floor art contains OPEN WATER; stamping it needs overlay kWater
+    //                      writes so the sim agrees with the picture. That is a design task, not a row.
+    //   kWaterfallBridge   the world has no rivers for it to span.
+    //   kFortGate,
+    //   kFortCourtyard     stronghold-site integration, not free scatter.
+    //   kStreetHouses,
+    //   kMarketYard,
+    //   kStairsPlaza,
+    //   kNorthTreelineWell village pieces, laid by the village builder, not scattered as landmarks.
+};
+
+// A prefab type's spacing gap, by id — so the cross-type spacing test can ask "how far must I keep
+// from THAT one?" and `mmo_worldmap`'s probe can check the pairwise rule from outside. Zero for a
+// type not in the table (it is never placed, so it is never asked).
+[[nodiscard]] inline constexpr int poi_gap(PrefabId id) noexcept {
+    for (const PoiPlacement& p : kPoiTable) {
+        if (p.id == id) return p.gap;
+    }
+    return 0;
+}
 
 class WorldLayout {
 public:
@@ -110,8 +194,15 @@ public:
         lay_roads();
         build_villages();
         place_strongholds();
-        place_camps();  // AFTER strongholds: a camp rejects any tile already built on, so it must be
-                        // the last thing to read the overlay before the indexes are frozen.
+        place_prefabs();  // AFTER strongholds: a prefab rejects any tile already built on, so it must
+                          // be the last thing to read the overlay before the indexes are frozen.
+        // The village-laid blocks join the scattered ones as one list from here on, so the renderer
+        // draws all of them through the single prefab path and the worldmap boxes all of them. This
+        // merge happens AFTER place_prefabs, never before: a POI is spaced against every prefab
+        // already placed, and letting it space against a village's furniture too would move camps the
+        // `kPoiTable` note insists never move. `poi_count_` remembers the split for the tally.
+        poi_count_ = prefabs_.size();
+        prefabs_.insert(prefabs_.end(), vparcels_.begin(), vparcels_.end());
         index_structures();
         index_prefabs();
         index_doors();
@@ -457,7 +548,7 @@ private:
     // This loop is the whole of what worldgen has left to say about a village: which one, where,
     // and how big.
     void build_villages() {
-        VillageBuilder b(seed_, overlay_.data(), structures_);
+        VillageBuilder b(seed_, overlay_.data(), structures_, vparcels_);
         for (Village& v : villages_) {
             v.first = static_cast<std::uint16_t>(structures_.size());
             v.count = static_cast<std::uint16_t>(b.build(v.tx, v.ty, v.tier, v.ring));
@@ -473,7 +564,7 @@ private:
         // A tent is stamped by the same rule a house is, so it borrows the village generator's
         // verb rather than keeping a second copy of it here. A stronghold gets no wall: the whole
         // point of a monster camp is that you can walk into it.
-        VillageBuilder b(seed_, overlay_.data(), structures_);
+        VillageBuilder b(seed_, overlay_.data(), structures_, vparcels_);
         const int cells = kMapTiles / kStrongholdCell;
         for (int cy = 0; cy < cells; ++cy) {
             for (int cx = 0; cx < cells; ++cx) {
@@ -547,91 +638,118 @@ private:
         return false;
     }
 
-    // --- 4b. forest camps ----------------------------------------------------------------------
-    // Hand-composed clearings dropped into the forest ring as landmarks. A camp is the first thing
-    // from the pack author's own map to be placed as a whole PARCEL rather than tile by tile: the
-    // floor, the tent, the campfire and the crates all come from one cut of his village, and the
-    // renderer draws them from `prefabs.hpp`. What worldgen writes is only the BLOCKING — the tent's
-    // footprint as `kBuilding` — because that is the one thing the simulation needs to agree with the
-    // picture on. The floor is renderer-side, exactly as a house's walls are.
+    // --- 4b. landmark prefabs ------------------------------------------------------------------
+    // Hand-composed parcels dropped across the world as landmarks, one type per row of `kPoiTable`
+    // above, each in its native ring. A parcel is placed as a WHOLE unit — the floor, the tent or
+    // house, the props all come from one cut of the pack author's own map, and the renderer draws
+    // them from `prefabs.hpp`. What worldgen writes is only the BLOCKING — a structure's footprint
+    // as `kBuilding` — because that is the one thing the simulation needs to agree with the picture
+    // on. The floor is renderer-side, exactly as a house's walls are.
     //
-    // Forest ONLY, and the reason is the same one that shapes every other feature: the ring is the
-    // world's one difficulty axis said out loud. A camp is a forest thing — a clearing hacked out of
-    // dense wood — so it belongs to the ring where `terrain_base` grows trees thickly and nowhere
-    // else. Meadow copses are too sparse to hide one and the outer rings are not forest at all.
-    void place_camps() {
-        const PrefabDef& def = kPrefabs[static_cast<int>(PrefabId::kCampClearing)];
-        const int cells = kMapTiles / kCampCell;
-        for (int cy = 0; cy < cells; ++cy) {
-            for (int cx = 0; cx < cells; ++cx) {
-                Rng r(seed_ ^ 0xCA3B'0000ull ^ (static_cast<std::uint64_t>(cy) << 20) ^
-                      static_cast<std::uint64_t>(cx));
-                if (r.below(4) == 0) continue;  // drop one cell in four, so the scatter is not a grid
+    // The camp was the first of these; this loop is the same code generalized over the table, so
+    // that a second landmark (a lone forest cottage, a frozen snow pond, a meadow orchard) is a row
+    // and not a copy of this function. Camps are the first row on purpose — see the note on
+    // `kPoiTable` for why that keeps them byte-identical to the camp-only code.
+    void place_prefabs() {
+        for (const PoiPlacement& row : kPoiTable) {
+            const PrefabDef& def = kPrefabs[static_cast<int>(row.id)];
+            const int cells = kMapTiles / row.cell;
+            // Per-type salt so two types' grids do not correlate. kCampClearing is id 0, so its salt
+            // stays exactly 0xCA3B0000 — the value the camp-only code used — and its scatter does not
+            // move. Later ids differ in bits the cell/cx/cy hash below never touches.
+            const std::uint64_t salt =
+                0xCA3B'0000ull ^ (static_cast<std::uint64_t>(static_cast<std::uint8_t>(row.id)) << 8);
+            const std::uint32_t drop = 4u - row.present_in_4;
+            for (int cy = 0; cy < cells; ++cy) {
+                for (int cx = 0; cx < cells; ++cx) {
+                    Rng r(seed_ ^ salt ^ (static_cast<std::uint64_t>(cy) << 20) ^
+                          static_cast<std::uint64_t>(cx));
+                    // Presence roll is drawn FIRST and always, whatever the threshold, so the anchor
+                    // draws that follow read the same stream position for every type — the camp's
+                    // `r.below(4) == 0` is exactly this with present_in_4 = 3 (drop = 1).
+                    if (r.below(4) < drop) continue;
 
-                // Jitter the ANCHOR (the parcel's centre) inside the cell, then place the parcel so
-                // its middle sits on the anchor. Insetting keeps two camps in neighbouring cells from
-                // ending up back to back.
-                const int inset = kCampCell / 6;
-                const int span = kCampCell - 2 * inset;
-                const int ax = cx * kCampCell + inset + static_cast<int>(r.below(
-                                   static_cast<std::uint32_t>(span)));
-                const int ay = cy * kCampCell + inset + static_cast<int>(r.below(
-                                   static_cast<std::uint32_t>(span)));
-                const int tx = ax - def.w / 2;
-                const int ty = ay - def.h / 2;
+                    // Jitter the ANCHOR (the parcel's centre) inside the cell, then place the parcel
+                    // so its middle sits on the anchor. Insetting keeps two parcels in neighbouring
+                    // cells from ending up back to back.
+                    const int inset = row.cell / 6;
+                    const int span = row.cell - 2 * inset;
+                    const int ax = cx * row.cell + inset +
+                                   static_cast<int>(r.below(static_cast<std::uint32_t>(span)));
+                    const int ay = cy * row.cell + inset +
+                                   static_cast<int>(r.below(static_cast<std::uint32_t>(span)));
+                    const int tx = ax - def.w / 2;
+                    const int ty = ay - def.h / 2;
 
-                // The instance's identity: a hash of (seed, anchor) and nothing that changes with the
-                // scan order, so every node derives the same variant for the same camp. It drives the
-                // mirror, the kept clusters and the edge feather in prefab_stamp.hpp.
-                Rng vr(seed_ ^ 0xF00D'1234'0000ull ^
-                       (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ax)) *
-                        0x9E37'79B9'7F4A'7C15ull) ^
-                       (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ay)) *
-                        0xC2B2'AE3D'27D4'EB4Full));
-                const auto variant = static_cast<std::uint32_t>(vr.next());
+                    // The instance's identity: a hash of (seed, anchor) and nothing that changes with
+                    // the scan order, so every node derives the same variant for the same parcel. It
+                    // drives the mirror, the kept clusters and the edge feather in prefab_stamp.hpp.
+                    Rng vr(seed_ ^ 0xF00D'1234'0000ull ^
+                           (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ax)) *
+                            0x9E37'79B9'7F4A'7C15ull) ^
+                           (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ay)) *
+                            0xC2B2'AE3D'27D4'EB4Full));
+                    std::uint32_t variant = static_cast<std::uint32_t>(vr.next());
+                    // A parcel that only reads right whole keeps all its clusters — masked into the
+                    // variant here, so the stored value is the whole of the shared state and the
+                    // renderer needs no copy of the policy. A no-op when the type allows drops.
+                    if (!row.allow_group_drop) variant = prefab_force_groups(def, variant);
 
-                if (!camp_fits(tx, ty, def)) continue;
-                // Keep the whole scatter, drop only the collisions: a camp too close to one already
-                // accepted is skipped, not nudged — nudging would make every later placement depend
-                // on the nudge, and this loop's scan order is the only order there is.
-                bool crowded = false;
-                for (const PlacedPrefab& p : prefabs_) {
-                    const int gx = p.tx > tx ? p.tx - tx : tx - p.tx;
-                    const int gy = p.ty > ty ? p.ty - ty : ty - p.ty;
-                    if (gx < kCampMinGap && gy < kCampMinGap) { crowded = true; break; }
+                    if (!prefab_fits(tx, ty, def, row.ring, row.base_allow)) continue;
+                    // Keep the whole scatter, drop only the collisions: a parcel too close to one
+                    // already accepted is skipped, not nudged — nudging would make every later
+                    // placement depend on the nudge, and this loop's scan order is the only order
+                    // there is. The spacing is CROSS-TYPE: the required gap is the larger of the two
+                    // types' gaps, so a small camp still keeps a wide cottage's distance and no pair
+                    // of any types ends up on one screen.
+                    bool crowded = false;
+                    for (const PlacedPrefab& p : prefabs_) {
+                        const int gx = p.tx > tx ? p.tx - tx : tx - p.tx;
+                        const int gy = p.ty > ty ? p.ty - ty : ty - p.ty;
+                        const int need = std::max(row.gap, poi_gap(p.id));
+                        if (gx < need && gy < need) { crowded = true; break; }
+                    }
+                    if (crowded) continue;
+                    stamp_prefab(tx, ty, def, variant);
+                    prefabs_.push_back(PlacedPrefab{tx, ty, row.id, variant});
                 }
-                if (crowded) continue;
-                stamp_camp(tx, ty, def, variant);
-                prefabs_.push_back(PlacedPrefab{tx, ty, PrefabId::kCampClearing, variant});
             }
         }
     }
 
-    // A camp fits when every tile of its footprint PLUS a one-tile margin is inside the forest ring,
-    // is not open water, and has nothing already built on it. Trees are deliberately NOT a
-    // rejection — clearing wood is exactly what pitching a camp in a forest means, and `stamp_camp`
-    // fells them. Water is a veto (you cannot pitch a tent on a pond) and a non-empty overlay covers
-    // roads, village squares and strongholds in one test, so a camp never lands on another feature.
-    [[nodiscard]] bool camp_fits(int tx, int ty, const PrefabDef& def) const noexcept {
+    // A parcel fits when every tile of its footprint PLUS a one-tile margin is inside its native
+    // ring, stands on a base terrain its table row allows, and has nothing already built on it.
+    // Trees are in every row's whitelist — clearing wood is exactly what pitching a camp in a forest
+    // means, and `stamp_prefab` fells them — and water is in nobody's: you cannot pitch a tent, or
+    // lay out an orchard, on a pond. (The snow pond's frozen water is FLOOR ART over walkable ice,
+    // never a `kWater` tile, so its own footprint does not trip the rule.) The whitelist exists
+    // because the feather exposes the base at every dropped border cell: a parcel only reads as part
+    // of the world where the ground showing through its ragged edge is the ground its edge was drawn
+    // against. A non-empty overlay covers roads, village squares and strongholds in one test, so a
+    // parcel never lands on another feature.
+    [[nodiscard]] bool prefab_fits(int tx, int ty, const PrefabDef& def, Ring ring,
+                                   std::uint16_t base_allow) const noexcept {
         for (int dy = -1; dy <= def.h; ++dy) {
             for (int dx = -1; dx <= def.w; ++dx) {
                 const int x = tx + dx;
                 const int y = ty + dy;
                 if (x < 1 || y < 1 || x >= kMapTiles - 1 || y >= kMapTiles - 1) return false;
-                if (ring_of(seed_, x, y) != Ring::kForest) return false;
-                if (terrain_base(seed_, kOverworld, x, y) == Terrain::kWater) return false;
+                if (ring_of(seed_, x, y) != ring) return false;
+                const auto base = terrain_base(seed_, kOverworld, x, y);
+                if ((base_allow & (1u << static_cast<int>(base))) == 0) return false;
                 if (peek(x, y) != kNoOverlay) return false;
             }
         }
         return true;
     }
 
-    // Stamp one camp: fell the wood over the footprint and its margin, then write `kBuilding` on
+    // Stamp one parcel: fell the wood over the footprint and its margin, then write `kBuilding` on
     // every tile this instance's variant blocks. Clearing follows the village's own `clear_trees` —
     // a tree left standing inside a cleared parcel reads as the generator having given up — but a
-    // camp clears the lot rather than leaving one in twelve: the parcel IS a clearing, and its floor
-    // art draws over the whole thing. The ring is forest, so the ground under a felled tree is grass.
-    void stamp_camp(int tx, int ty, const PrefabDef& def, std::uint32_t variant) {
+    // parcel clears the lot rather than leaving one in twelve: the parcel IS a cleared space, and its
+    // floor art draws over the whole thing. In snow and meadow there is little or no wood under a
+    // parcel, so the fell is a near no-op there; the ground it exposes is the ring's own grass.
+    void stamp_prefab(int tx, int ty, const PrefabDef& def, std::uint32_t variant) {
         for (int dy = -1; dy <= def.h; ++dy) {
             for (int dx = -1; dx <= def.w; ++dx) {
                 const int x = tx + dx;
@@ -698,10 +816,24 @@ private:
     // The rampart pieces are skipped — `is_dwelling` is the whole test. A log post has no door, and
     // giving one a room would put four thousand empty interiors behind the walls.
     void index_doors() {
-        doors_.reserve(structures_.size());
+        doors_.reserve(structures_.size() + vparcels_.size());
         for (const Structure& s : structures_) {
             if (!is_dwelling(s.kind)) continue;
             doors_.push_back(Door{tile_key(door_tx(s), door_ty(s)), 0});
+        }
+        // A house a village stamped as part of a prefab block is a dwelling too, and "every house has
+        // a door" would regress the moment one of these had none. Its door is the same construction a
+        // Structure's is — the doorway tile the builder left walkable under the sprite — derived here
+        // from the parcel's kept dwelling cells so the room is allocated by the very same sort below.
+        for (const PlacedPrefab& pp : vparcels_) {
+            const PrefabDef& def = kPrefabs[static_cast<int>(pp.id)];
+            for (std::uint16_t i = 0; i < def.cell_count; ++i) {
+                const PrefabCell& c = def.cells[i];
+                if (!prefab_cell_is_dwelling(c)) continue;
+                if (!prefab_cell_visible(def, c, pp.variant)) continue;
+                doors_.push_back(Door{tile_key(pp.tx + prefab_door_dx(c), pp.ty + prefab_door_dy(c)),
+                                      0});
+            }
         }
         std::sort(doors_.begin(), doors_.end(),
                   [](const Door& a, const Door& b) { return a.tile < b.tile; });
@@ -744,6 +876,11 @@ private:
     std::vector<Structure> structures_;
     std::vector<Door> doors_;
     std::vector<PlacedPrefab> prefabs_;
+    std::vector<PlacedPrefab> vparcels_;  // the blocks villages lay as furniture, merged into
+                                          // prefabs_ AFTER place_prefabs so the POI scatter — camps
+                                          // especially — is spaced against exactly what it was before
+    std::size_t poi_count_ = 0;           // prefabs_ entries that are scattered POIs, not village
+                                          // parcels; the split the worldmap tally reads
     std::vector<std::vector<std::uint32_t>> by_chunk_;
     std::vector<std::vector<std::uint32_t>> by_prefab_chunk_;
     int spawn_tx_ = kHomeTx;
