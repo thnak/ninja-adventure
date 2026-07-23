@@ -84,6 +84,22 @@ void cross(std::vector<unsigned char>& px, int w, int h, int x, int y, int arm, 
     }
 }
 
+// A hollow rectangle in map-tile space, clipped to the image on both axes. Used to box a camp's
+// footprint — a box rather than a cross because a camp is an AREA, and the one question the map
+// answers about it is "does it overlap a road, a village or water?", which needs its extent shown.
+void box(std::vector<unsigned char>& px, int w, int h, int x0, int y0, int bw, int bh, Rgb c) {
+    for (int x = x0; x < x0 + bw; ++x) {
+        if (x < 0 || x >= w) continue;
+        if (y0 >= 0 && y0 < h) put(px, w, x, y0, c);
+        if (y0 + bh - 1 >= 0 && y0 + bh - 1 < h) put(px, w, x, y0 + bh - 1, c);
+    }
+    for (int y = y0; y < y0 + bh; ++y) {
+        if (y < 0 || y >= h) continue;
+        if (x0 >= 0 && x0 < w) put(px, w, x0, y, c);
+        if (x0 + bw - 1 >= 0 && x0 + bw - 1 < w) put(px, w, x0 + bw - 1, y, c);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -192,6 +208,13 @@ int main(int argc, char** argv) {
     }
     cross(px, w, h, (layout.spawn_tx() - ox) * scale, (layout.spawn_ty() - oy) * scale, 7 * scale,
           Rgb{90, 240, 240});
+    // Forest camps in magenta, boxed to their footprint. Loud on purpose: the question asked of them
+    // is whether they sit only in the forest band and clear of everything else.
+    for (const PlacedPrefab& pp : layout.prefabs()) {
+        const PrefabDef& def = kPrefabs[static_cast<int>(pp.id)];
+        box(px, w, h, (pp.tx - ox) * scale, (pp.ty - oy) * scale, def.w * scale, def.h * scale,
+            Rgb{240, 60, 240});
+    }
 
     Image img{};
     img.data = px.data();
@@ -246,6 +269,28 @@ int main(int argc, char** argv) {
     std::printf("  %-10s %8s %12s\n", "ring", "villages", "strongholds");
     for (int i = 0; i < kRingCount; ++i) {
         std::printf("  %-10s %8d %12d\n", kRingNames[i], by_ring[i], holds_by_ring[i]);
+    }
+
+    // Camps, tallied by the ring of their anchor. They are placed forest-only by construction, so a
+    // non-zero count in any other ring is a bug in `camp_fits`, not a curiosity — which is exactly
+    // why the tally is printed per ring rather than as a bare total.
+    int camps_by_ring[kRingCount] = {};
+    for (const PlacedPrefab& pp : layout.prefabs()) {
+        const PrefabDef& def = kPrefabs[static_cast<int>(pp.id)];
+        ++camps_by_ring[static_cast<int>(ring_of(seed, pp.tx + def.w / 2, pp.ty + def.h / 2))];
+    }
+    std::printf("\nforest camps: %zu total\n", layout.prefabs().size());
+    for (int i = 0; i < kRingCount; ++i) {
+        std::printf("  %-10s %8d\n", kRingNames[i], camps_by_ring[i]);
+    }
+    // Two anchors for `mmo_client --shot ... --at TX TY`, spaced apart so their variants differ.
+    if (!layout.prefabs().empty()) {
+        const PlacedPrefab& a = layout.prefabs().front();
+        const PlacedPrefab& b = layout.prefabs().back();
+        const PrefabDef& da = kPrefabs[static_cast<int>(a.id)];
+        const PrefabDef& db = kPrefabs[static_cast<int>(b.id)];
+        std::printf("  sample camps for --at:  (%d %d)  (%d %d)\n", a.tx + da.w / 2,
+                    a.ty + da.h / 2 + 5, b.tx + db.w / 2, b.ty + db.h / 2 + 5);
     }
     if (const Village* home = layout.nearest_village(layout.spawn_tx(), layout.spawn_ty())) {
         const double d = std::sqrt(

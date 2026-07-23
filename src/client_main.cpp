@@ -45,6 +45,8 @@ int main(int argc, char** argv) {
     int look_ring = -1;                 // --ring N: park the camera in biome ring N
     int stage_fight = 0;                // --fight N: drop N creatures on the player before the shot
     int look_door = -1;                 // --door N: step onto door N, which takes you inside it
+    int look_at_tx = -1;                // --at TX TY: park the camera on an arbitrary tile
+    int look_at_ty = -1;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--shot") == 0 && i + 2 < argc) {
             shot_seconds = std::atoi(argv[i + 1]);
@@ -61,6 +63,9 @@ int main(int argc, char** argv) {
             look_door = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--fight") == 0 && i + 1 < argc) {
             stage_fight = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--at") == 0 && i + 2 < argc) {
+            look_at_tx = std::atoi(argv[i + 1]);
+            look_at_ty = std::atoi(argv[i + 2]);
         }
     }
 
@@ -160,6 +165,14 @@ int main(int argc, char** argv) {
             const Stronghold& h = lay.strongholds()[static_cast<std::size_t>(look_hold)];
             world.teleport_player(me, kOverworld, static_cast<float>(h.tx),
                                   static_cast<float>(h.ty) + 6.0f);
+            world.sync_world();
+            player = view();
+        }
+        // An arbitrary tile, the same relative-teleport style as --village/--hold. This is what shoots
+        // a forest camp: mmo_worldmap prints camp coordinates, and --at drops the camera on one.
+        if (look_at_tx >= 0 && look_at_ty >= 0) {
+            world.teleport_player(me, kOverworld, static_cast<float>(look_at_tx) + 0.5f,
+                                  static_cast<float>(look_at_ty) + 0.5f);
             world.sync_world();
             player = view();
         }

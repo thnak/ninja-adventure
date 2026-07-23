@@ -145,16 +145,55 @@ bool g_atlas_ok = false;
 // Everything that STANDS on the ground, in one list. Terrain is not here — it is flat, so nothing
 // can be in front of it — and neither are combat flashes, which are meant to be read over the top
 // of whatever they hit.
-enum class SpriteKind : std::uint8_t { kCrop, kBuilding, kCreature, kShot, kBig, kPlayer };
+enum class SpriteKind : std::uint8_t {
+    kCrop,
+    kBuilding,
+    kCreature,
+    kShot,
+    kBig,
+    kPlayer,
+    // A single cell of a placed prefab (a forest camp's tent, crate or campfire). Unlike kBig it
+    // carries no enum id into the atlas — it points straight at the atlas rect its PrefabCell names,
+    // because prefab art is addressed by pixel rect, not by a game-concept slot.
+    kPrefabCell,
+};
 
 struct Sprite {
     float sort;     // world-pixel Y of this sprite's FEET; the sort key, see the sorted pass
     float x, y;     // world-pixel draw position
     const void* p;  // the source record for the kinds that have one, else null
-    std::uint16_t a;      // Big id, or player slot
+    std::uint16_t a;      // Big id, player slot, or (for kPrefabCell) the horizontal-flip flag
     std::uint16_t frame;  // animation frame, for creatures
     SpriteKind kind;
 };
+
+// The world-pixel rectangle one prefab cell occupies, with its mirror already resolved into the
+// position — `flip` says only whether to draw the SOURCE flipped. A prefab is authored at the atlas'
+// 16px resolution and scaled to the game's 32px tile, so `scale` below is always 2.
+struct PrefabQuad {
+    float x, y, w, h;
+};
+
+[[nodiscard]] inline PrefabQuad prefab_quad(const PrefabDef& def, const PlacedPrefab& pp,
+                                            const PrefabCell& c, bool mir) {
+    const int scale = kTilePx / kAtlasTile;  // 2: a 16px atlas tile fills one 32px game tile
+    // Godot origin=1 (centred) draws a cell bigger than one tile centred on that tile; origin<>1
+    // draws from the tile's top-left. This mirrors tools/build_atlas.py's own prefab_proof.
+    const int offx = c.centred ? (8 - c.pw / 2) : 0;
+    const int offy = c.centred ? (8 - c.ph / 2) : 0;
+    const int local_x = c.dx * kAtlasTile + offx;  // atlas px from the parcel's left edge
+    const int local_y = c.dy * kAtlasTile + offy;
+    const float w = static_cast<float>(c.pw * scale);
+    const float h = static_cast<float>(c.ph * scale);
+    const float parcel_left = static_cast<float>(pp.tx * kTilePx);
+    const float top = static_cast<float>(pp.ty * kTilePx) + static_cast<float>(local_y * scale);
+    // Mirrored: reflect the cell about the parcel's horizontal centre. The parcel is def.w tiles
+    // wide, so its atlas width is def.w*16 and the cell's mirrored left edge is (that - local_x - pw).
+    const float left = mir ? parcel_left + static_cast<float>(
+                                 (def.w * kAtlasTile - local_x - c.pw) * scale)
+                           : parcel_left + static_cast<float>(local_x * scale);
+    return PrefabQuad{left, top, w, h};
+}
 
 // A generated structure to its sprite. The two enums are kept in the same order on purpose (see the
 // note over BIG_MANIFEST in tools/build_atlas.py) so this is an offset rather than a switch that
@@ -361,6 +400,7 @@ struct RaylibBridge::Impl {
     std::vector<ChunkViewPtr> frame_views;
     std::vector<Sprite> frame_sprites;
     std::vector<std::uint32_t> frame_structures;
+    std::vector<std::uint32_t> frame_prefabs;
     PlayerViewPtr frame_players[kMaxPlayers];
 
     // This frame's view rect, one Terrain per TILE, with a one-tile skirt so that every drawn tile
@@ -451,6 +491,19 @@ struct RaylibBridge::Impl {
         const Rectangle dst{(static_cast<float>(tx) + 0.5f) * kTilePx,
                             static_cast<float>(ty + 1) * kTilePx, w, h};
         DrawTexturePro(atlas, src, dst, Vector2{w * 0.5f, h}, 0.0f, tint);
+    }
+
+    // One cell of a placed prefab, at `q` (its mirror already resolved into the position). A
+    // negative source width flips the ART left-to-right when the instance is mirrored. Floor cells
+    // (layers 0/1) call this directly during the flat pass; structure/prop cells go through the
+    // sorted list and are drawn by `draw_sprite`, which reconstructs the same rect from the cell.
+    void prefab_cell(const PrefabCell& c, const PrefabQuad& q, bool flip) const {
+        if (!atlas_ok) return;
+        const float pw = static_cast<float>(c.pw);
+        const Rectangle src{static_cast<float>(c.ax), static_cast<float>(c.ay), flip ? -pw : pw,
+                            static_cast<float>(c.ph)};
+        const Rectangle dst{q.x, q.y, q.w, q.h};
+        DrawTexturePro(atlas, src, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
     }
 
     // One ground tile: this tile's own terrain, blob-masked against its eight neighbours.
@@ -655,6 +708,16 @@ struct RaylibBridge::Impl {
             case SpriteKind::kBig:
                 big_at(static_cast<Big>(sp.a), sp.x, sp.y);
                 return;
+            case SpriteKind::kPrefabCell: {
+                // The gather stored the destination top-left in x,y and the flip in `a`; the atlas
+                // rect and on-screen size come from the cell itself.
+                const auto& c = *static_cast<const PrefabCell*>(sp.p);
+                const int scale = kTilePx / kAtlasTile;
+                prefab_cell(c, PrefabQuad{sp.x, sp.y, static_cast<float>(c.pw * scale),
+                                          static_cast<float>(c.ph * scale)},
+                            sp.a != 0);
+                return;
+            }
             case SpriteKind::kPlayer: {
                 // From the frame's own snapshot, not a second `players.load()`. Re-loading would be
                 // a fresh atomic read of a bus the simulation is still writing, so a player could
@@ -971,6 +1034,43 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                        static_cast<float>(st.ty + sz.h) * kTilePx, nullptr,
                        static_cast<std::uint16_t>(big_of_structure(st.kind)), 0,
                        SpriteKind::kBig});
+        }
+    }
+
+    // Forest camps. Same chunk gather + dedup as structures — a parcel straddling a border is listed
+    // by both chunks. FLOOR cells (layers 0/1) are drawn flat right here, so they land on top of the
+    // ground already painted and under everything the sorted pass draws; STRUCTURE and PROP cells
+    // (layers 2/3) join the y-sorted list, so the player walks in front of a tent and behind it. What
+    // a cell shows and where it blocks agree because both sides read the same `variant` through the
+    // same helpers in prefab_stamp.hpp.
+    if (im.layout != nullptr && player.map == kOverworld) {
+        std::vector<std::uint32_t>& vis = im.frame_prefabs;
+        vis.clear();
+        for (int cy = min_cy; cy <= max_cy + 1; ++cy) {
+            for (int cx = min_cx; cx <= max_cx; ++cx) {
+                const auto& list = im.layout->prefabs_in_chunk(cx, cy);
+                vis.insert(vis.end(), list.begin(), list.end());
+            }
+        }
+        std::sort(vis.begin(), vis.end());
+        vis.erase(std::unique(vis.begin(), vis.end()), vis.end());
+        const auto& all = im.layout->prefabs();
+        for (const std::uint32_t idx : vis) {
+            const PlacedPrefab& pp = all[idx];
+            const PrefabDef& def = kPrefabs[static_cast<int>(pp.id)];
+            const bool mir = prefab_mirrored(def, pp.variant);
+            for (std::uint16_t ci = 0; ci < def.cell_count; ++ci) {
+                const PrefabCell& c = def.cells[ci];
+                if (!prefab_cell_visible(def, c, pp.variant)) continue;
+                const PrefabQuad q = prefab_quad(def, pp, c, mir);
+                if (c.layer <= 1) {
+                    im.prefab_cell(c, q, mir);  // flat, under the sorted pass
+                } else {
+                    im.frame_sprites.push_back(Sprite{q.y + q.h, q.x, q.y, &c,
+                                                      static_cast<std::uint16_t>(mir ? 1 : 0), 0,
+                                                      SpriteKind::kPrefabCell});
+                }
+            }
         }
     }
 

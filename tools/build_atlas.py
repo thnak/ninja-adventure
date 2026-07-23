@@ -16,10 +16,14 @@ This is the role ARCHITECTURE.md reserves for Python: build-time tooling, never 
 
     tools/build_atlas.py            # writes assets/atlas.png + src/render/atlas_slots.hpp
 """
+import argparse
+import io
+import json
 import math
 import pathlib
 import re
 import sys
+import zipfile
 from pathlib import Path
 
 from PIL import Image
@@ -679,7 +683,350 @@ def extrude(cell: Image.Image, tile: Image.Image) -> None:
                 cell.putpixel((cx + dx, cy + dy), px)
 
 
+# --- Prefab parcels ----------------------------------------------------------
+# Phase 0's tools/import_prefabs.py cut hand-composed set-pieces out of the pack author's own
+# Village.tscn into assets/_gen/prefabs/*.json (schema: size, layers[Floor/FloorDetail/House/
+# Element], each cell an x/y parcel-tile anchor plus an sx/sy/w/h SOURCE-PIXEL rect into `sheet`).
+# This pass packs every distinct crop those cells reference into the atlas and emits
+# src/world/prefabs.hpp so the engine can stamp a parcel with zero flip flags and one texture bind.
+#
+# FLIPS ARE BAKED AT PACK TIME. A cell may set flip_h/flip_v/transpose; rather than carry those to
+# the renderer, the crop is transformed here and packed as a plain sprite, so a flipped variant is
+# simply a second atlas entry. The transform order matches import_prefabs.blit (transpose, then
+# flip_h, then flip_v) so a packed sprite is pixel-identical to that tool's preview.
+#
+# 16x16 crops go through the same grid+extrusion path as MANIFEST tiles: they tile the ground and
+# need the 1px extruded border so fractional-zoom sampling never bleeds a neighbour. Larger crops
+# (houses, tents, trees) pack like BIG/FX entries with no extrusion -- they are drawn at a fixed
+# size and have no seam to smear.
+PREFAB_DIR = ROOT / "assets" / "_gen" / "prefabs"
+
+# PrefabId is DERIVED, not hand-listed: every <stem>.json in PREFAB_DIR becomes an enum member, sorted
+# alphabetically by stem so the C++ order is a pure function of what import_prefabs.py cut. Adding a
+# parcel is one importer edit plus a re-run -- no second list to keep in step here.
+
+
+def _prefab_camel(stem: str) -> str:
+    """`camp_clearing` -> `CampClearing`; the enum member is `k` + this."""
+    return "".join(part.capitalize() for part in stem.split("_"))
+
+
+# Godot layer name -> prefabs.hpp layer index. 0=floor overlay, 1=floor detail, 2=structure
+# (blocks, y-sorts with actors), 3=prop (does not block). The pack's `Snow` layer (snow patches laid
+# over the ground in the frozen-pond parcel) is a floor-level overlay drawn between Floor and
+# FloorDetail, so it maps to 1: like every floor/detail cell it is always stamped (group 0), never an
+# optional cluster.
+PREFAB_LAYER = {"Floor": 0, "Snow": 1, "FloorDetail": 1, "House": 2, "Element": 3}
+
+# Whether a parcel may be stamped mirrored (flip_h) for variety. Default True; a parcel is False only
+# when it bakes in readable glyphs, because a mirrored letter reads instantly as wrong. Only
+# street_houses qualifies -- its DOJO building has the word "DOJO" painted on the sign. The other
+# parcels were checked against their _gen/prefabs/*.png previews: the fort's wall pieces are plain
+# planks and log caps (no glyphs), the cottage/market/camp signage is pictorial, so all stay True.
+MIRRORABLE = {
+    "street_houses": False,
+}
+
+
+def _prefab_groups(cells: list) -> int:
+    """Assign each cell its `group` and return the parcel's optional-group count.
+
+    group 0 is always stamped. Floor/FloorDetail cells (layer 0/1) are always group 0. House/Element
+    cells (layer 2/3) are split into connected components -- two connect when the Chebyshev distance
+    between their anchor tiles is <= 2 -- and each component becomes an optional group numbered 1..k
+    by its topmost-then-leftmost member. The one exception keeps a parcel's centerpiece from ever
+    vanishing: if EXACTLY ONE component holds a House-layer sprite >= 48px wide, that component stays
+    group 0. With zero or several such big-house components there is no single centerpiece, so every
+    component is optional.
+    """
+    for c in cells:
+        c["group"] = 0
+    opt = [i for i, c in enumerate(cells) if c["layer"] in (2, 3)]
+
+    parent = {i: i for i in opt}
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for ai, a in enumerate(opt):
+        for b in opt[ai + 1:]:
+            if (abs(cells[a]["dx"] - cells[b]["dx"]) <= 2
+                    and abs(cells[a]["dy"] - cells[b]["dy"]) <= 2):
+                parent[find(b)] = find(a)
+
+    comps: dict[int, list] = {}
+    for i in opt:
+        comps.setdefault(find(i), []).append(i)
+    comp_list = list(comps.values())
+
+    def is_big(members):
+        return any(cells[i]["layer"] == 2 and cells[i]["pw"] >= 48 for i in members)
+
+    big = [m for m in comp_list if is_big(m)]
+    forced0 = big[0] if len(big) == 1 else None
+
+    def key(members):
+        return min((cells[i]["dy"], cells[i]["dx"]) for i in members)
+
+    optional = sorted((m for m in comp_list if m is not forced0), key=key)
+    for gnum, members in enumerate(optional, start=1):
+        for i in members:
+            cells[i]["group"] = gnum
+    return len(optional)
+
+_PREFAB_SHEETS: dict[str, Image.Image] = {}
+
+
+def prefab_sheet(sheet_id: str) -> Image.Image:
+    """The texture a prefab cell's `sheet` string names.
+
+    import_prefabs.py writes either a GodotProject.zip member path (`GodotProject/World/...`) or a
+    pack-relative fallback (`Backgrounds/Tilesets/<name>`); read the zip member if present, else the
+    loose file under assets/_src/ninja/. Cached, since a handful of sheets back hundreds of cells.
+    """
+    if sheet_id in _PREFAB_SHEETS:
+        return _PREFAB_SHEETS[sheet_id]
+    with zipfile.ZipFile(GODOT_ZIP) as zf:
+        if sheet_id in set(zf.namelist()):
+            img = Image.open(io.BytesIO(zf.read(sheet_id))).convert("RGBA")
+        else:
+            loose = SRC / "ninja" / sheet_id
+            if not loose.exists():
+                raise FileNotFoundError(f"prefab sheet {sheet_id} is in neither {GODOT_ZIP.name} "
+                                        f"nor {loose}")
+            img = Image.open(loose).convert("RGBA")
+    _PREFAB_SHEETS[sheet_id] = img
+    return img
+
+
+def prefab_crop(key: tuple) -> Image.Image:
+    """One crop key -> its transformed RGBA sprite. Transform order matches import_prefabs.blit."""
+    sheet, sx, sy, w, h, fh, fv, tr = key
+    img = prefab_sheet(sheet).crop((sx, sy, sx + w, sy + h))
+    if tr:
+        img = img.transpose(Image.TRANSPOSE)
+    if fh:
+        img = img.transpose(Image.FLIP_LEFT_RIGHT)
+    if fv:
+        img = img.transpose(Image.FLIP_TOP_BOTTOM)
+    return img
+
+
+def _cell_key(c: dict) -> tuple:
+    return (c["sheet"], c["sx"], c["sy"], c["w"], c["h"],
+            c["flip_h"], c["flip_v"], c["transpose"])
+
+
+def pack_prefabs(atlas: Image.Image, anim_y: int, cell_px: int):
+    """Pack every distinct prefab crop into `atlas`; return (atlas, anim_y, prefabs).
+
+    `prefabs` is a list of dicts (stem, cpp, name, w, h, cells, blocks) in PREFAB_ORDER, or None if
+    there is nothing to pack -- a missing _gen/prefabs/ makes the whole pass a no-op so clean
+    checkouts still build.
+    """
+    if not PREFAB_DIR.exists():
+        print("  no assets/_gen/prefabs/ -- skipping prefab pass "
+              "(run tools/import_prefabs.py to populate it)")
+        return atlas, anim_y, None
+    docs = []
+    for path in sorted(PREFAB_DIR.glob("*.json")):
+        stem = path.stem
+        docs.append((stem, _prefab_camel(stem), json.loads(path.read_text())))
+    if not docs:
+        print("  assets/_gen/prefabs/ holds no prefab JSONs -- skipping prefab pass")
+        return atlas, anim_y, None
+
+    # Collect distinct crops in first-seen order, split into the grid (16x16, extruded) and big
+    # (everything larger, unextruded) pools. Deterministic order = reproducible atlas.
+    grid_order: list[tuple] = []
+    big_order: list[tuple] = []
+    seen: set[tuple] = set()
+    for _stem, _cpp, doc in docs:
+        for layer in doc["layers"]:
+            for c in layer["cells"]:
+                key = _cell_key(c)
+                if key in seen:
+                    continue
+                seen.add(key)
+                (grid_order if c["w"] == TILE and c["h"] == TILE else big_order).append(key)
+
+    pos: dict[tuple, tuple[int, int]] = {}
+
+    # Grid pool: COLS columns of extruded cells, stacked below whatever came before.
+    grid_rows = (len(grid_order) + COLS - 1) // COLS
+    need_w, need_h = COLS * cell_px, anim_y + grid_rows * cell_px
+    if need_w > atlas.width or need_h > atlas.height:
+        grown = Image.new("RGBA", (max(need_w, atlas.width), max(need_h, atlas.height)),
+                          (0, 0, 0, 0))
+        grown.paste(atlas, (0, 0))
+        atlas = grown
+    for i, key in enumerate(grid_order):
+        tile = prefab_crop(key)
+        cx, cy = (i % COLS) * cell_px, anim_y + (i // COLS) * cell_px
+        cell = Image.new("RGBA", (cell_px, cell_px), (0, 0, 0, 0))
+        extrude(cell, tile)
+        atlas.paste(cell, (cx, cy))
+        pos[key] = (cx + PAD, cy + PAD)
+    anim_y += grid_rows * cell_px
+
+    # Big pool: each crop on its own row with a 1px transparent border, like BIG_MANIFEST.
+    for key in big_order:
+        _s, _sx, _sy, w, h, _fh, _fv, _tr = key
+        region = prefab_crop(key)
+        block = Image.new("RGBA", (w + 2 * PAD, h + 2 * PAD), (0, 0, 0, 0))
+        block.paste(region, (PAD, PAD))
+        new_h = anim_y + h + 2 * PAD
+        if new_h > atlas.height or w + 2 * PAD > atlas.width:
+            grown = Image.new("RGBA", (max(w + 2 * PAD, atlas.width), max(new_h, atlas.height)),
+                              (0, 0, 0, 0))
+            grown.paste(atlas, (0, 0))
+            atlas = grown
+        atlas.paste(block, (0, anim_y))
+        pos[key] = (PAD, anim_y + PAD)
+        anim_y += h + 2 * PAD
+
+    # Resolve each prefab's cells against the packed positions and compute its block mask.
+    prefabs = []
+    for stem, cpp, doc in docs:
+        w, h = doc["size"]
+        if w > 32:  # block_rows is one u32 per row; a wider parcel would silently lose columns
+            print(f"  prefab {stem}: width {w} > 32, does not fit block_rows u32", file=sys.stderr)
+            return atlas, anim_y, None
+        blocks = [0] * h
+        cells = []
+        for layer in doc["layers"]:
+            li = PREFAB_LAYER[layer["name"]]
+            for c in layer["cells"]:
+                ax, ay = pos[_cell_key(c)]
+                cells.append({
+                    "dx": c["x"], "dy": c["y"], "layer": li,
+                    "ax": ax, "ay": ay, "pw": c["w"], "ph": c["h"],
+                    "centred": c["origin"] == 1,
+                })
+                if li == 2:  # a House sprite blocks its full footprint in tiles, clipped to rect
+                    tw = (c["w"] + TILE - 1) // TILE
+                    th = (c["h"] + TILE - 1) // TILE
+                    for ry in range(c["y"], min(c["y"] + th, h)):
+                        for rx in range(c["x"], min(c["x"] + tw, w)):
+                            blocks[ry] |= 1 << rx
+        group_count = _prefab_groups(cells)
+        cells.sort(key=lambda d: (d["layer"], d["dy"], d["dx"]))
+        prefabs.append({"stem": stem, "cpp": cpp, "name": doc.get("name", stem),
+                        "w": w, "h": h, "cells": cells, "blocks": blocks,
+                        "group_count": group_count, "mirrorable": MIRRORABLE.get(stem, True)})
+        print(f"  prefab {stem:<20} {w}x{h}  cells={len(cells)}  groups={group_count}  "
+              f"mirror={'yes' if MIRRORABLE.get(stem, True) else 'NO'}")
+    print(f"  packed {len(grid_order)} grid + {len(big_order)} big prefab crops")
+    return atlas, anim_y, prefabs
+
+
+def write_prefabs_header(prefabs) -> None:
+    """Emit src/world/prefabs.hpp from the packed prefab data.
+
+    PrefabId, the cell tables and the kPrefabs table are all DERIVED from whatever parcels
+    import_prefabs.py cut -- the enum members are the JSON stems, CamelCased and sorted.
+    """
+    ids = ", ".join(f"k{p['cpp']}" for p in prefabs)
+    lines = [
+        "// GENERATED by tools/build_atlas.py -- do not edit by hand.",
+        "//",
+        "// Hand-composed parcels lifted from the pack author's own Village.tscn (see",
+        "// tools/import_prefabs.py) with every referenced crop packed into assets/atlas.png. Flips",
+        "// are baked at pack time, so a cell carries only its atlas rect -- no flip flags.",
+        "//",
+        "// PrefabId is generated from the discovered parcel files, alphabetically by stem, so the",
+        "// enum is a pure function of _gen/prefabs/*.json.",
+        "#pragma once",
+        "",
+        "#include <cstdint>",
+        "",
+        "namespace mmo {",
+        "",
+        f"enum class PrefabId : std::uint8_t {{ {ids}, kCount }};",
+        "",
+        "// One drawn sprite inside a prefab. Layers: 0=floor overlay, 1=floor detail, 2=structure",
+        "// (blocks, y-sorts with actors), 3=prop (does not block, y-sorts with actors).",
+        "//",
+        "// `group` selects which cells a stamp draws. Group 0 is always drawn: it is the whole floor",
+        "// (layers 0/1) plus, when a parcel has a single big-house centerpiece, that centerpiece.",
+        "// Groups 1..group_count are optional clusters (connected House/Element props) a caller may",
+        "// keep or drop independently, so one parcel yields many arrangements.",
+        "struct PrefabCell {",
+        "    std::uint8_t dx, dy;        // anchor tile inside the prefab, 0..w-1 / 0..h-1",
+        "    std::uint8_t layer;         // 0..3 as above",
+        "    std::uint8_t group;         // 0 = always stamped; 1..group_count = optional cluster",
+        "    std::int16_t ax, ay;        // pixel rect in atlas.png",
+        "    std::uint8_t pw, ph;        // pixel size (16x16 for floor tiles; up to 64x48 for houses)",
+        "    bool centred;               // true: draw centred on the anchor cell (Godot origin=1)",
+        "};",
+        "",
+        "struct PrefabDef {",
+        "    const char* name;",
+        "    std::uint8_t w, h;                  // footprint in tiles",
+        "    const PrefabCell* cells;            // sorted: layer asc, then dy, then dx",
+        "    std::uint16_t cell_count;",
+        "    const std::uint32_t* block_rows;    // h entries; bit x set = tile (x,row) blocked (w <= 32)",
+        "    std::uint8_t group_count;           // number of optional cell groups (1..group_count)",
+        "    bool mirrorable;                    // safe to stamp flipped (no readable glyphs baked in)",
+        "};",
+        "",
+    ]
+    for p in prefabs:
+        lines.append(f"inline constexpr PrefabCell kPrefabCells_{p['cpp']}[] = {{")
+        for c in p["cells"]:
+            lines.append(f"    {{{c['dx']}, {c['dy']}, {c['layer']}, {c['group']}, "
+                         f"{c['ax']}, {c['ay']}, {c['pw']}, {c['ph']}, "
+                         f"{str(c['centred']).lower()}}},")
+        lines.append("};")
+        blk = ", ".join(f"0x{b:08x}u" for b in p["blocks"])
+        lines.append(f"inline constexpr std::uint32_t kPrefabBlocks_{p['cpp']}[] = {{{blk}}};")
+        lines.append("")
+    lines.append("inline constexpr PrefabDef kPrefabs[static_cast<int>(PrefabId::kCount)] = {")
+    for p in prefabs:
+        lines.append(f"    {{\"{p['name']}\", {p['w']}, {p['h']}, kPrefabCells_{p['cpp']}, "
+                     f"{len(p['cells'])}, kPrefabBlocks_{p['cpp']}, "
+                     f"{p['group_count']}, {str(p['mirrorable']).lower()}}},")
+    lines += [
+        "};",
+        "",
+        "}  // namespace mmo",
+        "",
+    ]
+    (ROOT / "src" / "world" / "prefabs.hpp").write_text("\n".join(lines))
+    print(f"{ROOT / 'src' / 'world' / 'prefabs.hpp'}")
+
+
+def prefab_proof(prefabs) -> None:
+    """Re-render each prefab PURELY from the packed data, sampling assets/atlas.png at 4x.
+
+    Compares against import_prefabs.py's own <name>.png: identical apart from parcel-edge cuts.
+    """
+    atlas = Image.open(ROOT / "assets" / "atlas.png").convert("RGBA")
+    scale = 4
+    for p in prefabs:
+        img = Image.new("RGBA", (p["w"] * TILE, p["h"] * TILE), (0, 0, 0, 0))
+        for c in p["cells"]:  # already sorted layer, dy, dx -> correct draw order
+            sprite = atlas.crop((c["ax"], c["ay"], c["ax"] + c["pw"], c["ay"] + c["ph"]))
+            px, py = c["dx"] * TILE, c["dy"] * TILE
+            if c["centred"]:
+                px += 8 - c["pw"] // 2
+                py += 8 - c["ph"] // 2
+            img.alpha_composite(sprite, (px, py))
+        out = img.resize((img.width * scale, img.height * scale), Image.NEAREST)
+        dest = PREFAB_DIR / f"{p['stem']}_atlas.png"
+        out.save(dest)
+        print(f"  proof {p['stem']:<14} -> {dest.name}")
+
+
 def main() -> int:
+    ap = argparse.ArgumentParser(description="Pack the game's sprites into one atlas.")
+    ap.add_argument("--prefab-proof", action="store_true",
+                    help="also re-render each prefab from the generated data for visual checking")
+    args = ap.parse_args()
+
     sheets = {}
     for key, (path, stride) in SHEETS.items():
         if not path.exists():
@@ -879,6 +1226,9 @@ def main() -> int:
         has_plain[name] = sd < 15.0
         print(f"  fill {name:9s} variant0 stddev {sd:5.1f}  -> "
               f"{'plain' if has_plain[name] else 'WHOLE-TILE MOTIF, will be mirrored'}")
+
+    # --- prefab parcels, stacked below the transition sets -----------------------------------
+    atlas, anim_y, prefabs = pack_prefabs(atlas, anim_y, cell_px)
 
     out_png = ROOT / "assets" / "atlas.png"
     atlas.save(out_png)
@@ -1106,6 +1456,11 @@ def main() -> int:
     print(f"{out_png}  {atlas.width}x{atlas.height}  "
           f"({len(entries)} tiles, {len(anims)} anims, {len(bigs)} big, {len(fxs)} fx)")
     print(f"{header}")
+
+    if prefabs:
+        write_prefabs_header(prefabs)
+        if args.prefab_proof:
+            prefab_proof(prefabs)
     return 0
 
 

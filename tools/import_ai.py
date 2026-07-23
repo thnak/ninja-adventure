@@ -161,6 +161,36 @@ def belongs(labels, ids, x, y):
     return False
 
 
+def fill_enclosed(a, close_bottom=True):
+    """Re-solidify sprite pixels that the background threshold punched out.
+
+    The sheet's backdrop is a dark (36,38,43), and any pixel in the art within FG_THRESH of it —
+    roof-tile shadow lines, window recesses, the doorway — reads as background. Measured on the
+    first import that was 6-26% of each sprite: transparent holes scattered through the roof, each
+    one then getting its own 1px outline stamped around it by rule 4.
+
+    A pixel is interior if the silhouette encloses it on all four sides. `close_bottom` treats the
+    doorway, which runs off the bottom edge and so has nothing below it, as enclosed anyway — the
+    pack fills its doorways solid rather than letting terrain show through.
+    """
+    w, h = a.size
+    ap = a.load()
+    rows = [[x for x in range(w) if ap[x, y]] for y in range(h)]
+    cols = [[y for y in range(h) if ap[x, y]] for x in range(w)]
+    lo_r = [(r[0], r[-1]) if r else None for r in rows]
+    lo_c = [(c[0], c[-1]) if c else None for c in cols]
+    for y in range(h):
+        if lo_r[y] is None:
+            continue
+        for x in range(lo_r[y][0], lo_r[y][1] + 1):
+            if ap[x, y] or lo_c[x] is None:
+                continue
+            top, bot = lo_c[x]
+            if y > top and (y < bot or close_bottom):
+                ap[x, y] = 255
+    return a
+
+
 def convert(img, mask, labels, box, ids, tiles_tall, ncolours):
     """Crop, cut, downsample and palette-lock one building. See the four rules in the docstring."""
     x0, y0, x1, y1 = box
@@ -172,6 +202,8 @@ def convert(img, mask, labels, box, ids, tiles_tall, ncolours):
         for x in range(crop.width):
             if mask[y0 + y][x0 + x] and belongs(labels, ids, x0 + x, y0 + y):
                 ap[x, y] = 255
+
+    a = fill_enclosed(a)                          # close the holes BEFORE the mask is downsampled
 
     w, h = tile_size(crop.width, crop.height, tiles_tall)
     small = crop.resize((w, h), Image.BOX)        # rule 2: area average, no ringing

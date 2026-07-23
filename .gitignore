@@ -18,3 +18,6 @@ accounts.dat
 # derived JSON, all regenerable, none of it source.
 tools/_study/
 tools/__pycache__/
+
+# CTest output when ctest is run from the repo root rather than build/.
+Testing/
