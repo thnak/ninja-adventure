@@ -9,6 +9,7 @@
 #include "raylib.h"
 #include "render/atlas_slots.hpp"
 #include "render/ui_sprites.hpp"
+#include "world/boss.hpp"
 
 namespace mmo {
 namespace {
@@ -150,6 +151,7 @@ enum class SpriteKind : std::uint8_t {
     kCrop,
     kBuilding,
     kCreature,
+    kBoss,  // the dojo boss (F3): a Creature, but drawn feet-anchored from its own pose sheets
     kShot,
     kBig,
     kPlayer,
@@ -281,9 +283,24 @@ inline constexpr int kTreeStride = 3;
         case CreatureKind::kBear: return Anim::kBear;
         case CreatureKind::kHare: return Anim::kRacoon;
         case CreatureKind::kChicken: return Anim::kChicken;
+        // The boss is never drawn through this path — draw_sprite intercepts kBoss and draws its own
+        // pose sheets feet-anchored — but the switch must be exhaustive.
+        case CreatureKind::kBoss: return Anim::kMobSkull;
         case CreatureKind::kCount: break;
     }
     return Anim::kMobSlime;
+}
+
+// game pose -> boss atlas sprite, Left/Right chosen by facing (the attack/charge sheets are drawn
+// as directional pairs, so no source flip). Idle/Walk/Hit are the front-facing ground poses.
+[[nodiscard]] Boss boss_sprite_of(BossPose pose, bool face_right) {
+    switch (pose) {
+        case BossPose::kIdle: return Boss::kIdle;
+        case BossPose::kWalk: return Boss::kWalk;
+        case BossPose::kAttack: return face_right ? Boss::kAttackRight : Boss::kAttackLeft;
+        case BossPose::kCharge: return face_right ? Boss::kChargeRight : Boss::kChargeLeft;
+    }
+    return Boss::kIdle;
 }
 
 [[nodiscard]] Fx fx_of_effect(EffectKind k) {
@@ -452,6 +469,9 @@ struct RaylibBridge::Impl {
     std::vector<std::uint32_t> frame_structures;
     std::vector<std::uint32_t> frame_prefabs;
     PlayerViewPtr frame_players[kMaxPlayers];
+    // The boss (F3) in the player's current room, if any — a raw pointer into a frame_view kept alive
+    // by `frame_views`. Set during the gather, read by `draw_boss_bar` after the world is drawn.
+    const Creature* frame_boss = nullptr;
 
     // This frame's view rect, one Terrain per TILE, with a one-tile skirt so that every drawn tile
     // can read all eight of its neighbours without falling off the edge.
@@ -590,6 +610,101 @@ struct RaylibBridge::Impl {
         const Rectangle dst{(static_cast<float>(tx) + 0.5f) * kTilePx,
                             static_cast<float>(ty + 1) * kTilePx, w, h};
         DrawTexturePro(atlas, src, dst, Vector2{w * 0.5f, h}, 0.0f, tint);
+    }
+
+    // The dojo BOSS (F3), feet-anchored. `cx` is the boss's world-pixel centre-x, `feet_y` the
+    // world-pixel Y of its feet (its sort key). The pose sheets differ in height (48px ground poses,
+    // 96px raised-sword ones) and in where the feet sit inside the cell, so the atlas carries a
+    // per-pose `foot` (ground line from the cell top) and this places the cell so that line lands on
+    // `feet_y`. It reuses F2's read exactly: the red wind-up pulse and the smoke puff (the smoke is a
+    // published Effect, drawn by the effects sweep like any creature's), plus a white hit flash.
+    static constexpr float kBossScale = 1.9f;  // 96px cell -> ~4-tile-wide giant at kTilePx=32
+
+    void draw_boss(const Creature& m, float cx, float feet_y) const {
+        if (!atlas_ok) return;
+        const bool face_right = m.facing == Facing::kRight;
+        // Client-side hit feedback, exactly as a creature gets: flash white and swap to the Hit pose
+        // for the length of the flash, and a red wind-up pulse while it telegraphs.
+        const auto tk = creature_tracks.find(m.id);
+        const float flash = (tk != creature_tracks.end()) ? tk->second.flash : 0.0f;
+        const float fi = std::clamp(flash / 0.15f, 0.0f, 1.0f);
+        const bool hurt = flash > 0.05f;
+        const Boss sprite =
+            hurt ? Boss::kHit : boss_sprite_of(static_cast<BossPose>(m.boss_pose), face_right);
+        const AtlasBoss& b = boss_of(sprite);
+        // A 1px micro-shake while winding up, 3px when struck — the giant's version of a flinch.
+        const float wobble = (static_cast<int>(GetTime() * 40.0) & 1) ? 1.0f : -1.0f;
+        float shake = 0.0f;
+        if (m.windup > 0) shake = wobble * 1.5f;
+        if (hurt) shake = wobble * 3.0f;
+        // Animate: the ground poses cycle on the wall clock; a wind-up/dash steps through its slash
+        // frames a touch faster so the raised-sword read is unmistakable in a still.
+        const int frame = static_cast<int>(GetTime() * (m.windup > 0 || m.boss_pose ==
+                                                        static_cast<std::uint8_t>(BossPose::kCharge)
+                                                            ? 10.0
+                                                            : 5.0));
+        const AtlasRect r = boss_frame(sprite, frame);
+        const float w = static_cast<float>(b.w) * kBossScale;
+        const float h = static_cast<float>(b.h) * kBossScale;
+        const float top = feet_y - static_cast<float>(b.foot) * kBossScale;
+        const float left = cx + shake - w * 0.5f;
+        // A big soft shadow, kept PUT while the body shakes (a flinch, not a slide).
+        DrawEllipse(static_cast<int>(cx), static_cast<int>(feet_y - 2.0f), kTilePx * 0.9f,
+                    kTilePx * 0.34f, Color{0, 0, 0, 90});
+        const Rectangle src{static_cast<float>(r.x), static_cast<float>(r.y),
+                            static_cast<float>(b.w), static_cast<float>(b.h)};
+        const Rectangle dst{left, top, w, h};
+        DrawTexturePro(atlas, src, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        // The red wind-up pulse (F2), additive so it shows on the boss's own red without darkening it.
+        if (m.windup > 0 && !hurt) {
+            const float pulse = 0.82f + 0.18f * std::sin(static_cast<float>(GetTime()) * 12.0f);
+            const auto a = static_cast<unsigned char>(pulse * 210.0f);
+            BeginBlendMode(BLEND_ADDITIVE);
+            DrawTexturePro(atlas, src, dst, Vector2{0.0f, 0.0f}, 0.0f, Color{255, 45, 30, a});
+            EndBlendMode();
+        }
+        if (hurt) {
+            BeginBlendMode(BLEND_ADDITIVE);
+            const auto a = static_cast<unsigned char>(fi * 255.0f);
+            DrawTexturePro(atlas, src, dst, Vector2{0.0f, 0.0f}, 0.0f, Color{255, 255, 255, a});
+            EndBlendMode();
+        }
+    }
+
+    // The boss HP bar: a room-fight banner at the top-centre of the SCREEN while the player shares a
+    // room with a living boss. Drawn in screen space (after EndMode2D) and in its OWN function on the
+    // world-draw side, deliberately NOT in the HUD shell (screens.cpp) — so the merge with the HUD
+    // work happening there stays clean. The Faceset icon + the name "Dojo Master" name the fight.
+    void draw_boss_bar(int screen_w) const {
+        if (!atlas_ok || frame_boss == nullptr || frame_boss->hp <= 0) return;
+        const Creature& m = *frame_boss;
+        const int bw = std::clamp(screen_w * 2 / 5, 320, 720);
+        const int bh = 20;
+        const int x = (screen_w - bw) / 2;
+        const int y = 16;
+        const int face = 40;  // the portrait square to the left of the bar
+        // The portrait, boxed.
+        const AtlasBoss& fs = boss_of(Boss::kFace);
+        DrawRectangle(x - face - 8, y - 4, face + 4, face + 4, Color{18, 12, 12, 210});
+        DrawTexturePro(atlas,
+                       Rectangle{static_cast<float>(fs.x), static_cast<float>(fs.y),
+                                 static_cast<float>(fs.w), static_cast<float>(fs.h)},
+                       Rectangle{static_cast<float>(x - face - 6), static_cast<float>(y - 2),
+                                 static_cast<float>(face), static_cast<float>(face)},
+                       Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        DrawRectangleLines(x - face - 8, y - 4, face + 4, face + 4, Color{200, 60, 50, 230});
+        // The bar: dark trough, red fill, thin frame, name above.
+        DrawRectangle(x - 2, y - 2, bw + 4, bh + 4, Color{18, 12, 12, 210});
+        DrawRectangle(x, y, bw, bh, Color{40, 16, 16, 255});
+        const int fill = m.max_hp > 0 ? std::max(0, (m.hp * bw) / m.max_hp) : 0;
+        DrawRectangle(x, y, fill, bh, Color{200, 50, 45, 255});
+        DrawRectangle(x, y, fill, bh / 3, Color{240, 110, 90, 200});  // a highlight band
+        DrawRectangleLines(x, y, bw, bh, Color{220, 90, 80, 240});
+        DrawText("DOJO MASTER", x + 6, y - 15, 14, Color{245, 225, 210, 255});
+        char hp[32];
+        std::snprintf(hp, sizeof hp, "%d / %d", m.hp, m.max_hp);
+        const int tw = MeasureText(hp, 12);
+        DrawText(hp, x + bw - tw - 6, y + 4, 12, Color{255, 235, 225, 255});
     }
 
     // One cell of a placed prefab, at `q` (its mirror already resolved into the position). A
@@ -837,6 +952,13 @@ struct RaylibBridge::Impl {
                                   static_cast<int>(sp.y) - kTilePx / 2 - 9, 3, 5,
                                   Color{255, 90, 60, 230});
                 }
+                return;
+            }
+            case SpriteKind::kBoss: {
+                // The dojo boss (F3), feet-anchored from its own pose sheets. sp.x is its centre-x,
+                // sp.y its feet — set by the gather so the y-sort places it correctly among trees,
+                // the room and the player.
+                draw_boss(*static_cast<const Creature*>(sp.p), sp.x, sp.y);
                 return;
             }
             case SpriteKind::kShot: {
@@ -1099,6 +1221,7 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
     // into their creature and building vectors.
     im.frame_views.clear();
     im.frame_sprites.clear();
+    im.frame_boss = nullptr;
     for (PlayerViewPtr& slot : im.frame_players) slot.reset();
     // One extra vertex past each edge: a tile at the view's right edge reads the corner beyond it.
     im.active_room = (player.map == kOverworld)
@@ -1140,6 +1263,28 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                                                   0.0f, &b, 0, 0, SpriteKind::kBuilding});
             }
             for (const Creature& m : v->creatures) {
+                // The boss (F3) is a Creature but is drawn feet-anchored from its own pose sheets, so
+                // it goes into the sorted list as its own kind — feet at (m.y+0.5) tiles, centre-x at
+                // m.x — and it feeds the top-of-screen HP bar when it shares the player's room. It
+                // still keeps a hit-flash track like any creature (read in draw_boss).
+                if (m.kind == CreatureKind::kBoss) {
+                    const float feet = (m.y + 0.5f) * kTilePx;
+                    im.frame_sprites.push_back(
+                        Sprite{feet, m.x * kTilePx, feet, &m, 0, 0, SpriteKind::kBoss});
+                    ++drawn_creatures;
+                    if (player.map != kOverworld && im.active_room >= 0 &&
+                        room_index_at(static_cast<int>(m.x), static_cast<int>(m.y)) ==
+                            im.active_room) {
+                        im.frame_boss = &m;
+                    }
+                    Impl::CreatureTrack& tb = im.creature_tracks[m.id];
+                    if (!tb.seen && tb.hp != 0 && m.hp < tb.hp) tb.flash = 0.15f;
+                    tb.hp = m.hp;
+                    tb.x = m.x;
+                    tb.y = m.y;
+                    tb.seen = true;
+                    continue;
+                }
                 // Offsetting the frame by the id keeps a whole wave from stepping in unison, which
                 // reads as one organism rather than a crowd.
                 const auto frame = static_cast<std::uint16_t>((v->tick / 3 + m.id) & 0xFF);
@@ -1567,6 +1712,11 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
     } else if (player.live() && player.hp * 4 < player.max_hp) {
         DrawRectangle(0, 0, im.width, im.height, Color{140, 20, 20, 40});
     }
+
+    // The boss HP bar (F3), top-centre, whenever the player shares a room with a living boss. In its
+    // own function on this side of the seam, NOT in the HUD shell, so it composes over the finished
+    // world without reaching into screens.cpp's draw_hud.
+    im.draw_boss_bar(im.width);
 
     // NO HUD HERE. The world renderer draws the world; the shell (src/ui/screens.cpp) draws
     // everything a player reads. Keeping them apart is what let the engine counters move off the

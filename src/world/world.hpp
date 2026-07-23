@@ -96,6 +96,7 @@ public:
 
         build_players();
         build_chunks();
+        build_bosses();
         build_director();
     }
 
@@ -611,6 +612,23 @@ private:
                     chunk_acts_.push_back(std::move(act));
                 }
             }
+        }
+    }
+
+    // Plant a dojo boss in every interior room a tier>=3 village's DOJO door leads into (F3). Each
+    // room lives inside one interior chunk (a room block is 16 tiles, well within a 32-tile chunk),
+    // and `dojo_rooms` is derived from the layout alone — so this needs nothing from the simulation
+    // and, like everything else here, runs once before the first tick. Re-publish so the boss is in
+    // the very first view (the build loop published these chunks empty a moment ago).
+    void build_bosses() {
+        for (std::uint32_t room : layout_->dojo_rooms()) {
+            const int bx = room_block_x(static_cast<int>(room));
+            const int by = room_block_y(static_cast<int>(room));
+            const ChunkCoord cc = chunk_of(kInterior, static_cast<float>(bx + kRoomX0),
+                                           static_cast<float>(by + kRoomY0));
+            ChunkActor& ch = *chunks_[static_cast<std::size_t>(chunk_index(cc))];
+            ch.add_boss(room);
+            ch.publish_now();
         }
     }
 

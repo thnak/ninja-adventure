@@ -80,6 +80,7 @@ int main(int argc, char** argv) {
     bool stage_walk = false;            // --walk: keep the player moving so a shot catches mid-stride
     int dev_level = -1;                 // --dev [N]: every school to level N at sign-in (default 8)
     int look_door = -1;                 // --door N: step onto door N, which takes you inside it
+    const char* dojo_mode = nullptr;    // --dojo [idle|windup|attack]: enter a dojo boss room (F3)
     int look_at_tx = -1;                // --at TX TY: park the camera on an arbitrary tile
     int look_at_ty = -1;
     const char* connect_addr = nullptr;  // --connect HOST:PORT: prefill the login screen's join mode
@@ -97,6 +98,9 @@ int main(int argc, char** argv) {
             shot_screen = argv[i + 1];  // menu | journal | character | paused | login
         } else if (std::strcmp(argv[i], "--door") == 0 && i + 1 < argc) {
             look_door = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--dojo") == 0) {
+            // Optional mode word (idle/windup/attack); bare --dojo means idle.
+            dojo_mode = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[++i] : "idle";
         } else if (std::strcmp(argv[i], "--fight") == 0 && i + 1 < argc) {
             stage_fight = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--ability") == 0) {
@@ -379,6 +383,74 @@ int main(int argc, char** argv) {
                 world.sync_world();
             }
         }
+
+        // The dojo boss (F3). Step through the REAL door portal into a boss room, then park the shot
+        // at the requested moment: `idle` catches the giant standing under its HP bar; `windup` a
+        // committed attack (red pulse + smoke puff) with the player dodged aside; `attack` the same
+        // raised-sword pose with the player square in front of it. The staging steps the world itself
+        // and the render loop's accumulator is frozen for it (see world_frozen) so the caught pose
+        // holds through the screenshot, exactly like --telegraph.
+        if (dojo_mode != nullptr && slot >= 0 && !lay.dojo_rooms().empty()) {
+            const std::uint32_t room = lay.dojo_rooms().front();
+            const Door& dd = lay.doors()[static_cast<std::size_t>(room)];
+            world.teleport_player(me, kOverworld, static_cast<float>(dd.tile & 0xFFFFu) + 0.5f,
+                                  static_cast<float>(dd.tile >> 16) + 0.5f);
+            world.sync_world();
+            const int bx = room_block_x(static_cast<int>(room));
+            const int by = room_block_y(static_cast<int>(room));
+            const ChunkCoord bc = chunk_of(kInterior, static_cast<float>(bx + kRoomX0),
+                                           static_cast<float>(by + kRoomY0));
+            const auto read_boss = [&](Creature& out) -> bool {
+                ChunkViewPtr v = world.bus().load(bc);
+                if (!v) return false;
+                for (const Creature& c : v->creatures)
+                    if (c.kind == CreatureKind::kBoss) { out = c; return true; }
+                return false;
+            };
+            const bool windup = std::strcmp(dojo_mode, "windup") == 0;
+            const bool attack = std::strcmp(dojo_mode, "attack") == 0;
+            Creature b{};
+            if (windup || attack) {
+                // Pin the player two tiles from the boss (in reach, so it attacks rather than charges)
+                // and step until it commits to an attack wind-up.
+                bool caught = false;
+                for (int i = 0; i < 50 && !caught; ++i) {
+                    if (!read_boss(b)) break;
+                    world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+                    world.teleport_player(me, kInterior, b.x - 2.0f, b.y);
+                    world.step(kTickMs);
+                    world.sync_world();
+                    if (read_boss(b) && b.windup > 0 &&
+                        b.boss_pose == static_cast<std::uint8_t>(BossPose::kAttack)) {
+                        caught = true;
+                    }
+                }
+                if (windup && read_boss(b)) {
+                    // The dodge: hop out of reach but stay in the room, so the frame reads as the
+                    // player having slipped the blow while the wind-up still glows.
+                    world.teleport_player(me, kInterior, static_cast<float>(bx + kRoomX0) + 0.5f,
+                                          static_cast<float>(by + kRoomY0 + kRoomH - 1) + 0.5f);
+                    world.sync_world();
+                }
+            } else {
+                // idle: stand a few tiles back so the whole giant frames under its bar, and freeze on
+                // an idle frame (the boss idles between actions and while recovering from a blow).
+                bool idle = false;
+                for (int i = 0; i < 80 && !idle; ++i) {
+                    world.step(kTickMs);
+                    world.sync_world();
+                    if (read_boss(b) && b.windup == 0 &&
+                        b.boss_pose == static_cast<std::uint8_t>(BossPose::kIdle)) {
+                        idle = true;
+                    }
+                }
+                if (read_boss(b)) {
+                    world.teleport_player(me, kInterior, b.x, b.y + 3.5f);
+                    world.sync_world();
+                }
+            }
+            player = view();
+        }
     }
     int frames = 0;
 
@@ -512,7 +584,7 @@ int main(int argc, char** argv) {
         // drift out of its wind-up. Freezing it makes these staged shots deterministic.
         const bool world_frozen =
             shell.screen == ui::Screen::kMainMenu || shell.screen == ui::Screen::kLogin ||
-            ((stage_flash || stage_telegraph) && shot_path != nullptr);
+            ((stage_flash || stage_telegraph || dojo_mode != nullptr) && shot_path != nullptr);
         if (world_frozen) accumulator = 0.0f;
         accumulator += dt;
         int steps = 0;

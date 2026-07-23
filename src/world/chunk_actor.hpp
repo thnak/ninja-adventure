@@ -34,6 +34,7 @@
 #include "quark/core/actor_ref.hpp"
 #include "quark/core/placement_policies.hpp"
 
+#include "world/boss.hpp"
 #include "world/flow_field.hpp"
 #include "world/player_actor.hpp"
 #include "world/protocol.hpp"
@@ -41,6 +42,28 @@
 #include "world/tiles.hpp"
 
 namespace mmo {
+
+// The scripted BOSS's per-room state (F3). This is the "parallel slot" half of the boss: the
+// damageable BODY is a Creature (kBoss) living in `creatures_` so every player verb hits it
+// unchanged, and everything a Creature has no room for — its spawn/leash point, the room rectangle it
+// is clamped to, the charge cooldown and committed-dash state, the respawn timer that must outlive
+// the body — lives here, keyed to the body by id. One BossState per dojo room a chunk owns.
+struct BossState {
+    std::uint32_t room = 0;       // interior room index this boss guards
+    std::uint16_t spawn_tx = 0;   // where it spawns and leashes back to (room top-centre)
+    std::uint16_t spawn_ty = 0;
+    float cx0 = 0.0f, cy0 = 0.0f;  // the room floor rectangle its FEET are clamped inside, in tiles
+    float cx1 = 0.0f, cy1 = 0.0f;
+    std::uint32_t body = 0;       // creature id of the body in creatures_, 0 while dead
+    bool alive = false;
+    std::uint16_t respawn_timer = 0;  // counts down while dead; at 0 the boss respawns
+    std::uint16_t no_target = 0;      // ticks with no player in the room — the leash counter
+    std::uint8_t charge_cd = 0;       // ticks until it may charge again
+    std::uint8_t charging = 0;        // ticks of the committed dash left, 0 = not dashing
+    bool winding_charge = false;      // the current wind-up will begin a charge, not land a blow
+    bool dash_hit = false;            // the current dash has already connected (one hit per dash)
+    float charge_dx = 0.0f, charge_dy = 0.0f;  // committed dash direction (unit)
+};
 
 struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<1>,
                                  quark::DrainBudget<64>, quark::Placement<quark::HashById>> {
@@ -90,7 +113,9 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
 
         const bool empty = creatures_.empty() && crops_.empty() && buildings_.empty() &&
                            shots_.empty() && effects_.empty() && zones_.empty();
-        if (empty) {
+        // A chunk that owns a boss never takes the idle fast path: even while its boss is DEAD (its
+        // body gone from creatures_) the respawn timer has to tick down, and that is step_bosses'.
+        if (empty && bosses_.empty()) {
             if (tick_ % kIdlePublish == 0) publish();
             return;
         }
@@ -103,6 +128,7 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         step_projectiles();
         step_effects();
         reap_dead();
+        step_bosses();  // after reap: a boss killed this tick is already gone, so its slot respawns
 
         // Simulated always, published only when someone could be looking.
         if (!players_.empty() || tick_ % kIdlePublish == 0) publish();
@@ -489,6 +515,33 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         buildings_.push_back(b);
     }
 
+    // Wire a dojo boss (F3) into this chunk, once at bring-up. `room` is an interior room index whose
+    // door a village's DOJO leads into (WorldLayout::dojo_rooms); the chunk that owns that room's
+    // block is the one this is called on. The boss stands at the room's top-centre and is clamped to
+    // the room floor forever; the player enters at the bottom-centre door, so the fight opens with the
+    // whole room between them — long enough for the boss's opening charge to read. The body is spawned
+    // here so it is drawn from the first frame; a later death respawns it via step_bosses.
+    void add_boss(std::uint32_t room) noexcept {
+        BossState b{};
+        b.room = room;
+        const int bx = room_block_x(static_cast<int>(room));
+        const int by = room_block_y(static_cast<int>(room));
+        // Floor rectangle (see tiles.hpp kRoom* constants), inset one tile from the side walls so the
+        // giant does not clip into a corner. The feet clamp uses tile centres (+0.5).
+        const int fx0 = bx + kRoomX0 + 1;
+        const int fx1 = bx + kRoomX0 + kRoomW - 2;
+        const int fy0 = by + kRoomY0;
+        const int fy1 = by + kRoomY0 + kRoomH - 1;
+        b.cx0 = static_cast<float>(fx0) + 0.5f;
+        b.cx1 = static_cast<float>(fx1) + 0.5f;
+        b.cy0 = static_cast<float>(fy0) + 0.5f;
+        b.cy1 = static_cast<float>(fy1) + 0.5f;
+        b.spawn_tx = static_cast<std::uint16_t>(bx + kRoomX0 + kRoomW / 2);
+        b.spawn_ty = static_cast<std::uint16_t>(by + kRoomY0 + 1);
+        bosses_.push_back(b);
+        spawn_boss(bosses_.back());
+    }
+
     [[nodiscard]] bool owns(std::uint16_t tx, std::uint16_t ty) const noexcept {
         return tx / kChunkTiles == coord.cx && ty / kChunkTiles == coord.cy;
     }
@@ -646,6 +699,12 @@ private:
 
         for (std::size_t i = creatures_.size(); i-- > 0;) {
             Creature& c = creatures_[i];
+            // The boss is a Creature so the player's verbs hit it, but its BRAIN is not the generic
+            // creature AI: it never uses the flow field, never wanders, never migrates (it is clamped
+            // to its room), and it decides through boss_policy. All of that is step_bosses' job — the
+            // generic loop simply leaves it alone. (step_status still ticks its burn/shock/freeze, and
+            // the player-verb handlers still strike it, exactly as for any creature.)
+            if (c.kind == CreatureKind::kBoss) continue;
             const CreatureStats st = stats_of(c.kind);
 
             if (c.attack_cd > 0) --c.attack_cd;
@@ -873,6 +932,331 @@ private:
         }
     }
 
+    // --- the boss (F3) ----------------------------------------------------------------------------
+    // The boss body is a Creature (kBoss) in `creatures_`, so the player's verbs, combos, status and
+    // stun all reach it through the ordinary handlers. What runs here is only the parts that are NOT
+    // a normal creature: the scripted brain, the committed charge dash, the room clamp, the leash and
+    // the respawn. All of it drives the SAME wind-up/strike machinery a creature uses (Creature::
+    // windup for the telegraph, HurtPlayer for the blow), so a boss reads exactly like a big creature.
+    void step_bosses() noexcept {
+        if (bosses_.empty()) return;
+        Rng rng(chunk_key(coord) * 0xB055'0F17'11EEull + tick_);
+        for (BossState& b : bosses_) {
+            Creature* body = find_creature(b.body);
+            if (b.alive && (body == nullptr || body->hp <= 0)) {
+                // Killed (reaped this tick, or a DoT took the last point): begin the respawn wait.
+                b.alive = false;
+                b.body = 0;
+                b.respawn_timer = kBossRespawnTicks;
+                continue;
+            }
+            if (!b.alive) {
+                if (b.respawn_timer > 0) {
+                    --b.respawn_timer;
+                    continue;
+                }
+                spawn_boss(b);
+                continue;
+            }
+            step_boss_ai(*body, b, rng);
+        }
+    }
+
+    // Create (or recreate) a boss body at its spawn tile. Stats are the FLAT design numbers, NOT run
+    // through make_creature's ring scaling — a dojo boss is 700 HP wherever on the interior map its
+    // room happens to fall, which is the whole point of a scripted set-piece over an ambient monster.
+    void spawn_boss(BossState& b) noexcept {
+        Creature c{};
+        c.id = ++next_id_ | (static_cast<std::uint32_t>(chunk_key(coord)) << 12);
+        c.x = static_cast<float>(b.spawn_tx) + 0.5f;
+        c.y = static_cast<float>(b.spawn_ty) + 0.5f;
+        c.max_hp = kBossMaxHp;
+        c.hp = kBossMaxHp;
+        c.damage = kBossDamage;
+        c.kind = CreatureKind::kBoss;
+        c.disposition = Disposition::kHostile;
+        c.facing = Facing::kDown;
+        c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
+        creatures_.push_back(c);
+        b.body = c.id;
+        b.alive = true;
+        b.respawn_timer = 0;
+        b.no_target = 0;
+        b.charge_cd = 0;
+        b.charging = 0;
+        b.winding_charge = false;
+        b.dash_hit = false;
+    }
+
+    [[nodiscard]] Creature* find_creature(std::uint32_t id) noexcept {
+        if (id == 0) return nullptr;
+        for (Creature& c : creatures_) {
+            if (c.id == id) return &c;
+        }
+        return nullptr;
+    }
+
+    void step_boss_ai(Creature& c, BossState& b, Rng& rng) noexcept {
+        (void)rng;
+        if (b.charge_cd > 0) --b.charge_cd;
+        if (c.attack_cd > 0) --c.attack_cd;
+
+        // Stun cancels a committed wind-up or dash, exactly as it does for any creature (F2).
+        if (c.stun_ticks > 0) {
+            --c.stun_ticks;
+            c.windup = 0;
+            c.windup_target = 0;
+            b.charging = 0;
+            b.winding_charge = false;
+            c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
+            return;
+        }
+
+        // A committed wind-up: freeze and telegraph (Creature::windup drives F2's red pulse + smoke),
+        // and resolve the tick it reaches zero — an attack lands, a charge begins its dash.
+        if (c.windup > 0) {
+            c.boss_pose = static_cast<std::uint8_t>(b.winding_charge ? BossPose::kCharge
+                                                                     : BossPose::kAttack);
+            if (--c.windup == 0) boss_resolve(c, b);
+            return;
+        }
+
+        // A committed dash: fly toward the point the target stood at commit, damaging on contact,
+        // wall-clamped to the room.
+        if (b.charging > 0) {
+            boss_dash(c, b);
+            return;
+        }
+
+        // Idle: build the observation and let the policy decide. THIS is the RL seam — the chunk
+        // gathers the obs, calls boss_policy, and executes the action through the same machinery
+        // below; F4 swaps the policy body and none of this moves.
+        const PlayerBeacon* target = boss_target(b);
+        if (target == nullptr) {
+            // Nobody in the room. Drift back to the post, and after the leash window reset to full —
+            // fleeing through the door "resets the boss", so a player cannot chip it down across trips.
+            c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
+            if (++b.no_target >= kBossLeashTicks) {
+                boss_reset(c, b);
+            } else {
+                const float sx = static_cast<float>(b.spawn_tx) + 0.5f;
+                const float sy = static_cast<float>(b.spawn_ty) + 0.5f;
+                if (std::abs(sx - c.x) > 0.2f || std::abs(sy - c.y) > 0.2f) {
+                    boss_move(c, b, sx, sy, kBossApproachSpeed);
+                    c.boss_pose = static_cast<std::uint8_t>(BossPose::kWalk);
+                }
+            }
+            return;
+        }
+        b.no_target = 0;
+
+        BossObs o{};
+        o.dx = static_cast<std::int16_t>(std::lround(target->x - c.x));
+        o.dy = static_cast<std::int16_t>(std::lround(target->y - c.y));
+        o.hp_frac = static_cast<std::uint16_t>(c.max_hp > 0 ? (c.hp * 1000) / c.max_hp : 0);
+        o.attack_cd = c.attack_cd;
+        o.charge_cd = b.charge_cd;
+        o.winding_up = c.windup > 0;
+        const BossAction a = boss_policy(o);
+
+        switch (a.kind) {
+            case BossActionKind::kHold:
+                c.facing = facing_of(target->x - c.x, target->y - c.y);
+                c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
+                break;
+            case BossActionKind::kApproach:
+                boss_move(c, b, target->x, target->y, kBossApproachSpeed);
+                c.boss_pose = static_cast<std::uint8_t>(BossPose::kWalk);
+                break;
+            case BossActionKind::kAttackLeft:
+                c.facing = Facing::kLeft;
+                boss_commit(c, b, *target, /*charge*/ false);
+                break;
+            case BossActionKind::kAttackRight:
+                c.facing = Facing::kRight;
+                boss_commit(c, b, *target, /*charge*/ false);
+                break;
+            case BossActionKind::kCharge:
+                c.facing = (target->x < c.x) ? Facing::kLeft : Facing::kRight;
+                boss_commit(c, b, *target, /*charge*/ true);
+                break;
+        }
+    }
+
+    // Commit to a telegraphed action. Freeze for the wind-up (the biggest telegraph in the game),
+    // remember WHO and WHERE, and throw the smoke puff F2 reads as "incoming". No damage here — it
+    // lands (or the dash begins) when the counter reaches zero.
+    void boss_commit(Creature& c, BossState& b, const PlayerBeacon& prey, bool charge) noexcept {
+        c.windup = charge ? kBossChargeWindup : kBossAttackWindup;
+        c.windup_target = prey.player;
+        c.windup_x = prey.x;
+        c.windup_y = prey.y;
+        b.winding_charge = charge;
+        c.boss_pose = static_cast<std::uint8_t>(charge ? BossPose::kCharge : BossPose::kAttack);
+        add_effect(c.x, c.y, EffectKind::kSmoke);
+    }
+
+    // A committed wind-up reaches zero. A charge begins its dash toward the aimed-at spot; an attack
+    // lands on the committed player if they are still within a hair over reach, and whiffs a visible
+    // slash on the empty spot if they left — the same grace and the same "a miss you can see" rule as
+    // resolve_windup, so a dodge works against the boss exactly as it does against a slime.
+    void boss_resolve(Creature& c, BossState& b) noexcept {
+        if (b.winding_charge) {
+            b.winding_charge = false;
+            float dx = c.windup_x - c.x;
+            float dy = c.windup_y - c.y;
+            float len = std::sqrt(dx * dx + dy * dy);
+            if (len < 0.01f) {
+                dx = facing_dx(c.facing);
+                dy = facing_dy(c.facing);
+                len = 1.0f;
+            }
+            b.charge_dx = dx / len;
+            b.charge_dy = dy / len;
+            b.charging = kBossChargeDashTicks;
+            b.dash_hit = false;
+            b.charge_cd = kBossChargeCd;
+            c.boss_pose = static_cast<std::uint8_t>(BossPose::kCharge);
+            return;
+        }
+        c.attack_cd = kBossAttackCd;
+        const std::uint64_t tgt = c.windup_target;
+        c.windup_target = 0;
+        const float grace = kBossReach * 1.15f;
+        if (const PlayerBeacon* p = beacon_of(tgt)) {
+            const float dx = p->x - c.x;
+            const float dy = p->y - c.y;
+            if (dx * dx + dy * dy <= grace * grace) {
+                if (router != nullptr) {
+                    router->get<PlayerActor>(tgt).tell(HurtPlayer{c.damage, c.id});
+                }
+                add_effect(p->x, p->y, EffectKind::kSlash);  // the blow, on the player
+                c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
+                return;
+            }
+        }
+        add_effect(c.windup_x, c.windup_y, EffectKind::kSlash);  // a whiff, where the player was
+        c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
+    }
+
+    // One tick of the committed dash: fly along the committed heading, clamp to the room floor, and
+    // deal the boss's blow once to a player caught in the way. Ends when the dash runs out or it hits
+    // a wall — a charge into masonry is spent, which is the counterplay (make it commit into a corner).
+    void boss_dash(Creature& c, BossState& b) noexcept {
+        c.boss_pose = static_cast<std::uint8_t>(BossPose::kCharge);
+        const float dt = static_cast<float>(kTickMs) / 1000.0f;
+        float nx = c.x + b.charge_dx * kBossChargeSpeed * dt;
+        float ny = c.y + b.charge_dy * kBossChargeSpeed * dt;
+        const bool clamped = clamp_to_room(b, nx, ny);
+        c.x = nx;
+        c.y = ny;
+        if (!b.dash_hit) {
+            if (const PlayerBeacon* p = nearest_player_in_room(b, c.x, c.y, kBossReach)) {
+                if (router != nullptr) {
+                    router->get<PlayerActor>(p->player).tell(HurtPlayer{c.damage, c.id});
+                }
+                add_effect(p->x, p->y, EffectKind::kSlash);
+                b.dash_hit = true;
+            }
+        }
+        if (--b.charging == 0 || clamped) {
+            b.charging = 0;
+            c.attack_cd = kBossAttackCd;  // a beat of recovery, like any strike
+            c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
+        }
+    }
+
+    // Step toward a point at `speed`, honouring an elemental status (frozen stops it dead) and the
+    // room clamp. The boss never leaves its floor rectangle — the player can, through the door.
+    void boss_move(Creature& c, BossState& b, float tx, float ty, float speed) noexcept {
+        float dx = tx - c.x;
+        float dy = ty - c.y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 0.01f) return;
+        const float sp = speed * status_speed_scale(c.status);
+        if (sp <= 0.001f) return;  // frozen solid
+        const float dt = static_cast<float>(kTickMs) / 1000.0f;
+        float nx = c.x + (dx / len) * sp * dt;
+        float ny = c.y + (dy / len) * sp * dt;
+        (void)clamp_to_room(b, nx, ny);
+        c.facing = facing_of(nx - c.x, ny - c.y);
+        c.x = nx;
+        c.y = ny;
+    }
+
+    // Clamp a would-be position to the room floor rectangle. Returns whether it had to — the dash
+    // reads that as "hit a wall".
+    [[nodiscard]] static bool clamp_to_room(const BossState& b, float& x, float& y) noexcept {
+        bool hit = false;
+        if (x < b.cx0) { x = b.cx0; hit = true; }
+        if (x > b.cx1) { x = b.cx1; hit = true; }
+        if (y < b.cy0) { y = b.cy0; hit = true; }
+        if (y > b.cy1) { y = b.cy1; hit = true; }
+        return hit;
+    }
+
+    // Is a player beacon in THIS boss's room? Interior beacons carry the interior map, and room
+    // membership is pure arithmetic, so this is the whole "the player is in the boss room" test.
+    [[nodiscard]] static bool in_room(const BossState& b, const PlayerBeacon& p) noexcept {
+        return static_cast<std::uint32_t>(
+                   room_index_at(static_cast<int>(p.x), static_cast<int>(p.y))) == b.room;
+    }
+
+    // The boss's target: the nearest living player standing in its room. Nobody outside the room can
+    // be a target, which is what makes leaving through the door a genuine escape.
+    [[nodiscard]] const PlayerBeacon* boss_target(const BossState& b) const noexcept {
+        const PlayerBeacon* best = nullptr;
+        float best_d2 = 1e18f;
+        for (const PlayerBeacon& p : players_) {
+            if (p.hp <= 0 || !in_room(b, p)) continue;
+            const float dx = p.x - (b.cx0 + b.cx1) * 0.5f;
+            const float dy = p.y - (b.cy0 + b.cy1) * 0.5f;
+            const float d2 = dx * dx + dy * dy;
+            if (d2 < best_d2) {
+                best_d2 = d2;
+                best = &p;
+            }
+        }
+        return best;
+    }
+
+    // Nearest in-room player within `range` of (x,y) — the dash's contact test.
+    [[nodiscard]] const PlayerBeacon* nearest_player_in_room(const BossState& b, float x, float y,
+                                                             float range) const noexcept {
+        const PlayerBeacon* best = nullptr;
+        float best_d2 = range * range;
+        for (const PlayerBeacon& p : players_) {
+            if (p.hp <= 0 || !in_room(b, p)) continue;
+            const float dx = p.x - x;
+            const float dy = p.y - y;
+            const float d2 = dx * dx + dy * dy;
+            if (d2 > best_d2) continue;
+            best_d2 = d2;
+            best = &p;
+        }
+        return best;
+    }
+
+    // The leash: a boss with no target for kBossLeashTicks snaps back to full HP at its spawn point.
+    // Documented as a leash — it stops a player kiting the boss down the corridor of interior rooms.
+    void boss_reset(Creature& c, BossState& b) noexcept {
+        c.hp = c.max_hp;
+        c.x = static_cast<float>(b.spawn_tx) + 0.5f;
+        c.y = static_cast<float>(b.spawn_ty) + 0.5f;
+        c.windup = 0;
+        c.windup_target = 0;
+        c.stun_ticks = 0;
+        c.status = Status::kNone;
+        c.status_ticks = 0;
+        c.attack_cd = 0;
+        c.facing = Facing::kDown;
+        c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
+        b.charging = 0;
+        b.winding_charge = false;
+        b.charge_cd = 0;
+        b.no_target = 0;
+    }
+
     // --- projectiles ------------------------------------------------------------------------------
     void step_projectiles() noexcept {
         const float dt = static_cast<float>(kTickMs) / 1000.0f;
@@ -944,6 +1328,17 @@ private:
         }
         provoke(c, player, /*by_attack*/ true);
         if (c.hp > 0 || router == nullptr || player == 0) return;
+        // The BOSS drops the design reward, flat and not ring-scaled: 400 XP into whichever skill
+        // struck the killing blow ("you level what you use") plus 10 produce. This is a PLACEHOLDER —
+        // P4 owns real loot tables, and inventing a boss loot table now would be inventing it twice —
+        // but it credits the right skill and pays out through the same GrantXp/GrantItems the rest of
+        // the game uses. step_bosses notices the body is gone next tick and starts the respawn timer.
+        if (c.kind == CreatureKind::kBoss) {
+            router->get<PlayerActor>(player).tell(GrantXp{skill, 400});
+            grant(player, GrantItems{ItemKind::kProduce, 10});
+            if (status != nullptr) status->player_kills.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         const CreatureStats st = stats_of(c.kind);
         // XP follows the ring, not just the species: killing a wasteland slime is genuinely harder
         // than killing a meadow one, because it IS a harder slime (see `make_creature`).
@@ -1149,6 +1544,7 @@ private:
     std::vector<Crop> crops_;
     std::vector<Building> buildings_;
     std::vector<PlayerBeacon> players_;  // soft state: who is near enough to matter
+    std::vector<BossState> bosses_;      // the dojo bosses this chunk owns, one per dojo room (F3)
     std::uint32_t tilled_ = 0;
     std::uint64_t world_seed_ = 0;
     std::uint64_t tick_ = 0;

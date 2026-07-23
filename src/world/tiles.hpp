@@ -309,7 +309,15 @@ enum class CreatureKind : std::uint8_t {
     kBear = 6,
     kHare = 7,
     kChicken = 8,
-    kCount = 9,
+    // The scripted BOSS (F3): a Giant Red Samurai that lives in a dojo interior room. It is ONE
+    // creature type like everything else alive — so every player verb (melee/heavy/arrows/spells/
+    // abilities, combos, status, stun) damages and affects it through the exact same loops and the
+    // same strike() with no change. Its scripted policy, charge dash, leash and respawn state that a
+    // plain Creature has no room for live in a parallel per-room BossState (see chunk_actor.hpp);
+    // step_creatures SKIPS it and a dedicated step_bosses drives it. Kept LAST so every index above
+    // is unchanged and nothing that rolls a random kind (raids, wildlife) can ever produce it.
+    kBoss = 9,
+    kCount = 10,
 };
 
 inline constexpr int kCreatureKinds = static_cast<int>(CreatureKind::kCount);
@@ -385,6 +393,12 @@ struct CreatureStats {
         case CreatureKind::kBear:    return {180, 1.9f, 28, F::kWild, D::kNeutral, 4.0f, 1.3f, 78, 16.0f, 8};
         case CreatureKind::kHare:    return {14, 3.4f,  0, F::kWild, D::kTimid,   6.0f, 0.0f,  6, 10.0f, 4};
         case CreatureKind::kChicken: return {10, 2.4f,  0, F::kWild, D::kTimid,   5.0f, 0.0f,  3,  8.0f, 4};
+        // The dojo BOSS (F3). hp/damage here are the FLAT design numbers; spawn_boss uses them
+        // verbatim rather than through make_creature's ring scaling, so a boss is 700 HP wherever its
+        // room lands on the interior map. `windup` 10 is the biggest telegraph in the game for a
+        // normal attack (skull is 8); the 14-tick charge wind-up is a boss-only constant in boss.hpp.
+        // `xp` 400 is the design reward, though strike() special-cases the boss to grant it flat.
+        case CreatureKind::kBoss:    return {700, 2.5f, 20, F::kMonster, D::kHostile, 12.0f, 2.6f, 400, 0.0f, 10};
         case CreatureKind::kCount: break;
     }
     return {30, 1.2f, 4, F::kMonster, D::kHostile, 7.0f, 1.0f, 4, 0.0f, 4};
@@ -511,6 +525,12 @@ struct Creature {
     std::uint8_t wander_cd = 0;
     std::int8_t wander_dx = 0;
     std::int8_t wander_dy = 0;
+
+    // Which pose the renderer draws for a kBoss creature (F3): a value of `BossPose` (boss.hpp),
+    // written by step_bosses and published in the ChunkView so the renderer picks the right Samurai
+    // sprite (idle/walk/attack/charge) — the walk-only telegraph read (windup) is carried by `windup`
+    // as for any creature. Zero (kIdle) for every non-boss creature, which never reads it.
+    std::uint8_t boss_pose = 0;
 };
 
 // An arrow or a bolt in flight, owned by the chunk it is currently over.

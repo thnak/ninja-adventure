@@ -680,6 +680,193 @@ int main(int argc, char** argv) {
         world.teleport_player(me, home, spawn.x, spawn.y);
     }
 
+    // --- The dojo boss (F3) -----------------------------------------------------------------------
+    // The first scripted BOSS. Everything above proves the fight SYSTEM; this proves the boss is a
+    // first-class citizen of it: it is a Creature the player's ordinary verbs damage, its telegraph is
+    // a real dodge window like any creature's, killing it pays the reward, and it respawns in its room.
+    // Staged through the REAL door portal (stepping onto the dojo's overworld doorway), never a raw
+    // teleport into the room, so it exercises the same path the game does.
+    if (!layout.dojo_rooms().empty()) {
+        const std::uint32_t room = layout.dojo_rooms().front();
+        const Door& dd = layout.doors()[static_cast<std::size_t>(room)];
+        const int door_tx = static_cast<int>(dd.tile & 0xFFFFu);
+        const int door_ty = static_cast<int>(dd.tile >> 16);
+        const int bx = room_block_x(static_cast<int>(room));
+        const int by = room_block_y(static_cast<int>(room));
+        const ChunkCoord boss_chunk =
+            chunk_of(kInterior, static_cast<float>(bx + kRoomX0), static_cast<float>(by + kRoomY0));
+
+        // Read the boss body out of the room's published view — the same channel the renderer draws.
+        const auto boss_of_room = [&](Creature& out) -> bool {
+            ChunkViewPtr v = world.bus().load(boss_chunk);
+            if (!v) return false;
+            for (const Creature& c : v->creatures) {
+                if (c.kind == CreatureKind::kBoss) {
+                    out = c;
+                    return true;
+                }
+            }
+            return false;
+        };
+        const auto whiff_in_room = [&]() -> bool {
+            ChunkViewPtr v = world.bus().load(boss_chunk);
+            if (!v) return false;
+            for (const Effect& e : v->effects)
+                if (e.kind == EffectKind::kSlash) return true;
+            return false;
+        };
+
+        // Make `me` a real threat (melee to the cap) so the kill below is a handful of blows, not
+        // fifty — the same dev grant the ability section used, harmless to repeat (it is capped).
+        world.grant_xp(me, Skill::kMelee, 120000);
+
+        // Step onto the dojo doorway: the portal takes the player into the boss room.
+        world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+        world.teleport_player(me, kOverworld, static_cast<float>(door_tx) + 0.5f,
+                              static_cast<float>(door_ty) + 0.5f);
+        advance(world, 3);  // let the beacon reach the interior chunk and the room publish
+        const PlayerView entered = world.player_view(slot);
+        Creature boss{};
+        const bool have_boss = boss_of_room(boss);
+        std::printf("\ndojo boss: room %u, door (%d,%d); player map=%s; boss present=%s hp=%d/%d\n",
+                    room, door_tx, door_ty, entered.map == kInterior ? "interior" : "overworld",
+                    have_boss ? "yes" : "NO", have_boss ? boss.hp : 0,
+                    have_boss ? boss.max_hp : 0);
+        chk.expect(entered.map == kInterior, "stepping into the dojo door put the player in the room");
+        chk.expect(have_boss, "the dojo room holds a boss");
+        chk.expect(have_boss && boss.kind == CreatureKind::kBoss && boss.hp == kBossMaxHp,
+                   "the boss is a full-HP kBoss creature");
+
+        if (have_boss) {
+            // (a) The telegraph is a real dodge window. Stand in reach and hold: the boss commits to a
+            // wind-up (the biggest in the game), no damage lands until it elapses, then it does — for
+            // exactly the boss's damage. Same shape as the F2 slime proof, one map deeper.
+            const auto stand_by_boss = [&](float ox) {
+                Creature b{};
+                boss_of_room(b);
+                world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+                world.teleport_player(me, kInterior, b.x + ox, b.y);
+            };
+            const auto boss_attack_windup = [&](bool& present) -> std::uint8_t {
+                present = false;
+                Creature b{};
+                if (!boss_of_room(b)) return 0;
+                present = true;
+                // An ATTACK commit (10), not a charge (14): its wind-up counter at the attack maximum.
+                return b.boss_pose == static_cast<std::uint8_t>(BossPose::kAttack) ? b.windup : 0;
+            };
+
+            stand_by_boss(-2.0f);  // two tiles to the boss's left: in reach, so it attacks not charges
+            bool committed = false;
+            for (int i = 0; i < 40 && !committed; ++i) {
+                advance(world, 1);
+                bool present = false;
+                if (boss_attack_windup(present) == kBossAttackWindup) committed = true;
+                // Keep the player pinned in reach so the boss keeps choosing to attack.
+                if (!committed && present) stand_by_boss(-2.0f);
+            }
+            const PlayerView at_commit = world.player_view(slot);
+            chk.expect(committed, "the boss committed to a telegraphed attack (its wind-up is published)");
+            chk.expect(at_commit.hp == kPlayerMaxHp, "no damage had landed at the moment of commit");
+            bool dmg_during = false;
+            int held = 0;
+            for (int i = 0; i < 16; ++i) {
+                bool present = false;
+                const std::uint8_t w = boss_attack_windup(present);
+                if (!present || w == 0) break;
+                ++held;
+                if (world.player_view(slot).hp < kPlayerMaxHp) dmg_during = true;
+                advance(world, 1);
+            }
+            const PlayerView after = world.player_view(slot);
+            std::printf("  attack: wind-up held %d ticks, hp %d -> %d (boss hits %d)\n", held,
+                        at_commit.hp, after.hp, kBossDamage);
+            chk.expect(held > 0, "the boss froze telegraphing, not hitting on contact");
+            chk.expect(!dmg_during, "no HurtPlayer landed before the boss's wind-up elapsed");
+            chk.expect(after.hp == kPlayerMaxHp - kBossDamage,
+                       "the boss blow landed for exactly its damage once the wind-up elapsed");
+
+            // (b) Dodge mid-wind-up: wait for a fresh attack commit, then step out of reach (staying
+            // in the room). The blow whiffs — no damage, and a slash the player can SEE on the empty
+            // spot it aimed at.
+            world.grant_vitals(me, kPlayerMaxHp, 0, 0);
+            bool committed_b = false;
+            for (int i = 0; i < 40 && !committed_b; ++i) {
+                bool present = false;
+                if (boss_attack_windup(present) == kBossAttackWindup) { committed_b = true; break; }
+                advance(world, 1);
+                if (!committed_b) stand_by_boss(-2.0f);
+            }
+            // Leap to the far side of the room floor, out of the boss's reach but still indoors.
+            world.teleport_player(me, kInterior, static_cast<float>(bx + kRoomX0) + 0.5f,
+                                  static_cast<float>(by + kRoomY0 + kRoomH - 1) + 0.5f);
+            advance(world, kBossAttackWindup + 2);
+            const PlayerView dodged = world.player_view(slot);
+            const bool saw_whiff = whiff_in_room();
+            std::printf("  dodge: left reach mid-wind-up, hp %d (unchanged), whiff slash %s\n",
+                        dodged.hp, saw_whiff ? "published" : "MISSING");
+            chk.expect(committed_b, "the boss committed to a second attack to dodge");
+            chk.expect(dodged.hp == kPlayerMaxHp, "leaving reach mid-wind-up took no damage (the dodge)");
+            chk.expect(saw_whiff, "the whiffed boss swing still slashed the spot it aimed at");
+
+            // (c) The kill. Many strikes, refilled between so the boss's own blows do not drop `me`;
+            // credit lands in Melee (the killing verb), and the reward is 400 XP + 10 produce.
+            const PlayerView pre_kill = world.player_view(slot);
+            const std::uint32_t xp_before = pre_kill.skill_xp[static_cast<int>(Skill::kMelee)];
+            const std::int32_t produce_before = pre_kill.items[static_cast<int>(ItemKind::kProduce)];
+            const std::uint32_t kills_before = world.status().player_kills.load(std::memory_order_relaxed);
+            bool killed = false;
+            for (int i = 0; i < 300 && !killed; ++i) {
+                Creature b{};
+                if (!boss_of_room(b)) { killed = true; break; }  // gone from the view == dead
+                world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+                world.teleport_player(me, kInterior, b.x - 1.4f, b.y);
+                world.move_player(me, 0.4f, 0.0f);  // face the boss (movement sets facing)
+                world.swing(me, /*heavy*/ true);
+                advance(world, 2);
+            }
+            advance(world, 2);
+            const PlayerView post_kill = world.player_view(slot);
+            const std::uint32_t kills_after = world.status().player_kills.load(std::memory_order_relaxed);
+            Creature gone{};
+            const bool boss_absent = !boss_of_room(gone);
+            std::printf("  kill: boss dead=%s; player_kills %u -> %u; melee xp %u -> %u; produce %d -> %d\n",
+                        boss_absent ? "yes" : "no", kills_before, kills_after, xp_before,
+                        post_kill.skill_xp[static_cast<int>(Skill::kMelee)], produce_before,
+                        post_kill.items[static_cast<int>(ItemKind::kProduce)]);
+            chk.expect(killed && boss_absent, "the player's strikes killed the boss");
+            chk.expect(kills_after > kills_before, "the boss kill was counted");
+            chk.expect(post_kill.items[static_cast<int>(ItemKind::kProduce)] == produce_before + 10,
+                       "the boss kill paid the 10-produce reward placeholder");
+            // XP at the Melee cap does not move, so accept either an XP gain OR an already-capped level.
+            chk.expect(post_kill.skill_xp[static_cast<int>(Skill::kMelee)] > xp_before ||
+                           post_kill.skill_level[static_cast<int>(Skill::kMelee)] >= kMaxSkillLevel,
+                       "the boss kill granted Melee experience (the killing verb)");
+
+            // (d) Respawn: leave the room, wait out the respawn timer, come back — the boss is whole
+            // again in the same room. The leave is what makes the wait honest (a present player would
+            // hold the chunk); the re-entry proves the room re-seeded its set-piece.
+            world.teleport_player(me, kOverworld, spawn.x, spawn.y);
+            advance(world, 5);
+            Creature during{};
+            chk.expect(!boss_of_room(during), "the boss stays dead through its respawn timer");
+            advance(world, kBossRespawnTicks + 5);
+            world.teleport_player(me, kOverworld, static_cast<float>(door_tx) + 0.5f,
+                                  static_cast<float>(door_ty) + 0.5f);
+            advance(world, 3);
+            Creature reborn{};
+            const bool back = boss_of_room(reborn);
+            std::printf("  respawn: after %u ticks the boss is %s (hp %d/%d)\n", kBossRespawnTicks,
+                        back ? "back" : "MISSING", back ? reborn.hp : 0, back ? reborn.max_hp : 0);
+            chk.expect(back, "the boss respawned after its timer");
+            chk.expect(back && reborn.hp == kBossMaxHp, "and it came back at full HP, in the same room");
+        }
+
+        // Back to the overworld spawn so the sections below read a normal, outdoor player.
+        world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+        world.teleport_player(me, kOverworld, spawn.x, spawn.y);
+    }
+
     // --- Death and respawn -------------------------------------------------------------------------
     // The respawn point is where you lit your hearth. Nothing is taken from you when you die: this
     // game's default is chill (GAME.md §0), and the cost of dying is the walk back.

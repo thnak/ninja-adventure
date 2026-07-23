@@ -354,6 +354,23 @@ int main(int argc, char** argv) {
                     static_cast<std::size_t>(home - layout.villages().data()), home->tx, home->ty,
                     home->tier, d);
     }
+    // The dojo boss rooms (F3): every tier>=3 village's street_houses parcel lays the red-temple DOJO,
+    // whose door leads into an interior room that now holds a Giant Red Samurai. Printed here so a
+    // screenshot can be staged: `mmo_client --shot 2 boss.png --dojo attack` steps through the FIRST
+    // of these doors, but the overworld doorway tile of each is listed for eyeballing on the map too.
+    std::printf("\ndojo boss rooms (F3): %zu (interior rooms behind a village DOJO door)\n",
+                layout.dojo_rooms().size());
+    for (std::size_t i = 0; i < layout.dojo_rooms().size() && i < 8; ++i) {
+        const std::uint32_t room = layout.dojo_rooms()[i];
+        const Door& d = layout.doors()[static_cast<std::size_t>(room)];
+        std::printf("  room %-5u  overworld door tile (%4u,%4u)  (door index %u)\n", room,
+                    static_cast<unsigned>(d.tile & 0xFFFFu), static_cast<unsigned>(d.tile >> 16),
+                    room);
+    }
+    if (layout.dojo_rooms().size() > 8) {
+        std::printf("  ... and %zu more\n", layout.dojo_rooms().size() - 8);
+    }
+
     // Village indices run in generation (scan) order, which is spatial — so #0 is a corner of the
     // map, not a typical village. Printing one index per ring gives `mmo_client --village N`
     // something meaningful to point at.

@@ -249,6 +249,10 @@ public:
     [[nodiscard]] const std::vector<Stronghold>& strongholds() const noexcept { return holds_; }
     [[nodiscard]] const std::vector<Structure>& structures() const noexcept { return structures_; }
     [[nodiscard]] const std::vector<Door>& doors() const noexcept { return doors_; }
+    // Interior room indices that hold a dojo boss (F3), one per DOJO dwelling cell a village's
+    // street_houses parcel laid. Every entry is a room a tier>=3 village's dojo door leads into, so
+    // it is where a ChunkActor plants its Giant Red Samurai at bring-up. Sorted, deduplicated.
+    [[nodiscard]] const std::vector<std::uint32_t>& dojo_rooms() const noexcept { return dojo_rooms_; }
     [[nodiscard]] const std::vector<PlacedPrefab>& prefabs() const noexcept { return prefabs_; }
 
     // Prefabs whose footprint (plus the room a prop's art needs above it) touches this chunk. Mirrors
@@ -874,6 +878,11 @@ private:
         // a door" would regress the moment one of these had none. Its door is the same construction a
         // Structure's is — the doorway tile the builder left walkable under the sprite — derived here
         // from the parcel's kept dwelling cells so the room is allocated by the very same sort below.
+        // The DOJO doors, remembered by tile so the boss rooms can be picked out AFTER the sort below
+        // renumbers every door into its room. A dojo cell is tagged at pack time (PrefabCell::dojo,
+        // the red-temple sx=192 crop), so identifying it here is one flag read — the source rect the
+        // packer measured is not carried into the engine, which is exactly why the flag exists.
+        std::vector<std::uint32_t> dojo_tiles;
         for (const PlacedPrefab& pp : vparcels_) {
             const PrefabDef& def = kPrefabs[static_cast<int>(pp.id)];
             const PrefabSkin& sk = prefab_skin_of(def, pp.skin);
@@ -881,13 +890,21 @@ private:
                 const PrefabCell& c = sk.cells[i];
                 if (!prefab_cell_is_dwelling(c)) continue;
                 if (!prefab_cell_visible(def, sk, c, pp.variant)) continue;
-                doors_.push_back(Door{tile_key(pp.tx + prefab_door_dx(c), pp.ty + prefab_door_dy(c)),
-                                      0});
+                const std::uint32_t key = tile_key(pp.tx + prefab_door_dx(c), pp.ty + prefab_door_dy(c));
+                doors_.push_back(Door{key, 0});
+                if (c.dojo) dojo_tiles.push_back(key);
             }
         }
         std::sort(doors_.begin(), doors_.end(),
                   [](const Door& a, const Door& b) { return a.tile < b.tile; });
         for (std::uint32_t i = 0; i < doors_.size(); ++i) doors_[i].room = i;
+        // Now the room a dojo door leads to is known (room == sorted index). Collect them.
+        std::sort(dojo_tiles.begin(), dojo_tiles.end());
+        for (const Door& d : doors_) {
+            if (std::binary_search(dojo_tiles.begin(), dojo_tiles.end(), d.tile)) {
+                dojo_rooms_.push_back(d.room);
+            }
+        }
     }
 
     // "You wake in open country and you have to find people." The spawn is deliberately 30-odd
@@ -925,6 +942,7 @@ private:
     std::vector<Stronghold> holds_;
     std::vector<Structure> structures_;
     std::vector<Door> doors_;
+    std::vector<std::uint32_t> dojo_rooms_;  // interior rooms that hold a boss (F3)
     std::vector<PlacedPrefab> prefabs_;
     std::vector<PlacedPrefab> vparcels_;  // the blocks villages lay as furniture, merged into
                                           // prefabs_ AFTER place_prefabs so the POI scatter — camps

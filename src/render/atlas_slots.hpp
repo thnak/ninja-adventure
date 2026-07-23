@@ -528,4 +528,54 @@ struct AtlasSprite {
 
 inline constexpr AtlasSprite kKatanaCarry = {1, 6202, 6, 10};
 
+// --- The boss: Giant Red Samurai (F3) ------------------------------------------------
+// One entry per POSE strip (Idle/Walk/AttackLeft/AttackRight/ChargeLeft/ChargeRight/Hit) plus
+// the 38x38 Faceset for the HP-bar icon. Off the tile grid and NOT square, like AtlasFx: each
+// pose is a horizontal strip of `frames` cells of `w` x `h` (the giant is ~4 tiles across).
+// `foot` is the ground line -- the row (from the cell top) where the boss's feet sit -- so the
+// renderer anchors it feet-down whether the cell is 48px (idle/walk/hit) or 96px (attack/
+// charge) tall. Left/Right poses are separate sheets, chosen by the boss's facing.
+struct AtlasBoss {
+    std::int16_t x;
+    std::int16_t y;
+    std::uint8_t w;
+    std::uint8_t h;
+    std::uint8_t frames;
+    std::uint8_t foot;  // ground-line row from the cell top, for feet-anchored drawing
+};
+
+enum class Boss : std::uint8_t {
+    kIdle,
+    kWalk,
+    kAttackLeft,
+    kAttackRight,
+    kChargeLeft,
+    kChargeRight,
+    kHit,
+    kFace,
+    kCount,
+};
+
+inline constexpr AtlasBoss kAtlasBoss[static_cast<int>(Boss::kCount)] = {
+    {1, 6214, 96, 48, 6, 44},  // kIdle
+    {1, 6264, 96, 48, 6, 48},  // kWalk
+    {1, 6314, 96, 96, 4, 83},  // kAttackLeft
+    {1, 6412, 96, 96, 4, 83},  // kAttackRight
+    {1, 6510, 96, 96, 3, 78},  // kChargeLeft
+    {1, 6608, 96, 96, 3, 78},  // kChargeRight
+    {1, 6706, 96, 48, 4, 46},  // kHit
+    {1, 6756, 38, 38, 1, 38},  // kFace
+};
+
+[[nodiscard]] inline constexpr const AtlasBoss& boss_of(Boss b) noexcept {
+    return kAtlasBoss[static_cast<int>(b)];
+}
+
+// `frame` is wrapped, so a caller may pass a free-running counter.
+[[nodiscard]] inline constexpr AtlasRect boss_frame(Boss b, int frame) noexcept {
+    const AtlasBoss& s = boss_of(b);
+    const int i = (frame % s.frames + s.frames) % s.frames;
+    return AtlasRect{static_cast<std::int16_t>(s.x + i * (s.w + 2)), s.y};
+}
+
 }  // namespace mmo

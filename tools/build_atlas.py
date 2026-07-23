@@ -755,6 +755,34 @@ DELUXE_OVERLAY = [
 # renderer does the same. One small sprite, packed like a particle (no grid).
 DELUXE_CARRY = ("Items/Weapons/Katana/SpriteInHand.png", 6, 10)
 
+# --- The boss: Giant Red Samurai (F3) ----------------------------------------
+# The first scripted BOSS ships as its own set of pose sheets, one file per pose, exactly as the
+# pack author cut them. Unlike the 16px walk sheets and the 32px deluxe rig these are NEITHER on a
+# tile grid NOR square: every pose is a horizontal strip of 96px-wide cells (the giant is ~4 tiles
+# across), 48px tall for the ground poses and 96px tall for the raised-sword ones. So they pack like
+# the FX strips -- crop each cell, paste with a 1px gap, no extrusion (a boss is drawn at a fixed
+# world size, never sampled at a fractional texel) -- and the generated `AtlasBoss` table carries a
+# per-pose w/h/frames like `AtlasFx`, plus a `foot`: the ground-line row (from the cell top), because
+# the 48px and 96px poses put the feet at different depths and the renderer feet-anchors the boss.
+#
+# EVERY COUNT AND CELL SIZE WAS MEASURED, not read off the filename (tools measured each sheet with a
+# transparent-column scan and cross-checked the preview GIFs): Idle 6, Walk 6, AttackL/R 4, ChargeL/R
+# 3, Hit 4, Faceset 1 -- the combat inventory's Idle/Walk/Hit counts were double the truth. The cell
+# pitch is 96px for every pose sheet (content ~56-70px wide within it) and 38px for the faceset.
+BOSS_ROOT = NINJA / "Boss/GiantRedSamurai"
+BOSS_MANIFEST = [
+    # (name, file, cell width, cell height, frames)
+    ("Idle",        "Idle.png",        96, 48, 6),
+    ("Walk",        "Walk.png",        96, 48, 6),
+    ("AttackLeft",  "AttackLeft.png",  96, 96, 4),
+    ("AttackRight", "AttackRight.png", 96, 96, 4),
+    ("ChargeLeft",  "ChargeLeft.png",  96, 96, 3),
+    ("ChargeRight", "ChargeRight.png", 96, 96, 3),
+    ("Hit",         "Hit.png",         96, 48, 4),
+    # The head-and-shoulders portrait beside every actor, for the boss HP bar's icon. One frame.
+    ("Face",        "Faceset.png",     38, 38, 1),
+]
+
 
 def extrude(cell: Image.Image, tile: Image.Image) -> None:
     """Paste `tile` at (PAD,PAD) and smear its border pixels outward into the padding."""
@@ -836,6 +864,20 @@ def _prefab_has_door(li: int, c: dict) -> bool:
     """
     return (li == 2 and c["sheet"].endswith("TilesetHouse.png")
             and c["w"] >= 48 and c["h"] >= 48 and c["sy"] == 0)
+
+
+def _prefab_is_dojo(li: int, c: dict) -> bool:
+    """Is this dwelling cell the DOJO -- the ornate red-tiled temple the boss (F3) lives behind?
+
+    The pack draws the dojo as one distinct TilesetHouse sprite: the red pagoda-roofed hall at source
+    column sx=192 of the house band (looked at, not guessed -- it is the only red-temple crop, and
+    street_houses.json places it where the parcel paints the DOJO sign over it). So a dojo cell is a
+    dwelling (see `_prefab_has_door`) cut from exactly that rect. worldgen reads this flag when it
+    emits a parcel's doors and tags the interior room a boss room -- the source sx is not in the
+    engine's PrefabCell, so the identification has to happen HERE where the crop rect is still known.
+    Every tier>=3 village lays street_houses, so every such village gets its dojo boss for free.
+    """
+    return _prefab_has_door(li, c) and c["sx"] == 192
 
 # Whether a parcel may be stamped mirrored (flip_h) for variety. Default True; a parcel is False only
 # when it bakes in readable glyphs, because a mirrored letter reads instantly as wrong. Only
@@ -1142,6 +1184,7 @@ def pack_prefabs(atlas: Image.Image, anim_y: int, cell_px: int):
                     "ax": ax, "ay": ay, "pw": c["w"], "ph": c["h"],
                     "centred": c["origin"] == 1,
                     "has_door": _prefab_has_door(li, c),
+                    "dojo": _prefab_is_dojo(li, c),
                     "key": key,  # the base crop key, so a skin can substitute its rect below
                 })
                 if li == 2:  # a House sprite blocks its full footprint in tiles, clipped to rect
@@ -1237,6 +1280,9 @@ def write_prefabs_header(prefabs) -> None:
         "                                // can enter. Its doorway is column 1 of the footprint (the",
         "                                // measurement kDoorDx records in world/village.hpp), so a",
         "                                // village that stamps this parcel gives the house a door.",
+        "    bool dojo;                  // this dwelling is the DOJO (the red-temple crop, sx=192): the",
+        "                                // interior room its door leads to gets a boss (F3). worldgen",
+        "                                // reads this when it emits parcel doors -- see index_doors.",
         "};",
         "",
         "// A SKIN is the same parcel re-voiced in one of the pack author's parallel terrain palettes",
@@ -1269,7 +1315,8 @@ def write_prefabs_header(prefabs) -> None:
         for c in cell_list:
             lines.append(f"    {{{c['dx']}, {c['dy']}, {c['layer']}, {c['group']}, "
                          f"{c['ax']}, {c['ay']}, {c['pw']}, {c['ph']}, "
-                         f"{str(c['centred']).lower()}, {str(c['has_door']).lower()}}},")
+                         f"{str(c['centred']).lower()}, {str(c['has_door']).lower()}, "
+                         f"{str(c['dojo']).lower()}}},")
         lines.append("};")
 
     for p in prefabs:
@@ -1656,6 +1703,41 @@ def main() -> int:
     carry = (PAD, anim_y + PAD, carry_w, carry_h)
     anim_y += ch
 
+    # --- The boss pose strips, stacked below the deluxe rig ----------------------------------
+    # Each pose is one horizontal strip of `frames` cells; packed with a 1px gap and no extrusion,
+    # like the FX strips. `foot` is the ground line: one past the bottom-most opaque row across all
+    # frames, measured from the cell top, so the renderer can anchor the boss's feet consistently
+    # whether the pose cell is 48px (idle/walk/hit) or 96px (attack/charge) tall.
+    bosses = []
+    for name, rel, fw, fh, frames in BOSS_MANIFEST:
+        path = BOSS_ROOT / rel
+        if not path.exists():
+            print(f"missing boss sheet: {path}", file=sys.stderr)
+            return 1
+        sheet = Image.open(path).convert("RGBA")
+        if sheet.width < fw * frames or sheet.height < fh:
+            print(f"{name}: {path.name} is {sheet.width}x{sheet.height}, expected "
+                  f"{fw * frames}x{fh} ({frames} frames of {fw}x{fh})", file=sys.stderr)
+            return 1
+        spx = sheet.load()
+        foot = 0
+        for f in range(frames):
+            for y in range(fh):
+                if any(spx[f * fw + x, y][3] > 0 for x in range(fw)):
+                    foot = max(foot, y + 1)
+        strip_w = frames * (fw + 2 * PAD)
+        new_h = anim_y + fh + 2 * PAD
+        if new_h > atlas.height or strip_w > atlas.width:
+            grown = Image.new("RGBA", (max(strip_w, atlas.width), max(new_h, atlas.height)),
+                              (0, 0, 0, 0))
+            grown.paste(atlas, (0, 0))
+            atlas = grown
+        for f in range(frames):
+            frame = sheet.crop((f * fw, 0, f * fw + fw, fh))
+            atlas.paste(frame, (f * (fw + 2 * PAD) + PAD, anim_y + PAD))
+        bosses.append((name, PAD, anim_y + PAD, fw, fh, frames, foot))
+        anim_y += fh + 2 * PAD
+
     out_png = ROOT / "assets" / "atlas.png"
     atlas.save(out_png)
 
@@ -1964,6 +2046,47 @@ def main() -> int:
         "",
         f"inline constexpr AtlasSprite kKatanaCarry = {{{carry[0]}, {carry[1]}, {carry[2]}, {carry[3]}}};",
         "",
+        "// --- The boss: Giant Red Samurai (F3) ------------------------------------------------",
+        "// One entry per POSE strip (Idle/Walk/AttackLeft/AttackRight/ChargeLeft/ChargeRight/Hit) plus",
+        "// the 38x38 Faceset for the HP-bar icon. Off the tile grid and NOT square, like AtlasFx: each",
+        "// pose is a horizontal strip of `frames` cells of `w` x `h` (the giant is ~4 tiles across).",
+        "// `foot` is the ground line -- the row (from the cell top) where the boss's feet sit -- so the",
+        "// renderer anchors it feet-down whether the cell is 48px (idle/walk/hit) or 96px (attack/",
+        "// charge) tall. Left/Right poses are separate sheets, chosen by the boss's facing.",
+        "struct AtlasBoss {",
+        "    std::int16_t x;",
+        "    std::int16_t y;",
+        "    std::uint8_t w;",
+        "    std::uint8_t h;",
+        "    std::uint8_t frames;",
+        "    std::uint8_t foot;  // ground-line row from the cell top, for feet-anchored drawing",
+        "};",
+        "",
+        "enum class Boss : std::uint8_t {",
+    ]
+    lines += [f"    k{name}," for name, _, _, _, _, _, _ in bosses]
+    lines += [
+        "    kCount,",
+        "};",
+        "",
+        "inline constexpr AtlasBoss kAtlasBoss[static_cast<int>(Boss::kCount)] = {",
+    ]
+    lines += [f"    {{{x}, {y}, {w}, {h}, {n}, {foot}}},  // k{name}"
+              for name, x, y, w, h, n, foot in bosses]
+    lines += [
+        "};",
+        "",
+        "[[nodiscard]] inline constexpr const AtlasBoss& boss_of(Boss b) noexcept {",
+        "    return kAtlasBoss[static_cast<int>(b)];",
+        "}",
+        "",
+        "// `frame` is wrapped, so a caller may pass a free-running counter.",
+        "[[nodiscard]] inline constexpr AtlasRect boss_frame(Boss b, int frame) noexcept {",
+        "    const AtlasBoss& s = boss_of(b);",
+        "    const int i = (frame % s.frames + s.frames) % s.frames;",
+        "    return AtlasRect{static_cast<std::int16_t>(s.x + i * (s.w + 2)), s.y};",
+        "}",
+        "",
         "}  // namespace mmo",
         "",
     ]
@@ -1971,7 +2094,7 @@ def main() -> int:
 
     print(f"{out_png}  {atlas.width}x{atlas.height}  "
           f"({len(entries)} tiles, {len(anims)} anims, {len(bigs)} big, {len(fxs)} fx, "
-          f"{len(deluxes)} deluxe)")
+          f"{len(deluxes)} deluxe, {len(bosses)} boss)")
     print(f"{header}")
 
     if prefabs:
