@@ -1058,10 +1058,15 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
         for (const std::uint32_t idx : vis) {
             const PlacedPrefab& pp = all[idx];
             const PrefabDef& def = kPrefabs[static_cast<int>(pp.id)];
+            // Draw from the instance's SKIN, not def.cells: a forest camp may be its deep-forest
+            // twin and a snow-ring camp its snow twin. The skin only swaps each cell's atlas rect and
+            // drops the tiles a palette cannot voice (a sunflower under snow); dx/dy/layer/group are
+            // the base's, so the mirror, the y-sort and the feather all read exactly as before.
+            const PrefabSkin& sk = prefab_skin_of(def, pp.skin);
             const bool mir = prefab_mirrored(def, pp.variant);
-            for (std::uint16_t ci = 0; ci < def.cell_count; ++ci) {
-                const PrefabCell& c = def.cells[ci];
-                if (!prefab_cell_visible(def, c, pp.variant)) continue;
+            for (std::uint16_t ci = 0; ci < sk.cell_count; ++ci) {
+                const PrefabCell& c = sk.cells[ci];
+                if (!prefab_cell_visible(def, sk, c, pp.variant)) continue;
                 const PrefabQuad q = prefab_quad(def, pp, c, mir);
                 if (c.layer <= 1) {
                     im.prefab_cell(c, q, mir);  // flat, under the sorted pass

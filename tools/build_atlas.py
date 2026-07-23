@@ -746,6 +746,111 @@ MIRRORABLE = {
     "street_houses": False,
 }
 
+# --- Parcel skins: the pack author's own parallel palettes -------------------------------------
+# A skin is the SAME hand-composed parcel re-voiced in one of the pack's parallel terrain palettes.
+# The art for it is not new, and this is the whole point: the author drew every tile a skin needs.
+#
+#   * TilesetFloor.png is laid out as two 11-column halves carrying IDENTICAL terrain motifs in
+#     different palettes. The right half is a pixel-exact copy of the left shifted +11 columns
+#     (=+176px): dirt_red -> dirt_brown, grass_lime -> grass_green, scrub edges and all. So a
+#     green camp becomes a DEEP-FOREST camp ("autumn" here -- the pack has no orange foliage, the
+#     only same-motif twin of bright lime is this deep-forest green) by reading each floor rect
+#     +176px over. It is a palette twin, not a hue filter.
+#   * SNOW is a third palette, but it is NOT a column/row offset of the other two: the snow
+#     autotile block has a different internal 47-mask layout, so snow is mapped by mask CLASS, not
+#     by offset (a blind shift scrambles the edges). The dirt CLEARING has no snow counterpart --
+#     snow-on-snow makes a clearing vanish -- so it maps to the earth_taupe block (the snow block's
+#     own right-half twin): bare frozen earth trodden clear of snow, which keeps the "cleared
+#     ground" read against the snowfield.
+#   * TilesetNature.png stacks the same tree in a lime, a deep-green and a snow-laden block, so a
+#     tree steps skin-to-skin by block (lime@sx0/32 -> deep-green -> snow@sx128; the snow block is
+#     author-confirmed -- snow_pond.json uses exactly it). NOTE the tree rects are keyed by their
+#     (sx,sy) here and NOT looked up in assets/tile_index.json: that index describes a 2021 sheet,
+#     while the parcels were cut from the 2023 one, and only the parcels' own rects are trustworthy.
+#   * TilesetFloorDetail.png (litter, grass tufts) and the sunflowers are SINGLE-palette: brown
+#     debris and green tufts read wrong on fresh snow and no snow variant exists, so the snow skin
+#     DROPS them (maps to None -- the cell is simply absent from that skin's array).
+#
+# The tables below are the source-rect -> source-rect substitution the reskin study measured and
+# shipped (both skins verdict SHIP; see the study's report.md). They list only the cells that
+# CHANGE or DROP -- a rect absent from a table is palette-neutral and kept as-is, and a structure
+# (House/Element) cell is never skinned at all. Skin 0 is always the base (green) parcel and needs
+# no table.
+
+# Which parcels carry skins, and in what order. Skin index is the C++ bit position a placement's
+# skin_mask selects (see world/worldgen.hpp): 0=base(green), 1=autumn(deep forest), 2=snow.
+PREFAB_SKINS = {
+    "camp_clearing": ["green", "autumn", "snow"],
+    "forest_cottage": ["green", "autumn", "snow"],
+}
+
+# The deep-green tree blocks the two lime trees step to (small lime@0 -> deep-green@32; big
+# lime@64 -> deep-green@0). The already-deep-green small tree@32, the stumps, the bush and the
+# sunflower are palette-neutral wood/greenery and are kept (absent = keep).
+_AUTUMN_NATURE = {(0, 0): (32, 0), (64, 32): (0, 32)}
+
+# Snow: the two lime trees and the deep-green small tree all go to the snow-laden block (sx128);
+# the big tree to the snow big-tree block; the sunflower (sx16,sy176) has no snow bloom -> dropped.
+# Stumps and the hardy bush poke through the snow and are kept.
+_SNOW_NATURE = {(0, 0): (128, 0), (32, 0): (128, 0), (64, 32): (128, 32), (16, 176): None}
+
+# Snow floor: every grass/dirt/scrub rect these two parcels use, remapped to its snow-palette
+# counterpart. grass_lime_plain/textured -> snow_plain/textured (the true white field); the dirt
+# clearing autotile -> the earth_taupe block at the SAME 47-mask (bare frozen earth, so the
+# clearing still reads as cleared); the two decorated scrub edges have no directional snow mask and
+# fall back to snow_textured. Keyed (sx,sy) -> (sx,sy) within TilesetFloor.png.
+_SNOW_FLOOR = {
+    (0, 112): (288, 272), (0, 128): (176, 240), (0, 144): (288, 224), (0, 160): (176, 272),
+    (0, 176): (176, 288), (0, 192): (0, 304), (0, 208): (16, 304), (144, 128): (320, 224),
+    (16, 112): (192, 224), (16, 128): (192, 240), (16, 144): (192, 256), (16, 176): (192, 288),
+    (16, 192): (16, 304), (32, 112): (240, 272), (32, 128): (208, 240), (32, 144): (208, 256),
+    (32, 160): (208, 272), (32, 192): (32, 304), (48, 144): (224, 272), (64, 128): (240, 272),
+    (80, 112): (256, 224), (80, 128): (256, 240), (80, 144): (256, 240), (96, 112): (272, 224),
+    (96, 128): (272, 272), (96, 144): (272, 224), (96, 160): (240, 272), (96, 176): (240, 240),
+}
+
+# One cell's source rect under a skin. Returns a (sx,sy) SUBSTITUTE within the same sheet file, the
+# sentinel _SKIN_KEEP (draw the cell unchanged), or None (drop the cell from this skin). The skin
+# never crosses sheet files and never touches w/h or the flip flags -- only which rect of the same
+# sheet is sampled -- so a skin cell is the base cell with its atlas rect swapped, nothing else.
+_SKIN_KEEP = object()
+
+
+def _skin_rect(sheet_name: str, sx: int, sy: int, skin: str):
+    if skin == "green":
+        return _SKIN_KEEP
+    if skin == "autumn":
+        if sheet_name == "TilesetFloor.png":
+            return (sx + 176, sy)  # +11 columns into the deep-forest palette twin
+        if sheet_name == "TilesetNature.png":
+            return _AUTUMN_NATURE.get((sx, sy), _SKIN_KEEP)
+        return _SKIN_KEEP  # FloorDetail is single-palette; structures/props are never skinned
+    if skin == "snow":
+        if sheet_name == "TilesetFloor.png":
+            return _SNOW_FLOOR.get((sx, sy), _SKIN_KEEP)
+        if sheet_name == "TilesetNature.png":
+            return _SNOW_NATURE.get((sx, sy), _SKIN_KEEP)
+        if sheet_name == "TilesetFloorDetail.png":
+            return None  # no litter/tuft has a snow palette -> the snow skin omits it
+        return _SKIN_KEEP  # structures/props unmapped
+    raise ValueError(f"unknown skin {skin!r}")
+
+
+def _skin_key(orig_key: tuple, skin: str):
+    """Substitute a full crop key for a skin. Returns a new key, the original (kept), or None (drop).
+
+    Only the sheet basename and (sx,sy) drive the substitution; w/h and the flip flags ride along
+    unchanged, so a flipped floor tile keeps its flip and just points at the palette twin.
+    """
+    sheet, sx, sy, w, h, fh, fv, tr = orig_key
+    sub = _skin_rect(sheet.split("/")[-1], sx, sy, skin)
+    if sub is None:
+        return None
+    if sub is _SKIN_KEEP:
+        return orig_key
+    nsx, nsy = sub
+    return (sheet, nsx, nsy, w, h, fh, fv, tr)
+
 
 def _prefab_groups(cells: list) -> int:
     """Assign each cell its `group` and return the parcel's optional-group count.
@@ -863,14 +968,25 @@ def pack_prefabs(atlas: Image.Image, anim_y: int, cell_px: int):
     grid_order: list[tuple] = []
     big_order: list[tuple] = []
     seen: set[tuple] = set()
-    for _stem, _cpp, doc in docs:
+
+    def want(key: tuple) -> None:
+        if key in seen:
+            return
+        seen.add(key)
+        (grid_order if key[3] == TILE and key[4] == TILE else big_order).append(key)
+
+    # Every base crop, PLUS every crop a skin substitutes in (the deep-forest twins, the snow
+    # blocks). A skin crop that a base cell -- here or in the frozen pond -- already packed is
+    # deduped by `seen`, so the snow trees, which snow_pond already uses, cost nothing here.
+    for stem, _cpp, doc in docs:
+        skin_names = PREFAB_SKINS.get(stem, ["green"])
         for layer in doc["layers"]:
             for c in layer["cells"]:
-                key = _cell_key(c)
-                if key in seen:
-                    continue
-                seen.add(key)
-                (grid_order if c["w"] == TILE and c["h"] == TILE else big_order).append(key)
+                base_key = _cell_key(c)
+                for skin in skin_names:
+                    key = base_key if skin == "green" else _skin_key(base_key, skin)
+                    if key is not None:
+                        want(key)
 
     pos: dict[tuple, tuple[int, int]] = {}
 
@@ -919,12 +1035,14 @@ def pack_prefabs(atlas: Image.Image, anim_y: int, cell_px: int):
         for layer in doc["layers"]:
             li = PREFAB_LAYER[layer["name"]]
             for c in layer["cells"]:
-                ax, ay = pos[_cell_key(c)]
+                key = _cell_key(c)
+                ax, ay = pos[key]
                 cells.append({
                     "dx": c["x"], "dy": c["y"], "layer": li,
                     "ax": ax, "ay": ay, "pw": c["w"], "ph": c["h"],
                     "centred": c["origin"] == 1,
                     "has_door": _prefab_has_door(li, c),
+                    "key": key,  # the base crop key, so a skin can substitute its rect below
                 })
                 if li == 2:  # a House sprite blocks its full footprint in tiles, clipped to rect
                     tw = (c["w"] + TILE - 1) // TILE
@@ -934,11 +1052,45 @@ def pack_prefabs(atlas: Image.Image, anim_y: int, cell_px: int):
                             blocks[ry] |= 1 << rx
         group_count = _prefab_groups(cells)
         cells.sort(key=lambda d: (d["layer"], d["dy"], d["dx"]))
+
+        # Skin arrays are DERIVED from the base cells, not re-clustered: each skin cell is a base
+        # cell with only its atlas rect swapped for the palette twin (or absent, if the skin drops
+        # it). So a skin carries the SAME group numbering, the same dx/dy, the same layer and the
+        # same block footprint as the base -- the mirror, the kept-cluster and the feather rules in
+        # prefab_stamp.hpp read identically whichever skin is drawn.
+        #
+        # A skin only ever DROPS a mapped-sheet floor/detail tile or a NATURE prop a palette cannot
+        # voice (litter, tufts, a sunflower under snow -- layer 0/1/3). It never drops a layer-2
+        # STRUCTURE, because those come from TilesetHouse and are unmapped, and that is exactly what
+        # lets blocking stay skin-invariant: prefab_blocks in the engine scans only layer-2 cells,
+        # so it reads the same footprint whichever skin it is handed. Asserted here so a future
+        # mapping edit cannot quietly break it and drift the picture from the collision.
+        skin_names = PREFAB_SKINS.get(stem, ["green"])
+        skin_cells = []
+        for skin in skin_names:
+            if skin == "green":
+                skin_cells.append(cells)  # skin 0 aliases the base array
+                continue
+            sk = []
+            for c in cells:
+                key = _skin_key(c["key"], skin)
+                if key is None:
+                    assert c["layer"] != 2, (
+                        f"{stem} skin {skin} would drop a layer-2 STRUCTURE cell; a skin may drop "
+                        "only floor/detail tiles and nature props, so blocking stays skin-invariant")
+                    continue
+                nc = dict(c)
+                nc["ax"], nc["ay"] = pos[key]
+                sk.append(nc)
+            skin_cells.append(sk)
+
         prefabs.append({"stem": stem, "cpp": cpp, "name": doc.get("name", stem),
                         "w": w, "h": h, "cells": cells, "blocks": blocks,
-                        "group_count": group_count, "mirrorable": MIRRORABLE.get(stem, True)})
+                        "group_count": group_count, "mirrorable": MIRRORABLE.get(stem, True),
+                        "skin_names": skin_names, "skin_cells": skin_cells})
+        skin_tag = "" if len(skin_names) == 1 else f"  skins={'/'.join(skin_names)}"
         print(f"  prefab {stem:<20} {w}x{h}  cells={len(cells)}  groups={group_count}  "
-              f"mirror={'yes' if MIRRORABLE.get(stem, True) else 'NO'}")
+              f"mirror={'yes' if MIRRORABLE.get(stem, True) else 'NO'}{skin_tag}")
     print(f"  packed {len(grid_order)} grid + {len(big_order)} big prefab crops")
     return atlas, anim_y, prefabs
 
@@ -987,24 +1139,52 @@ def write_prefabs_header(prefabs) -> None:
         "                                // village that stamps this parcel gives the house a door.",
         "};",
         "",
+        "// A SKIN is the same parcel re-voiced in one of the pack author's parallel terrain palettes",
+        "// (see PREFAB_SKINS in tools/build_atlas.py). Skin 0 is the base parcel and its `cells`",
+        "// alias `PrefabDef::cells`. Higher skins swap each floor/nature cell's atlas rect for the",
+        "// palette twin the author drew (deep-forest, snow) and OMIT cells a palette cannot voice (a",
+        "// sunflower or a litter tuft under snow), so a skin's array may be SHORTER than the base --",
+        "// but it never drops a layer-2/3 cell and never changes a cell's dx/dy/layer/group, so the",
+        "// blocking and the kept-cluster rules stay identical whichever skin is drawn.",
+        "struct PrefabSkin {",
+        "    const PrefabCell* cells;    // this skin's cells, in the same sort order as the base",
+        "    std::uint16_t cell_count;",
+        "};",
+        "",
         "struct PrefabDef {",
         "    const char* name;",
         "    std::uint8_t w, h;                  // footprint in tiles",
-        "    const PrefabCell* cells;            // sorted: layer asc, then dy, then dx",
+        "    const PrefabCell* cells;            // base (skin 0) cells; sorted layer asc, then dy, dx",
         "    std::uint16_t cell_count;",
         "    const std::uint32_t* block_rows;    // h entries; bit x set = tile (x,row) blocked (w <= 32)",
         "    std::uint8_t group_count;           // number of optional cell groups (1..group_count)",
         "    bool mirrorable;                    // safe to stamp flipped (no readable glyphs baked in)",
+        "    const PrefabSkin* skins;            // skin_count entries; skins[0].cells == cells",
+        "    std::uint8_t skin_count;            // 1 for an unskinned parcel; >1 = base + palette twins",
         "};",
         "",
     ]
-    for p in prefabs:
-        lines.append(f"inline constexpr PrefabCell kPrefabCells_{p['cpp']}[] = {{")
-        for c in p["cells"]:
+    def emit_cell_array(name: str, cell_list: list) -> None:
+        lines.append(f"inline constexpr PrefabCell {name}[] = {{")
+        for c in cell_list:
             lines.append(f"    {{{c['dx']}, {c['dy']}, {c['layer']}, {c['group']}, "
                          f"{c['ax']}, {c['ay']}, {c['pw']}, {c['ph']}, "
                          f"{str(c['centred']).lower()}, {str(c['has_door']).lower()}}},")
         lines.append("};")
+
+    for p in prefabs:
+        emit_cell_array(f"kPrefabCells_{p['cpp']}", p["cells"])
+        # Higher skins get their own arrays; skin 0 aliases the base array above.
+        for k, (skin, sk_cells) in enumerate(zip(p["skin_names"], p["skin_cells"])):
+            if k == 0:
+                continue
+            emit_cell_array(f"kPrefabCells_{p['cpp']}_{skin}", sk_cells)
+        skin_entries = []
+        for k, skin in enumerate(p["skin_names"]):
+            arr = f"kPrefabCells_{p['cpp']}" if k == 0 else f"kPrefabCells_{p['cpp']}_{skin}"
+            skin_entries.append(f"{{{arr}, {len(p['skin_cells'][k])}}}")
+        lines.append(f"inline constexpr PrefabSkin kPrefabSkins_{p['cpp']}[] = {{"
+                     + ", ".join(skin_entries) + "};")
         blk = ", ".join(f"0x{b:08x}u" for b in p["blocks"])
         lines.append(f"inline constexpr std::uint32_t kPrefabBlocks_{p['cpp']}[] = {{{blk}}};")
         lines.append("")
@@ -1012,7 +1192,8 @@ def write_prefabs_header(prefabs) -> None:
     for p in prefabs:
         lines.append(f"    {{\"{p['name']}\", {p['w']}, {p['h']}, kPrefabCells_{p['cpp']}, "
                      f"{len(p['cells'])}, kPrefabBlocks_{p['cpp']}, "
-                     f"{p['group_count']}, {str(p['mirrorable']).lower()}}},")
+                     f"{p['group_count']}, {str(p['mirrorable']).lower()}, "
+                     f"kPrefabSkins_{p['cpp']}, {len(p['skin_names'])}}},")
     lines += [
         "};",
         "",
@@ -1031,18 +1212,23 @@ def prefab_proof(prefabs) -> None:
     atlas = Image.open(ROOT / "assets" / "atlas.png").convert("RGBA")
     scale = 4
     for p in prefabs:
-        img = Image.new("RGBA", (p["w"] * TILE, p["h"] * TILE), (0, 0, 0, 0))
-        for c in p["cells"]:  # already sorted layer, dy, dx -> correct draw order
-            sprite = atlas.crop((c["ax"], c["ay"], c["ax"] + c["pw"], c["ay"] + c["ph"]))
-            px, py = c["dx"] * TILE, c["dy"] * TILE
-            if c["centred"]:
-                px += 8 - c["pw"] // 2
-                py += 8 - c["ph"] // 2
-            img.alpha_composite(sprite, (px, py))
-        out = img.resize((img.width * scale, img.height * scale), Image.NEAREST)
-        dest = PREFAB_DIR / f"{p['stem']}_atlas.png"
-        out.save(dest)
-        print(f"  proof {p['stem']:<14} -> {dest.name}")
+        # Every skin, so the deep-forest and snow re-voices can be eyeballed against the base and
+        # against the reskin study's own proofs. Skin 0 keeps the plain `<stem>_atlas.png` name it
+        # always had; higher skins get `<stem>_skin<k>_atlas.png`.
+        for k, (skin, cells) in enumerate(zip(p["skin_names"], p["skin_cells"])):
+            img = Image.new("RGBA", (p["w"] * TILE, p["h"] * TILE), (0, 0, 0, 0))
+            for c in cells:  # already sorted layer, dy, dx -> correct draw order
+                sprite = atlas.crop((c["ax"], c["ay"], c["ax"] + c["pw"], c["ay"] + c["ph"]))
+                px, py = c["dx"] * TILE, c["dy"] * TILE
+                if c["centred"]:
+                    px += 8 - c["pw"] // 2
+                    py += 8 - c["ph"] // 2
+                img.alpha_composite(sprite, (px, py))
+            out = img.resize((img.width * scale, img.height * scale), Image.NEAREST)
+            dest = PREFAB_DIR / (f"{p['stem']}_atlas.png" if k == 0
+                                 else f"{p['stem']}_skin{k}_{skin}_atlas.png")
+            out.save(dest)
+            print(f"  proof {p['stem']:<14} skin{k} {skin:<7} -> {dest.name}")
 
 
 def main() -> int:

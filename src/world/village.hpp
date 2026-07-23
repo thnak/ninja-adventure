@@ -414,6 +414,10 @@ private:
                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(tx)) * 0x9E37'79B9'7F4A'7C15ull) ^
                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ty)) * 0xC2B2'AE3D'27D4'EB4Full));
         std::uint32_t variant = (prefab_force_groups(def, static_cast<std::uint32_t>(vr.next()))) & ~1u;
+        // A village lays every parcel in its base (green) skin: the palette twins are a wild-scatter
+        // flourish, and a village square is not the place to roll a deep-wood or snow re-voice of a
+        // market. Skin 0 aliases def.cells, so the scans below are unchanged from the pre-skin code.
+        const PrefabSkin& sk = prefab_skin_of(def, 0);
 
         for (int y = 0; y < def.h; ++y) {
             for (int x = 0; x < def.w; ++x) {
@@ -448,19 +452,19 @@ private:
         // house writes, so collision and picture agree.
         for (int y = 0; y < def.h; ++y) {
             for (int x = 0; x < def.w; ++x) {
-                if (prefab_blocks(def, variant, x, y)) put(tx + x, ty + y, Terrain::kBuilding);
+                if (prefab_blocks(def, sk, variant, x, y)) put(tx + x, ty + y, Terrain::kBuilding);
             }
         }
         // The doorways. Every kept dwelling cell gets its door tile punched back to walkable under the
         // sprite — the arch you step into — and worldgen (`index_doors`) emits a Door there from the
         // record pushed below, so the interior room is allocated the same way a Structure's is.
-        for (std::uint16_t i = 0; i < def.cell_count; ++i) {
-            const PrefabCell& c = def.cells[i];
+        for (std::uint16_t i = 0; i < sk.cell_count; ++i) {
+            const PrefabCell& c = sk.cells[i];
             if (!prefab_cell_is_dwelling(c)) continue;
-            if (!prefab_cell_visible(def, c, variant)) continue;
+            if (!prefab_cell_visible(def, sk, c, variant)) continue;
             put(tx + prefab_door_dx(c), ty + prefab_door_dy(c), Terrain::kPath);
         }
-        parcels_->push_back(PlacedPrefab{tx, ty, id, variant});
+        parcels_->push_back(PlacedPrefab{tx, ty, id, variant, 0});
         return true;
     }
 

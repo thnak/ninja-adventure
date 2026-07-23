@@ -114,7 +114,22 @@ struct PoiPlacement {
                                 // on. Not a nicety — the feather exposes the base at every dropped
                                 // border cell, so a parcel on the wrong base shows it (the snow
                                 // pond's white floor on the ring's tan stone was the tell).
+    std::uint8_t skin_mask;     // bit per allowed skin (see kSkin* below); placement picks one from
+                                // the instance variant. Bit 0 (base) is always set. A row whose
+                                // parcel has no skins must be exactly kSkinBase.
+    std::uint8_t salt_tag;      // decorrelates the placement grid of rows that REUSE a PrefabId in a
+                                // second ring (a forest camp and a snow camp are both kCampClearing,
+                                // so id alone would give them one grid). 0 for the original rows, so
+                                // their scatter is byte-for-byte unchanged; distinct per reuse.
 };
+
+// Skin indices match the PrefabSkin order tools/build_atlas.py emits: 0 = base (the green parcel),
+// 1 = autumn (the pack author's deep-forest palette twin), 2 = snow. A skin_mask is a bit per
+// allowed skin, and placement picks one of the set bits from the variant. A parcel with skin_count 1
+// (every type but the two forest set-pieces) may only be placed with kSkinBase.
+inline constexpr std::uint8_t kSkinBase = 1u << 0;
+inline constexpr std::uint8_t kSkinAutumn = 1u << 1;
+inline constexpr std::uint8_t kSkinSnow = 1u << 2;
 
 // The footprint whitelists for the table below. Every mask includes kTree (clearing wood is what
 // placing a parcel in the wild means — stamp_prefab fells it) and none includes kWater.
@@ -139,14 +154,18 @@ inline constexpr PoiPlacement kPoiTable[] = {
     // the thinning packs the band near its floor rather than leaving lottery holes a sparse grid
     // rolled empty). The gap of 56 is set by what one screen shows (~40 tiles at default zoom, plus
     // margin), so two camps can never share it and read as a copy-paste.
-    {PrefabId::kCampClearing, Ring::kForest, 32, 56, 3, true, kBaseAnyDry},
+    // A forest camp comes out summer-green OR deep-wood at random (base|autumn) — the exact variety
+    // the variant system exists for, now reaching the palette as well as the mirror and the props.
+    {PrefabId::kCampClearing, Ring::kForest, 32, 56, 3, true, kBaseAnyDry,
+     kSkinBase | kSkinAutumn, 0},
     // A lone dwelling you remember stumbling on. Its rarity is EARNED, not dialled: the forest ring
     // is already blanketed by camps at gap 56, so a cottage only lands in the rare pocket no camp
     // claimed — the gap is set just above a camp's own spacing (max(60,56)=60), enough that a cottage
     // sits in its own clearing rather than sharing a camp's, and the dense camps do the thinning down
     // to a handful. A wider gap does not read as "rarer", it reads as "none": there is no 100-tile
-    // camp-free pocket in that ring to find.
-    {PrefabId::kForestCottage, Ring::kForest, 40, 60, 4, true, kBaseAnyDry},
+    // camp-free pocket in that ring to find. Green or deep-wood, like the camps.
+    {PrefabId::kForestCottage, Ring::kForest, 40, 60, 4, true, kBaseAnyDry,
+     kSkinBase | kSkinAutumn, 0},
     // Frozen ponds to break up the snowfield. The pond is FLOOR art over walkable ice — the stamp
     // writes no kWater under it, so you skate across (deliberate; see prefab_fits and the note
     // there). Snowfield ONLY: the snow ring's base is a mix of snow and tan stone, and a white
@@ -156,12 +175,28 @@ inline constexpr PoiPlacement kPoiTable[] = {
     // rejects most candidates (the ring is half tan stone), so the grid over-generates and the base
     // test plus the gap do the thinning.
     {PrefabId::kSnowPond, Ring::kSnow, 48, 80, 4, true,
-     terrain_mask(Terrain::kSnow, Terrain::kTree)},
+     terrain_mask(Terrain::kSnow, Terrain::kTree), kSkinBase, 0},
     // Orchard rows to interrupt the open meadow grass. Grass only, for the same reason the pond
     // wants snow: the meadow's ponds ring themselves with sand, and an orchard feathered into a
     // beach shows tan holes between its trees.
     {PrefabId::kSouthOrchard, Ring::kMeadow, 72, 80, 4, true,
-     terrain_mask(Terrain::kGrass, Terrain::kTree)},
+     terrain_mask(Terrain::kGrass, Terrain::kTree), kSkinBase, 0},
+
+    // The SAME two forest set-pieces, now in the snow ring wearing their snow skin. They come AFTER
+    // every forest and meadow row on purpose: the placement loop walks the table in order, so a row
+    // added here spaces itself against the snow ponds already laid (the cross-type gap rule) while
+    // moving no camp, cottage, pond or orchard placed before it. They reuse kCampClearing /
+    // kForestCottage — the parcel IS the same, only its palette differs — so each carries a distinct
+    // salt_tag to keep its grid from correlating with its forest twin's.
+    //
+    // base_allow is snow|tree like the pond, for the same reason: a snow-skinned parcel's white
+    // field only reads as part of the world where the ground its ragged edge exposes is snow, not
+    // the ring's tan stone. A snow camp is a rare thing (a handful) — the cell is large and the gap,
+    // spaced against the wide ponds, thins it further; a snow cottage is rarer still.
+    {PrefabId::kCampClearing, Ring::kSnow, 40, 64, 3, true,
+     terrain_mask(Terrain::kSnow, Terrain::kTree), kSkinSnow, 1},
+    {PrefabId::kForestCottage, Ring::kSnow, 44, 72, 2, true,
+     terrain_mask(Terrain::kSnow, Terrain::kTree), kSkinSnow, 2},
 
     // DEFERRED — deliberately not in the table, each its own task:
     //   kLakeIslands       its floor art contains OPEN WATER; stamping it needs overlay kWater
@@ -654,11 +689,15 @@ private:
         for (const PoiPlacement& row : kPoiTable) {
             const PrefabDef& def = kPrefabs[static_cast<int>(row.id)];
             const int cells = kMapTiles / row.cell;
-            // Per-type salt so two types' grids do not correlate. kCampClearing is id 0, so its salt
-            // stays exactly 0xCA3B0000 — the value the camp-only code used — and its scatter does not
-            // move. Later ids differ in bits the cell/cx/cy hash below never touches.
+            // Per-type salt so two types' grids do not correlate. kCampClearing is id 0 with
+            // salt_tag 0, so its salt stays exactly 0xCA3B0000 — the value the camp-only code used —
+            // and its scatter does not move. Later ids differ in the id byte; a row that reuses an id
+            // in a second ring (the snow camp/cottage) differs in salt_tag, folded into bits the
+            // cell/cx/cy hash below never touches, so its grid is its own rather than a copy of its
+            // forest twin's.
             const std::uint64_t salt =
-                0xCA3B'0000ull ^ (static_cast<std::uint64_t>(static_cast<std::uint8_t>(row.id)) << 8);
+                0xCA3B'0000ull ^ (static_cast<std::uint64_t>(static_cast<std::uint8_t>(row.id)) << 8)
+                ^ (static_cast<std::uint64_t>(row.salt_tag) << 40);
             const std::uint32_t drop = 4u - row.present_in_4;
             for (int cy = 0; cy < cells; ++cy) {
                 for (int cx = 0; cx < cells; ++cx) {
@@ -694,6 +733,11 @@ private:
                     // variant here, so the stored value is the whole of the shared state and the
                     // renderer needs no copy of the policy. A no-op when the type allows drops.
                     if (!row.allow_group_drop) variant = prefab_force_groups(def, variant);
+                    // The skin: chosen from the variant AFTER any group masking, from bits the
+                    // mirror/groups/feather do not consume (prefab_pick_skin). It reads the variant
+                    // and does not touch it, so it changes no anchor and no variant — placement is
+                    // decided entirely by what follows, exactly as before skins existed.
+                    const std::uint8_t skin = prefab_pick_skin(variant, row.skin_mask);
 
                     if (!prefab_fits(tx, ty, def, row.ring, row.base_allow)) continue;
                     // Keep the whole scatter, drop only the collisions: a parcel too close to one
@@ -710,8 +754,8 @@ private:
                         if (gx < need && gy < need) { crowded = true; break; }
                     }
                     if (crowded) continue;
-                    stamp_prefab(tx, ty, def, variant);
-                    prefabs_.push_back(PlacedPrefab{tx, ty, row.id, variant});
+                    stamp_prefab(tx, ty, def, variant, skin);
+                    prefabs_.push_back(PlacedPrefab{tx, ty, row.id, variant, skin});
                 }
             }
         }
@@ -749,7 +793,12 @@ private:
     // parcel clears the lot rather than leaving one in twelve: the parcel IS a cleared space, and its
     // floor art draws over the whole thing. In snow and meadow there is little or no wood under a
     // parcel, so the fell is a near no-op there; the ground it exposes is the ring's own grass.
-    void stamp_prefab(int tx, int ty, const PrefabDef& def, std::uint32_t variant) {
+    void stamp_prefab(int tx, int ty, const PrefabDef& def, std::uint32_t variant,
+                      std::uint8_t skin) {
+        // Blocking is skin-invariant (prefab_blocks scans only the layer-2 structures a skin never
+        // touches), so passing the instance's own skin here writes exactly the footprint the
+        // renderer will draw around — the two cannot disagree.
+        const PrefabSkin& sk = prefab_skin_of(def, skin);
         for (int dy = -1; dy <= def.h; ++dy) {
             for (int dx = -1; dx <= def.w; ++dx) {
                 const int x = tx + dx;
@@ -764,7 +813,7 @@ private:
         // that could drift apart, which is the trap `Terrain::kBuilding` under a house avoids.
         for (int y = 0; y < def.h; ++y) {
             for (int x = 0; x < def.w; ++x) {
-                if (prefab_blocks(def, variant, x, y)) put(tx + x, ty + y, Terrain::kBuilding);
+                if (prefab_blocks(def, sk, variant, x, y)) put(tx + x, ty + y, Terrain::kBuilding);
             }
         }
     }
@@ -827,10 +876,11 @@ private:
         // from the parcel's kept dwelling cells so the room is allocated by the very same sort below.
         for (const PlacedPrefab& pp : vparcels_) {
             const PrefabDef& def = kPrefabs[static_cast<int>(pp.id)];
-            for (std::uint16_t i = 0; i < def.cell_count; ++i) {
-                const PrefabCell& c = def.cells[i];
+            const PrefabSkin& sk = prefab_skin_of(def, pp.skin);
+            for (std::uint16_t i = 0; i < sk.cell_count; ++i) {
+                const PrefabCell& c = sk.cells[i];
                 if (!prefab_cell_is_dwelling(c)) continue;
-                if (!prefab_cell_visible(def, c, pp.variant)) continue;
+                if (!prefab_cell_visible(def, sk, c, pp.variant)) continue;
                 doors_.push_back(Door{tile_key(pp.tx + prefab_door_dx(c), pp.ty + prefab_door_dy(c)),
                                       0});
             }

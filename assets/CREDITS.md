@@ -12,9 +12,9 @@ means *free for personal use*, which is not the same thing.
 | **Ninja Adventure** (Pixel-Boy & AAA) | **characters (95, 4-direction animated), monsters (66), bosses (20), farm animals (27), FX, items, UI, audio** | <https://pixel-boy.itch.io/ninja-adventure-asset-pack> |
 | Roguelike/RPG pack | crop growth stages (the last Kenney art in the world) | <https://kenney.nl/assets/roguelike-rpg-pack> |
 | Roguelike Caves & Dungeons | dungeon and mine interiors | <https://kenney.nl/assets/roguelike-caves-dungeons> |
-| UI Pack RPG Expansion | menu panels, buttons | <https://kenney.nl/assets/ui-pack-rpg-expansion> |
-| Fantasy UI Borders | menu frames | <https://kenney.nl/assets/fantasy-ui-borders> |
-| Game Icons | item and skill icons (425) | <https://kenney.nl/assets/game-icons> |
+| UI Pack RPG Expansion | menu panels, buttons — *superseded by the pack's own `Ui/Theme`, see below* | <https://kenney.nl/assets/ui-pack-rpg-expansion> |
+| Fantasy UI Borders | menu frames — *superseded, as above* | <https://kenney.nl/assets/fantasy-ui-borders> |
+| Game Icons | item/skill icons (425) — *superseded by the pack's own `Ui/Skill Icon` + `Items/`, see below* | <https://kenney.nl/assets/game-icons> |
 | Particle Pack | spell and impact effects (193) | <https://kenney.nl/assets/particle-pack> |
 | RPG Audio | hits, footsteps, UI sounds (52) | <https://kenney.nl/assets/rpg-audio> |
 | Music Jingles | stingers and fanfares (86) | <https://kenney.nl/assets/music-jingles> |
@@ -92,9 +92,25 @@ eyeballing five hundred tiles a sheet.
 | wildlife and the outer-ring monster | `Actor/Animal/WildBoar`, `Actor/Animal/DogBlack`, `Actor/Monster/{Bear,Racoon,Skull}` |
 | the Character screen's portrait | `Actor/Character/NinjaGreen/Faceset.png` |
 
-The Kenney packs stay in `fetch_assets.sh` — some of them (Game Icons, Particle Pack, the UI packs)
-cover things Ninja Adventure does not, and those are still wanted for P4's inventory and crafting
-screens.
+### P4's icons and panels come from the pack too — corrected
+
+The earlier plan reserved P4's inventory and crafting UI for Kenney: Game Icons for the 425 item and
+skill icons, the two UI packs for panels and frames. Reading the pack this session shows that plan
+was made without looking, the same mistake the terrain migration made in P1. Ninja Adventure ships
+its **own** UI, and it is more complete than the Kenney substitutes:
+
+* **`Ui/Theme`** is a full Godot theme — panels, buttons, sliders, every nine-slice already sliced,
+  drawn in the pack's own palette. A Kenney panel next to a Ninja Adventure inventory slot would
+  reopen exactly the style split P1 spent a phase closing.
+* **`Ui/Skill Icon`** has **121 icons, each with a built-in disabled (greyed) state** — the on/off
+  pair a skill bar needs, which the flat Kenney Game Icons do not carry.
+* **`Items/`** carries the item sprites themselves, in the same 16px pixel-art style as everything
+  already in `atlas.png`.
+
+So P4's UI and icons will be packed from the pack's `Ui/` and `Items/` folders, not from Kenney. The
+Kenney packs still stay in `fetch_assets.sh` for what the pack genuinely lacks — the crop growth
+stages (still the last Kenney art in the world, queued behind `TilesetField.png` until P4) and any
+gap P4 turns up — but they are no longer the plan of record for icons or panels.
 
 ### Two things this pack does not have, found by looking for them
 
@@ -185,6 +201,25 @@ pixels, and it is unambiguous:
 > flags `RuinA`/`RuinB`, and correctly: that region is a continuous mosaic of rubble rather than
 > discrete sprites, so any 3×3 window cuts through it.
 
+### Prefabs: the author's own composition, not ours
+
+The single largest piece of art in this repo that no one on this project drew or arranged is the set
+of **12 prefab parcels**, and they are the most CC0 thing here in the truest sense: they are the pack
+author's own hand-composed map, lifted whole. `assets/_src/ninja/GodotProject.zip` ships
+`World/Maps/Village.tscn` — a village Pixel-Boy & AAA laid out by hand, houses sitting on their own
+palisade, a market yard with a cart and a radish garden, a pine camp with a tent and a campfire.
+`tools/import_prefabs.py` cuts rectangular parcels out of that scene at build time and writes them to
+`assets/_gen/prefabs/`; `tools/build_atlas.py` packs them into `atlas.png` and emits
+`src/world/prefabs.hpp`. The provenance chain is the whole point: the set-pieces the game scatters
+and the blocks a village lays are the author's composition, not a procedural guess at one.
+
+The twelve are `camp_clearing`, `forest_cottage`, `snow_pond`, `south_orchard`, `market_yard`,
+`street_houses`, `north_treeline_well`, `stairs_plaza`, `lake_islands`, `waterfall_bridge`,
+`fort_gate` and `fort_courtyard` — the last four cut but not yet placed (ROADMAP R8's deferred
+ledger says why). Nothing new was licensed for this: every pixel is the same CC0 Ninja Adventure
+download `fetch_assets.sh` already pulls, only read out of the author's scene rather than off a
+tileset by us.
+
 ### Choosing the P2 creatures: three plausible names ruled out by looking
 
 Wildlife needed a pack animal, a big neutral bruiser and a small timid critter. The obvious picks by
@@ -225,9 +260,13 @@ game has to run from a clean checkout.
 
 ## What is committed
 
-- **`atlas.png`** — every sprite the game uses: 37 tiles, 12 animation sheets, 17 multi-tile
-  structures and 12 off-grid strips (weather, spells, the arrow, the portrait), packed into one
-  448×1834 texture. Committed, because it is the only art the build needs.
+- **`atlas.png`** — every sprite the game uses: tiles, 12 animation sheets, multi-tile structures,
+  12 off-grid strips (weather, spells, the arrow, the portrait) **and the 12 prefab parcels** cut
+  from the author's own map (below), packed into one 846×4414 texture. The parcels roughly quadrupled
+  the atlas from its pre-prefab 448×1834. Committed, because it is the only art the build needs.
+- **`_gen/prefabs/`** — the 12 parcels, each a `.png` + `.json` + an atlas-ready `_atlas.png`, cut
+  from the author's `Village.tscn` by `tools/import_prefabs.py`. Committed for the same reason
+  `atlas.png` is: the build reads them, and regenerating them needs the gitignored `GodotProject.zip`.
 - **`tile_index.json`** — 5225 source tiles with role, geometry and a human description. Committed
   because regenerating it costs a full visual pass over 23 sheets.
 - **`_src/`** — the raw packs. **Not committed** (`.gitignore`); ~2 MB of mostly-unused tiles.

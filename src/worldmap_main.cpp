@@ -277,21 +277,41 @@ int main(int argc, char** argv) {
     // than printed as a bare total, and why an off-ring line is flagged loudly.
     int poi_by_type[static_cast<int>(PrefabId::kCount)] = {};
     int poi_by_type_ring[static_cast<int>(PrefabId::kCount)][kRingCount] = {};
+    int poi_by_type_skin[static_cast<int>(PrefabId::kCount)][8] = {};
     for (const PlacedPrefab& pp : layout.prefabs()) {
         const PrefabDef& def = kPrefabs[static_cast<int>(pp.id)];
         const int rr = static_cast<int>(ring_of(seed, pp.tx + def.w / 2, pp.ty + def.h / 2));
         ++poi_by_type[static_cast<int>(pp.id)];
         ++poi_by_type_ring[static_cast<int>(pp.id)][rr];
+        ++poi_by_type_skin[static_cast<int>(pp.id)][pp.skin];
     }
+    // A type may now be a table row in MORE than one ring — a camp scatters green/autumn in the
+    // forest AND, in its snow skin, in the snow ring — so its home rings are gathered from every
+    // row bearing its id, not from one row. A count outside that set is still a `prefab_fits` bug.
+    bool ring_ok[static_cast<int>(PrefabId::kCount)][kRingCount] = {};
+    for (const PoiPlacement& row : kPoiTable) {
+        ring_ok[static_cast<int>(row.id)][static_cast<int>(row.ring)] = true;
+    }
+    static const char* kSkinNames[] = {"base", "autumn", "snow"};
     std::printf("\nplaced prefabs: %zu total\n", layout.prefabs().size());
+    // Split per type, then per ring AND per skin — the point of the skins is that a camp's total is
+    // now two populations (a forest one wearing base/autumn, a snow-ring one wearing snow), and a
+    // bare total would hide whether either landed in sane numbers. A type printed once, even if it
+    // owns two rows.
+    bool printed[static_cast<int>(PrefabId::kCount)] = {};
     for (const PoiPlacement& row : kPoiTable) {
         const int ti = static_cast<int>(row.id);
-        std::printf("  %-16s %4d   home ring %s\n", kPrefabs[ti].name, poi_by_type[ti],
-                    kRingNames[static_cast<int>(row.ring)]);
+        if (printed[ti]) continue;
+        printed[ti] = true;
+        std::printf("  %-16s %4d\n", kPrefabs[ti].name, poi_by_type[ti]);
         for (int i = 0; i < kRingCount; ++i) {
             if (poi_by_type_ring[ti][i] == 0) continue;
             std::printf("      %-10s %4d%s\n", kRingNames[i], poi_by_type_ring[ti][i],
-                        static_cast<int>(row.ring) == i ? "" : "   <-- OUT OF RING (bug)");
+                        ring_ok[ti][i] ? "" : "   <-- OUT OF RING (bug)");
+        }
+        for (int s = 0; s < 8; ++s) {
+            if (poi_by_type_skin[ti][s] == 0) continue;
+            std::printf("      skin %-8s %4d\n", s < 3 ? kSkinNames[s] : "?", poi_by_type_skin[ti][s]);
         }
     }
     // The parcels a village lays as furniture, tallied apart from the scattered landmarks — they are
@@ -307,12 +327,21 @@ int main(int argc, char** argv) {
     // One `--shot ... --at TX TY` sample per type, aimed at the parcel's centre-x and a few tiles
     // SOUTH of its centre — so the player stands near the parcel's lower edge, which is also the
     // cross-chunk case (a tall parcel straddles the chunk border below the player) worth eyeballing.
-    std::printf("\nsample --at per type (mmo_client --shot 2 <name>.png --at TX TY):\n");
+    // One sample PER ROW, not per type: a camp's forest row and its snow row want separate --at
+    // points (one to eyeball an autumn camp, one a snow camp), so the sample is matched to the row's
+    // ring and reports the skin the instance drew.
+    std::printf("\nsample --at per row (mmo_client --shot 2 <name>.png --at TX TY):\n");
     for (const PoiPlacement& row : kPoiTable) {
         for (const PlacedPrefab& pp : layout.prefabs()) {
             if (pp.id != row.id) continue;
             const PrefabDef& def = kPrefabs[static_cast<int>(pp.id)];
-            std::printf("  %-16s --at %d %d\n", def.name, pp.tx + def.w / 2, pp.ty + def.h / 2 + 5);
+            if (static_cast<int>(ring_of(seed, pp.tx + def.w / 2, pp.ty + def.h / 2)) !=
+                static_cast<int>(row.ring)) {
+                continue;
+            }
+            std::printf("  %-16s %-6s %-6s --at %d %d\n", def.name, kRingNames[static_cast<int>(row.ring)],
+                        pp.skin < 3 ? kSkinNames[pp.skin] : "?", pp.tx + def.w / 2,
+                        pp.ty + def.h / 2 + 5);
             break;
         }
     }

@@ -469,7 +469,110 @@ thật và ghi ra đây chứ không giấu; đổi lại là kiến trúc khôn
 Windows/MSVC ra đúng từng con số của Linux, và `mmo_sim` (gồm cả hai phép thử mới: tường chặn được
 người, cửa dẫn vào rồi ra đúng ô thềm) **OK** trên cả hai.
 
+## Xen giữa: R8 — nội dung là parcel của chính tác giả (2026-07-23)
+
+R0–R7 sửa **cách dựng hình**; R8 sửa **thứ được dựng**. Bốn GIF demo cho thấy khác biệt còn lại
+không nằm ở tile hay ở autotile nữa mà ở **bố cục**: thế giới của ta vẫn là noise-scatter — cây và
+nhà rắc theo hàm nhiễu — còn của tác giả là những cảnh **ghép tay**. Nhà ngồi ngay trên hàng rào,
+chợ có xe kéo và luống củ cải, trại thông có lều và đống lửa.
+
+**Quyết định: không vá noise-scatter cho ra vẻ có bố cục.** Đó là con đường tinh chỉnh vô tận —
+thêm luật cụm, thêm luật khoảng cách — mà đích đến vẫn là đoán xem tác giả sẽ đặt gì. Bộ art CC0 này
+đã ship sẵn thứ tốt hơn: `World/Maps/Village.tscn`, một cái làng chính tác giả ghép tay. Nên nội dung
+set-piece của game **là composition của ông ấy**, không phải phỏng đoán procedural của ta về nó.
+
+### Cái đã ship: một pipeline dữ liệu, chạy lúc build
+
+| Bước | Việc |
+|---|---|
+| `tools/import_prefabs.py` | cắt các **parcel** hình chữ nhật ra khỏi `Village.tscn` — đọc scene, tileset và texture thẳng từ `GodotProject.zip`, dựng lại bản đồ đúng cách engine của tác giả dựng (bao gồm cái bẫy `cell_tile_origin` đã đo) |
+| `tools/build_atlas.py` | đóng 12 parcel vào atlas và sinh `src/world/prefabs.hpp` — **art**: parcel trông thế nào |
+| `src/world/prefab_stamp.hpp` | **luật thuần** `(def, variant)`: parcel chặn ở đâu, cụm tuỳ chọn nào sống, mirror ra sao. Số nguyên, chạy được cả ở sim lẫn renderer trên hai máy khác nhau mà vẫn khớp |
+
+12 parcel cắt được: `camp_clearing`, `forest_cottage`, `snow_pond`, `south_orchard`, `market_yard`,
+`street_houses`, `north_treeline_well`, `stairs_plaza`, và bốn cái **hoãn** (dưới).
+
+### Landmark rắc theo vòng — `kPoiTable`
+
+Bốn parcel được rắc như mốc landmark, mỗi vòng một loại, spacing là hàm thuần của seed nên tất định:
+
+| parcel | vòng | đặt được | ràng buộc nền |
+|---|---|---|---|
+| `camp_clearing` | rừng | **28 trại** | nền khô bất kỳ; cell 32 / gap 56 (một màn hình) nên hai trại không đọc thành copy-paste |
+| `forest_cottage` | rừng | **4 nhà** | hiếm vì *kiếm được*: chỉ lọt vào túi rừng mà không trại nào chiếm |
+| `snow_pond` | tuyết | **12 ao** | CHỈ trên tuyết — ao là sàn băng đi được, stamp **không** ghi `kWater` nên trượt qua được; feather lên đá tan đọc thành hình cắt giấy |
+| `south_orchard` | đồng cỏ | **11 vườn** | CHỈ trên cỏ — feather vào bãi cát sẽ hở lỗ tan giữa các cây |
+
+`place_prefabs()` chạy **sau** làng và cứ điểm, vì một parcel từ chối mọi ô đã xây; nó là thứ cuối
+đọc overlay trước khi index đóng băng.
+
+### Parcel của làng, theo tier, có cửa thật
+
+Làng không rắc landmark mà **lát parcel như đồ đạc** — `village.hpp` chọn theo tier:
+
+| parcel | từ tier | chỗ |
+|---|---|---|
+| `market_yard` | 2 | vị trí xoay theo có sảnh hay không |
+| `street_houses` | 3 | nam quảng trường, nơi làng đủ sâu |
+| `north_treeline_well` | 3 | bắc quảng trường, trong hàng cây |
+| `stairs_plaza` | — | quảng trường bậc thang |
+
+Nhà trong parcel là sprite `TilesetHouse` thật, gắn cờ `has_door` lúc đóng gói; cửa nằm đúng **cột 1**
+mà R7 đã đo cho mọi nhà, nên nhà parcel **vào được** mà không cần đo lại — builder chừa ô đó đi được và
+worldgen phát một `Door` trỏ vào, y như nhà thường.
+
+### Variant: một parcel, nhiều dáng
+
+Để rừng không bị lát bằng một tấm ảnh, mỗi instance mang `variant` — hash của `(seed, anchor)` tính
+một lần lúc đặt, và là **toàn bộ** state chung giữa sim và renderer:
+
+- **Mirror** (bit 0) — lật ngang, chỉ khi parcel không có chữ đọc được (`mirrorable`); ~nửa số lật.
+- **Cụm tuỳ chọn** — group 0 (sàn + tâm) luôn có; group 1.. là cụm prop/nhà độc lập, giữ ~75% (hai
+  bit mỗi group), nên một parcel cho nhiều cách bày. Parcel mà thiếu một cụm sẽ thành bãi trống thì
+  đặt `allow_group_drop=false` và bị ép giữ đủ trước khi lưu.
+- **Feather mép** + **whitelist nền** — như bảng POI ở trên.
+
+### Đo được: honest before/after (`tools/screen_metric.py`)
+
+Thước đã hứa lúc thiết kế: chia màn hình thành ô 16px, mỗi ô lấy **tỉ lệ màu áp đảo**, xếp bucket
+phẳng (`>0.85`) / có vân (`0.55–0.85`) / rậm (`<=0.55`). Baseline đo từ GIF của chính tác giả
+(`Example 1.gif` frame 0, downscale 4× nearest về gốc, bỏ hàng HUD trên cùng): **phẳng 19 / vân 33 /
+rậm 48**. Ảnh game 32px/tile nên đo ở `cell=32`.
+
+| ảnh | phẳng | vân | rậm | |
+|---|---|---|---|---|
+| **Baseline tác giả** | 19 | 33 | **48** | đích |
+| `shot_meadow` (đồng cỏ, hoang) | 33 | 53 | 14 | ~không đổi |
+| `shot_forest` (rừng, hoang) | 19 | 59 | 22 | ~không đổi |
+| `shot_village` (làng, TRƯỚC prefab) | 16 | 51 | 33 | |
+| `village_market` (SAU, có `market_yard`) | 23 | 36 | **42** | tiến gần đích |
+| `village_street` (SAU, có `street_houses`) | 22 | 38 | **40** | tiến gần đích |
+| `village_square` (SAU, quảng trường mở) | 36 | 32 | 33 | quảng trường cố tình phẳng |
+
+Đọc thẳng: **chỗ nào có parcel rậm trên màn hình, `rậm` nhảy lên 40–42, sát baseline 48** — xe kéo,
+luống rau, dãy nhà của tác giả là detail thật. Quảng trường (`stairs_plaza`) đứng ở 33 vì nó **cố ý**
+là sân mở. Còn đồng cỏ / rừng hoang gần như không đổi — đúng như dự đoán: chúng chưa có parcel nào,
+và **detail-underlay** cho vùng hoang là việc tương lai (dưới).
+
+### Reskin đang dang dở
+
+Nghiên cứu (read-only) cho thấy `TilesetFloor` là hai nửa 11 cột song song cùng motif khác palette, nên
+`green -> deep-forest` là dịch cột +11 pixel-exact; `green -> snow` phải khớp theo **tên lớp mask** vì
+khối snow 47-mask có layout trong khác khối dirt. Đủ để một parcel mọc ra biến thể mùa — nhưng chưa
+nối vào pipeline stamp, nên ghi là dang dở.
+
+### Sổ nợ R8 — cố ý để ngoài bảng, mỗi cái một task
+
+| nợ | vì sao chưa làm |
+|---|---|
+| `lake_islands` | art sàn chứa **nước hở**; stamp phải ghi overlay `kWater` để sim khớp với hình — việc thiết kế, không phải một dòng bảng |
+| `waterfall_bridge` | thế giới **chưa có sông** để nó bắc qua |
+| `fort_gate` / `fort_courtyard` | tích hợp vào **site cứ điểm**, không phải rắc tự do |
+| `Interior.tscn` room prefab | phòng trong nhà vẫn ghép nine-slice; các phòng ghép tay của tác giả để sau |
+| detail-underlay vùng hoang | `flat%` của đồng cỏ / rừng còn cao (33 / 19) — cần một lớp chi tiết dưới nền, chưa có |
+| override tách cụm `camp_clearing` | trại tự gom về **0 cụm tuỳ chọn**, nên variant chỉ còn mirror; muốn nhiều dáng trại hơn cần override luật tách cụm |
+
 ## Không còn gì chặn đường
 
-Mọi quyết định đã chốt. **P0, P1, P2 xong, và R0–R7 (dựng hình + làng có tường + cửa vào nhà) xong.**
-Việc tiếp theo là **P3 — hệ thống thế giới.**
+Mọi quyết định đã chốt. **P0, P1, P2 xong, và R0–R8 (dựng hình + làng có tường + cửa vào nhà +
+prefab của tác giả) xong.** Việc tiếp theo là **P3 — hệ thống thế giới.**

@@ -244,10 +244,11 @@ int main(int argc, char** argv) {
         for (const PlacedPrefab& pp : layout.prefabs()) {
             if (pp.id != PrefabId::kStreetHouses && pp.id != PrefabId::kMarketYard) continue;
             const PrefabDef& def = kPrefabs[static_cast<int>(pp.id)];
-            for (std::uint16_t i = 0; i < def.cell_count; ++i) {
-                const PrefabCell& c = def.cells[i];
+            const PrefabSkin& sk = prefab_skin_of(def, pp.skin);
+            for (std::uint16_t i = 0; i < sk.cell_count; ++i) {
+                const PrefabCell& c = sk.cells[i];
                 if (!prefab_cell_is_dwelling(c)) continue;
-                if (!prefab_cell_visible(def, c, pp.variant)) continue;
+                if (!prefab_cell_visible(def, sk, c, pp.variant)) continue;
                 dtx = pp.tx + prefab_door_dx(c);
                 dty = pp.ty + prefab_door_dy(c);
                 break;
