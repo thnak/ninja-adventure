@@ -13,7 +13,13 @@
 // but `tiles.hpp` and raylib's image API. That is the same property that lets any node in a cluster
 // compute terrain without asking anyone — here it just makes the tool trivial.
 //
-// Run:  build/mmo_worldmap [--seed N] [--scale N] [--out FILE] [--rings]
+// `--village N` crops to one settlement instead. That was added the moment villages grew a
+// rampart: a wall is 3 tiles thick and 50 tiles across, so at 1px per tile it is a smudge, and from
+// inside the game the camera cannot see two opposite sides of it at once. A hole in a wall is
+// exactly the kind of fault that is invisible everywhere except from directly above.
+//
+// Run:  build/mmo_worldmap [--seed N] [--scale N] [--out FILE] [--rings] [--village N]
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -66,10 +72,15 @@ void put(std::vector<unsigned char>& px, int w, int x, int y, Rgb c, unsigned ch
     px[i + 3] = a;
 }
 
+// Each stroke has to be clipped on BOTH axes, not just the one it runs along. That was latent for
+// as long as this tool only ever drew the whole map — every marker was in range by construction —
+// and it became an out-of-bounds write the moment `--village` made the image a window: the other
+// forty-nine villages are still in the list, and their markers land a long way outside it.
 void cross(std::vector<unsigned char>& px, int w, int h, int x, int y, int arm, Rgb c) {
+    if (x < -arm || x >= w + arm || y < -arm || y >= h + arm) return;
     for (int d = -arm; d <= arm; ++d) {
-        if (x + d >= 0 && x + d < w) put(px, w, x + d, y, c);
-        if (y + d >= 0 && y + d < h) put(px, w, x, y + d, c);
+        if (x + d >= 0 && x + d < w && y >= 0 && y < h) put(px, w, x + d, y, c);
+        if (y + d >= 0 && y + d < h && x >= 0 && x < w) put(px, w, x, y + d, c);
     }
 }
 
@@ -79,6 +90,7 @@ int main(int argc, char** argv) {
     std::uint64_t seed = 0x5EED'0BEEF'CAFEull;
     int scale = 1;  // output pixels per tile
     bool rings = false;
+    int only_village = -1;
     std::string out = "worldmap.png";
 
     for (int i = 1; i < argc; ++i) {
@@ -90,8 +102,11 @@ int main(int argc, char** argv) {
             out = argv[++i];
         } else if (std::strcmp(argv[i], "--rings") == 0) {
             rings = true;
+        } else if (std::strcmp(argv[i], "--village") == 0 && i + 1 < argc) {
+            only_village = std::atoi(argv[++i]);
         } else {
-            std::printf("usage: %s [--seed N] [--scale N] [--out FILE] [--rings]\n", argv[0]);
+            std::printf("usage: %s [--seed N] [--scale N] [--out FILE] [--rings] [--village N]\n",
+                        argv[0]);
             return 2;
         }
     }
@@ -103,8 +118,25 @@ int main(int argc, char** argv) {
     // which is a silent, plausible-looking wrong answer.
     const WorldLayout& layout = world_layout(seed);
 
-    const int w = kMapTiles * scale;
-    const int h = kMapTiles * scale;
+    // The window. The whole map unless `--village` narrows it to one enclosure plus ten tiles of
+    // country, which is enough to see whether the roads reached the gates.
+    int ox = 0;
+    int oy = 0;
+    int tw = kMapTiles;
+    int th = kMapTiles;
+    if (only_village >= 0 && only_village < static_cast<int>(layout.villages().size())) {
+        const Village& v = layout.villages()[static_cast<std::size_t>(only_village)];
+        const VillagePlan vp = plan_of(v.tier);
+        const int pad = 10;
+        ox = std::max(0, v.tx - vp.hw - pad);
+        oy = std::max(0, v.ty - vp.hh - pad);
+        tw = std::min(kMapTiles - ox, 2 * (vp.hw + pad) + 1);
+        th = std::min(kMapTiles - oy, 2 * (vp.hh + pad) + 1);
+        if (scale == 1) scale = 6;
+    }
+
+    const int w = tw * scale;
+    const int h = th * scale;
     std::vector<unsigned char> px(static_cast<std::size_t>(w) * h * 4, 255);
 
     // --- terrain + a per-ring tally ------------------------------------------------------------
@@ -112,8 +144,10 @@ int main(int argc, char** argv) {
     long long terrain_tiles[static_cast<int>(Terrain::kCount)] = {};
     long long blocked = 0;
 
-    for (int ty = 0; ty < kMapTiles; ++ty) {
-        for (int tx = 0; tx < kMapTiles; ++tx) {
+    for (int wy = 0; wy < th; ++wy) {
+        for (int wx = 0; wx < tw; ++wx) {
+            const int tx = ox + wx;
+            const int ty = oy + wy;
             const Terrain t = terrain_of(seed, kOverworld, tx, ty);
             const Ring r = ring_of(seed, tx, ty);
             ++ring_tiles[static_cast<int>(r)];
@@ -132,7 +166,7 @@ int main(int argc, char** argv) {
             }
             for (int sy = 0; sy < scale; ++sy) {
                 for (int sx = 0; sx < scale; ++sx) {
-                    put(px, w, tx * scale + sx, ty * scale + sy, c);
+                    put(px, w, wx * scale + sx, wy * scale + sy, c);
                 }
             }
         }
@@ -143,12 +177,20 @@ int main(int argc, char** argv) {
     // answer every question this map exists for: are the villages spread out, do the strongholds
     // crowd them, and does the player wake up somewhere sensible.
     for (const Village& v : layout.villages()) {
-        cross(px, w, h, v.tx * scale, v.ty * scale, (2 + v.tier) * scale, Rgb{255, 255, 255});
+        cross(px, w, h, (v.tx - ox) * scale, (v.ty - oy) * scale, (2 + v.tier) * scale,
+              Rgb{255, 255, 255});
+        // The four gates, in green, so "did the road find the hole?" is one glance rather than a
+        // count of wall segments.
+        const GateSet g = gates_of(v.tx, v.ty, v.tier);
+        for (int i = 0; i < kGateCount; ++i) {
+            cross(px, w, h, (g.x[i] - ox) * scale, (g.y[i] - oy) * scale, 2 * scale,
+                  Rgb{90, 250, 120});
+        }
     }
     for (const Stronghold& s : layout.strongholds()) {
-        cross(px, w, h, s.tx * scale, s.ty * scale, 3 * scale, Rgb{240, 70, 70});
+        cross(px, w, h, (s.tx - ox) * scale, (s.ty - oy) * scale, 3 * scale, Rgb{240, 70, 70});
     }
-    cross(px, w, h, layout.spawn_tx() * scale, layout.spawn_ty() * scale, 7 * scale,
+    cross(px, w, h, (layout.spawn_tx() - ox) * scale, (layout.spawn_ty() - oy) * scale, 7 * scale,
           Rgb{90, 240, 240});
 
     Image img{};
@@ -190,8 +232,17 @@ int main(int argc, char** argv) {
     for (const Village& v : layout.villages()) ++by_ring[static_cast<int>(v.ring)];
     for (const Stronghold& s : layout.strongholds()) ++holds_by_ring[static_cast<int>(s.ring)];
 
-    std::printf("\nsettlements: %zu villages, %zu strongholds, %zu buildings\n",
-                layout.villages().size(), layout.strongholds().size(), layout.structures().size());
+    // Split, because a single total stopped meaning anything once villages grew a wall: a rampart
+    // is thirty-odd structures and a village has a dozen houses, so "4849 buildings" reads as ten
+    // times the settlement this world actually has.
+    std::size_t dwellings = 0;
+    for (const Structure& s : layout.structures()) {
+        if (is_dwelling(s.kind)) ++dwellings;
+    }
+    std::printf("\nsettlements: %zu villages, %zu strongholds, %zu buildings (%zu dwellings + %zu "
+                "rampart pieces)\n",
+                layout.villages().size(), layout.strongholds().size(), layout.structures().size(),
+                dwellings, layout.structures().size() - dwellings);
     std::printf("  %-10s %8s %12s\n", "ring", "villages", "strongholds");
     for (int i = 0; i < kRingCount; ++i) {
         std::printf("  %-10s %8d %12d\n", kRingNames[i], by_ring[i], holds_by_ring[i]);

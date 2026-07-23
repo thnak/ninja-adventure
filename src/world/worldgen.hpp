@@ -16,9 +16,10 @@
 //   1. Village sites   — the only thing with a hard placement constraint (needs buildable land and
 //                        distance from its neighbours). Everything else adapts to it.
 //   2. Roads           — the skeleton. Laid BEFORE the buildings so a road can never be routed
-//                        through a house; the houses are placed around a square the road already
-//                        reaches.
-//   3. Village stamps  — square, then houses ringing it.
+//                        through a house; a road ends at a GATE, whose position `gates_of` knows
+//                        from (centre, tier) alone long before the village is built.
+//   3. Village stamps  — rampart, square, streets, houses. See world/village.hpp; the whole of what
+//                        a settlement looks like lives there now, and this file only says where.
 //   4. Strongholds     — last, because they are the only feature allowed to be pushed around: a
 //                        candidate too close to a village is simply dropped.
 //
@@ -33,55 +34,9 @@
 #include <vector>
 
 #include "world/tiles.hpp"
+#include "world/village.hpp"
 
 namespace mmo {
-
-// --- What can stand on the map --------------------------------------------------------------
-// Each of these is ONE multi-tile sprite, cropped from the Ninja Adventure tilesets after looking
-// at it (tools/verify_structures.py). There is no per-tile wall art in this pack and there is no
-// autotiling here — a house is a house, drawn in one quad, and its whole footprint is solid.
-enum class StructureKind : std::uint8_t {
-    kHouseOrange = 0,  // 4x3 — the common village house
-    kHouseCream = 1,   // 4x3
-    kHouseAmber = 2,   // 4x3
-    kHouseRed = 3,     // 4x3 — the red hall; one per village, and only from tier 3
-    kHouseBlue = 4,    // 3x3 — shopfront
-    kHouseTan = 5,     // 3x3
-    kHouseWood = 6,    // 3x3
-    kHutSnowA = 7,     // 3x3 — snow ring
-    kHutSnowB = 8,     // 3x3
-    kHutSnowC = 9,     // 3x3
-    kRuinA = 10,       // 3x3 — wasteland, overgrown
-    kRuinB = 11,       // 3x3
-    kTentA = 12,       // 3x3 — stronghold
-    kTentB = 13,       // 3x3
-    kTentC = 14,       // 3x3 — torn
-    kCount = 15,
-};
-
-struct StructureSize {
-    std::uint8_t w;
-    std::uint8_t h;
-};
-
-[[nodiscard]] inline constexpr StructureSize size_of(StructureKind k) noexcept {
-    switch (k) {
-        case StructureKind::kHouseOrange:
-        case StructureKind::kHouseCream:
-        case StructureKind::kHouseAmber:
-        case StructureKind::kHouseRed: return {4, 3};
-        default: break;
-    }
-    return {3, 3};
-}
-
-// A placed building. `tx,ty` is its TOP-LEFT tile; the sprite is drawn over exactly (w,h) tiles
-// from there, and every one of those tiles is `Terrain::kBuilding`.
-struct Structure {
-    std::uint16_t tx = 0;
-    std::uint16_t ty = 0;
-    StructureKind kind = StructureKind::kHouseOrange;
-};
 
 // A settlement. `tier` is 1..5 and drives how many houses it has — it is also the hook P3 grows
 // into (GAME.md §6: villages level up when helped and stall when not).
@@ -118,16 +73,18 @@ inline constexpr int kStrongholdCell = 124;
 // village no matter what its density said: the map reported 0 there and the density knob had no
 // effect at all, which is what gave the bug away. 18 leaves room for a village's houses (which
 // reach ~15 tiles out) and still lets the outer ring be inhabited.
-inline constexpr int kVillageEdgeMargin = 18;
-inline constexpr int kStrongholdKeepOut = 34;     // no stronghold this close to a village
+//
+// It is a COARSE reject now, not the real test. The real one is per-village and lives at the call
+// site, because the enclosure's size depends on tier and tier is not known until the site has been
+// accepted: a tier-5 town's wall reaches 26 tiles from its centre, a tier-1 hamlet's only 11, and
+// using the larger of the two everywhere empties the wasteland of exactly the hamlets that belong
+// there. 13 is the widest half-extent of a tier-1 plan, so nothing that could ever be built is
+// rejected here.
+inline constexpr int kVillageEdgeMargin = 13;
+// Likewise: a stronghold is only "too close" relative to the wall, not the square. 34 used to be a
+// comfortable gap and would now put a monster camp against the palisade of a large town.
+inline constexpr int kStrongholdKeepOut = 46;
 inline constexpr int kMaxRoadLength = 300;        // do not join villages further apart than this
-// Distance between one village street and the next: three tiles of house plus a two-tile
-// carriageway. Every house in this pack is exactly three tiles tall (`size_of`), so a row of them
-// fits the gap with nothing left over and no terrace is ever half a house deep.
-inline constexpr int kStreetPitch = 5;
-// How many houses a street takes on each side of the crossroads before the next street
-// opens. Two keeps a hamlet to a single short terrace and spreads a town over three.
-inline constexpr int kHousesPerSide = 2;
 
 class WorldLayout {
 public:
@@ -243,7 +200,6 @@ private:
                     tx >= kMapTiles - kVillageEdgeMargin || ty >= kMapTiles - kVillageEdgeMargin) {
                     continue;
                 }
-                if (!buildable_site(tx, ty, 9)) continue;
 
                 const Ring ring = ring_of(seed_, tx, ty);
                 // Fewer settlements the further out you go. This is NOT the same knob as
@@ -259,6 +215,20 @@ private:
                 v.ty = static_cast<std::uint16_t>(ty);
                 v.ring = ring;
                 v.tier = tier_for(ring, r);
+
+                // NOW the real border test, against this village's OWN enclosure rather than
+                // against the largest one that exists. A single constant margin has to be the
+                // worst case — 27 tiles, the half-height of a tier-5 town — and that is wider than
+                // the usable part of the wasteland band, so it silently emptied the outer ring of
+                // the hamlets that are the whole reason to go out there. Exactly the failure the
+                // note over `kVillageEdgeMargin` describes, reintroduced by a bigger village.
+                //
+                // A wasteland village is tier 1, and tier 1 needs 12 tiles, which fits.
+                const VillagePlan plan = plan_of(v.tier);
+                const int mx = plan.hw + 2;
+                const int my = plan.hh + 2;
+                if (tx < mx || ty < my || tx >= kMapTiles - mx || ty >= kMapTiles - my) continue;
+                if (!buildable_site(tx, ty, 9)) continue;
                 villages_.push_back(v);
             }
         }
@@ -352,6 +322,30 @@ private:
         }
     }
 
+    // Which of a village's four gates faces a given point, as the outside approach tile. This is
+    // the piece that lets a road be laid before the wall exists: `gates_of` is a pure function of
+    // (centre, tier), so the road knows where the hole in the wall is going to be.
+    //
+    // Nearest by squared distance, not by quadrant. A quadrant test picks the "logically correct"
+    // gate, which for a village almost due north of its neighbour means the north gate even when
+    // the two are 200 tiles apart east-west and the east gate is plainly closer.
+    static void gate_facing(const Village& v, int tx, int ty, int& gx, int& gy) noexcept {
+        const GateSet g = gates_of(v.tx, v.ty, v.tier);
+        int best = 0;
+        long long bd = 0;
+        for (int i = 0; i < kGateCount; ++i) {
+            const long long dx = static_cast<long long>(g.x[i]) - tx;
+            const long long dy = static_cast<long long>(g.y[i]) - ty;
+            const long long d = dx * dx + dy * dy;
+            if (i == 0 || d < bd) {
+                best = i;
+                bd = d;
+            }
+        }
+        gx = g.x[best];
+        gy = g.y[best];
+    }
+
     // Walk from A to B one tile at a time, preferring the straight step but sidestepping water.
     //
     // A road is not a line: a perpendicular wobble from the same fbm the terrain uses makes it bend
@@ -360,11 +354,17 @@ private:
     // properly boxed in — a road that simply stopped at the shore would read as a bug, and one that
     // ignored water entirely would run across the middle of a lake.
     void carve_road(const Village& a, const Village& b) {
-        int x = a.tx;
-        int y = a.ty;
-        const int gx = b.tx;
-        const int gy = b.ty;
+        // Gate to gate, not centre to centre. A road aimed at the centre is later cut by the wall
+        // that gets stamped on top of it, and the village ends up with a road that stops dead
+        // against a palisade three tiles from where it was going.
+        int x = 0;
+        int y = 0;
+        int gx = 0;
+        int gy = 0;
+        gate_facing(a, b.tx, b.ty, x, y);
+        gate_facing(b, a.tx, a.ty, gx, gy);
         const int budget = 4 * (std::abs(gx - x) + std::abs(gy - y)) + 64;
+        paint_road(x, y);
 
         for (int step = 0; step < budget; ++step) {
             if (std::abs(gx - x) <= 2 && std::abs(gy - y) <= 2) break;
@@ -411,14 +411,6 @@ private:
         put(x, y, Terrain::kPath);
     }
 
-    // A village street: two tiles of carriageway from `x0` to `x1` with its north kerb at `y`.
-    void street(int x0, int x1, int y) {
-        for (int x = x0; x <= x1; ++x) {
-            pave(x, y);
-            pave(x, y + 1);
-        }
-    }
-
     // Two tiles wide, and never over a building: roads are laid before the houses go up, but a
     // village square placed later must be able to overwrite a road rather than the reverse.
     void paint_road(int x, int y) {
@@ -430,189 +422,16 @@ private:
         }
     }
 
-    // --- 3. village squares and houses ---------------------------------------------------------
+    // --- 3. village stamps ---------------------------------------------------------------------
+    // All of it — rampart, square, streets, houses — belongs to `VillageBuilder` in village.hpp.
+    // This loop is the whole of what worldgen has left to say about a village: which one, where,
+    // and how big.
     void build_villages() {
+        VillageBuilder b(seed_, overlay_.data(), structures_);
         for (Village& v : villages_) {
             v.first = static_cast<std::uint16_t>(structures_.size());
-            // SMALLER THAN IT WAS (it used to be 3 + tier). The square was the only thing that said
-            // "village" when the houses were scattered, so it had to be big; at tier 5 that made it
-            // 17 tiles across, wider than the screen is tall, and arriving at a town meant standing
-            // in a paved field with the buildings over the horizon. Now that the streets carry the
-            // settlement's shape, the square can go back to being a square.
-            const int plaza = 2 + v.tier / 2;  // tier 1 -> 2 tiles, tier 5 -> 4
-
-            // The square. Its edge is noisy so it reads as trodden ground rather than as a stamp.
-            // Compared as SQUARED distances against an integer radius, so there is no sqrt and no
-            // float threshold anywhere in it — see `block_noise`.
-            for (int dy = -plaza; dy <= plaza; ++dy) {
-                for (int dx = -plaza; dx <= plaza; ++dx) {
-                    const int wob =
-                        static_cast<int>(block_noise(0x9101'ACE5ull, v.tx + dx, v.ty + dy, 3, 5)) - 2;
-                    const int edge = plaza + wob;
-                    if (dx * dx + dy * dy > edge * edge) continue;
-                    if (terrain_base(seed_, kOverworld, v.tx + dx, v.ty + dy) == Terrain::kWater) {
-                        continue;  // never pave over open water
-                    }
-                    put(v.tx + dx, v.ty + dy, Terrain::kPath);
-                }
-            }
-
-            // Houses LINE STREETS. The count is what `tier` actually MEANS today — a hamlet has
-            // four buildings and a town has a dozen, and that is legible from a distance without a
-            // label, which is the whole point of putting the difficulty gradient in the map.
-            //
-            // THEY USED TO BE SCATTERED, by rejection sampling over a square annulus around the
-            // square. That reads as a camp rather than as a village, and rebuilding the asset pack
-            // author's own `Village.tscn` from his scene file is what made the gap obvious: his
-            // houses sit in rows along a paved street, and ours sat wherever the sampler landed.
-            // The measurable part of the gap was never decoration density — ours already sits
-            // inside the pack's own band — it was that nothing was aligned to anything.
-            //
-            // The hinge is a property `try_place` already had: it paves the row under the front
-            // wall, because every house sprite in this pack faces SOUTH. So placing a house whose
-            // doorstep row IS a street makes the door open onto that street, for free and by
-            // construction rather than by a check that could drift out of step with the art.
-            const int want = 3 + 2 * v.tier;
-            Rng r(seed_ ^ 0xB00C'0000ull ^ (static_cast<std::uint64_t>(v.tx) << 16) ^ v.ty);
-            int placed = 0;
-            bool hall = false;
-            const int span = plaza + 8;
-            int street_lo = v.ty;
-            int street_hi = v.ty;
-
-            // The hall faces the SQUARE, not a street. It is the one building a village has only
-            // from tier 3, so it is the thing that should be looked at on arrival — and a square
-            // with nothing addressing it is just a large paved nothing, which is exactly how the
-            // first version of this read on screen. Its doorstep row lands on the square's own
-            // northern kerb, by the same rule the terraces use.
-            if (v.tier >= 3) {
-                const StructureSize s = size_of(StructureKind::kHouseRed);
-                hall = try_place(v.tx - s.w / 2, v.ty - plaza - s.h, StructureKind::kHouseRed);
-                if (hall) ++placed;
-            }
-
-            // Street rows walk outward from the square, alternating south then north, so a hamlet
-            // gets one street and a town gets three on each side. Pitch is house height + street
-            // width; both are integers and stay integers, for the reason in `block_noise` — a float
-            // here would let two compilers disagree about where a house goes.
-            for (int row = 1; row <= 3 && placed < want; ++row) {
-                for (int side = 0; side < 2 && placed < want; ++side) {
-                    const int sy = (side == 0) ? v.ty + plaza + row * kStreetPitch
-                                               : v.ty - plaza - row * kStreetPitch;
-                    if (sy < 4 || sy >= kMapTiles - 4) continue;
-
-                    // Houses first, then the street over what is left. The other order would pave
-                    // the ground a house is about to stand on and `try_place` would still take it,
-                    // which is how you get a doorway opening into the middle of a carriageway.
-                    //
-                    // A terrace grows OUTWARD FROM THE CROSSROADS, east side then west, rather than
-                    // sweeping from one end of the span. Sweeping was the first version and it piles
-                    // every house against the western edge, because the loop stops as soon as the
-                    // village has its quota — so a tier-5 town got one long left-justified terrace
-                    // and five bare streets.
-                    int lo = v.tx;
-                    int hi = v.tx + 1;
-                    for (int dir = 0; dir < 2; ++dir) {
-                        int on_side = 0;
-                        int hx = (dir == 0) ? v.tx + 3 : v.tx - 3;
-                        while (on_side < kHousesPerSide && placed < want) {
-                            StructureKind kind = house_for(v.ring, r);
-                            if (!hall && v.tier >= 3) {
-                                kind = StructureKind::kHouseRed;  // the hall, once, and first
-                                hall = true;
-                            }
-                            const StructureSize s = size_of(kind);
-                            const int x0 = (dir == 0) ? hx : hx - s.w;
-                            if (x0 < v.tx - span || x0 + s.w > v.tx + span) break;
-                            if (try_place(x0, sy - s.h, kind)) {
-                                ++placed;
-                                ++on_side;
-                                lo = std::min(lo, x0);
-                                hi = std::max(hi, x0 + s.w - 1);
-                                const int gap = 1 + static_cast<int>(r.below(2));
-                                hx = (dir == 0) ? x0 + s.w + gap : x0 - gap;
-                            } else {
-                                hx += (dir == 0) ? 2 : -2;
-                            }
-                        }
-                    }
-                    if (hi - lo < 2) continue;  // nothing stood up here; lay no street either
-                    // Trimmed to the terrace it serves, plus a kerb. Paving the whole span left
-                    // carriageways running out into empty meadow like runways.
-                    street(lo - 2, hi + 2, sy);
-                    street_lo = std::min(street_lo, sy);
-                    street_hi = std::max(street_hi, sy + 1);
-                }
-            }
-
-            // The spine: one north-south carriageway through the square, joining every street to
-            // every other and to the road network outside. Without it a village is a stack of
-            // unconnected terraces.
-            for (int y = street_lo; y <= street_hi; ++y) {
-                for (int x = v.tx; x <= v.tx + 1; ++x) pave(x, y);
-            }
-            v.count = static_cast<std::uint16_t>(structures_.size() - v.first);
+            v.count = static_cast<std::uint16_t>(b.build(v.tx, v.ty, v.tier, v.ring));
         }
-    }
-
-    // Architecture follows the ring, so crossing a boundary looks like crossing a border rather
-    // than like the tileset changing.
-    [[nodiscard]] static StructureKind house_for(Ring ring, Rng& r) noexcept {
-        switch (ring) {
-            case Ring::kMeadow:
-            case Ring::kForest: {
-                static constexpr StructureKind kSet[] = {
-                    StructureKind::kHouseOrange, StructureKind::kHouseCream,
-                    StructureKind::kHouseAmber, StructureKind::kHouseBlue,
-                    StructureKind::kHouseTan, StructureKind::kHouseWood};
-                return kSet[r.below(6)];
-            }
-            case Ring::kWetland: {
-                static constexpr StructureKind kSet[] = {
-                    StructureKind::kHouseTan, StructureKind::kHouseWood,
-                    StructureKind::kHouseCream};
-                return kSet[r.below(3)];
-            }
-            case Ring::kSnow: {
-                static constexpr StructureKind kSet[] = {
-                    StructureKind::kHutSnowA, StructureKind::kHutSnowB, StructureKind::kHutSnowC};
-                return kSet[r.below(3)];
-            }
-            case Ring::kWasteland:
-            case Ring::kCount: break;
-        }
-        static constexpr StructureKind kSet[] = {StructureKind::kRuinA, StructureKind::kRuinB};
-        return kSet[r.below(2)];
-    }
-
-    // Stamp a structure if its whole footprint is free, dry land — plus a one-tile margin, so two
-    // houses never end up with their walls touching and reading as one long building.
-    bool try_place(int tx, int ty, StructureKind kind) {
-        const StructureSize s = size_of(kind);
-        for (int dy = -1; dy <= s.h; ++dy) {
-            for (int dx = -1; dx <= s.w; ++dx) {
-                const int x = tx + dx;
-                const int y = ty + dy;
-                if (x < 1 || y < 1 || x >= kMapTiles - 1 || y >= kMapTiles - 1) return false;
-                if (peek(x, y) == static_cast<std::uint8_t>(Terrain::kBuilding)) return false;
-                const Terrain base = terrain_base(seed_, kOverworld, x, y);
-                if (base == Terrain::kWater || base == Terrain::kTree) return false;
-            }
-        }
-        for (int dy = 0; dy < s.h; ++dy) {
-            for (int dx = 0; dx < s.w; ++dx) put(tx + dx, ty + dy, Terrain::kBuilding);
-        }
-        // A doorstep: the row under the front wall is paved, so a house always connects to the
-        // square instead of standing in long grass.
-        for (int dx = 0; dx < s.w; ++dx) {
-            if (peek(tx + dx, ty + s.h) == kNoOverlay) put(tx + dx, ty + s.h, Terrain::kPath);
-        }
-        Structure st{};
-        st.tx = static_cast<std::uint16_t>(tx);
-        st.ty = static_cast<std::uint16_t>(ty);
-        st.kind = kind;
-        structures_.push_back(st);
-        return true;
     }
 
     // --- 4. strongholds ------------------------------------------------------------------------
@@ -621,6 +440,10 @@ private:
     // candidate too near a village is dropped rather than moved — moving it is how you end up with
     // a ring of camps at exactly `kStrongholdKeepOut` from every settlement.
     void place_strongholds() {
+        // A tent is stamped by the same rule a house is, so it borrows the village generator's
+        // verb rather than keeping a second copy of it here. A stronghold gets no wall: the whole
+        // point of a monster camp is that you can walk into it.
+        VillageBuilder b(seed_, overlay_.data(), structures_);
         const int cells = kMapTiles / kStrongholdCell;
         for (int cy = 0; cy < cells; ++cy) {
             for (int cx = 0; cx < cells; ++cx) {
@@ -663,7 +486,7 @@ private:
                     const int ox = -5 + static_cast<int>(r.below(11));
                     const int oy = -5 + static_cast<int>(r.below(11));
                     if (std::max(std::abs(ox), std::abs(oy)) < 2) continue;  // keep the middle clear
-                    if (try_place(tx + ox, ty + oy, kTents[r.below(3)])) ++i;
+                    if (b.place(tx + ox, ty + oy, kTents[r.below(3)])) ++i;
                 }
                 h.count = static_cast<std::uint16_t>(structures_.size() - h.first);
                 if (h.count == 0) continue;  // nowhere to pitch a tent — not a stronghold

@@ -13,8 +13,9 @@ are villages, joined by roads. Walk until you find one. Built on the
 | [ROADMAP.md](ROADMAP.md) | phased plan, P0 → P9 |
 | [RENDER_SPEC.md](RENDER_SPEC.md) | how the world is assembled on screen — and one measurement that turned out to be wrong |
 
-> **P0, P1 and P2 are done.** The world generates itself — **51 villages, 27 strongholds and 519
-> buildings** across a 1024×1024 overworld — and it is now inhabited: ~620 animals that mostly want
+> **P0, P1 and P2 are done.** The world generates itself — **51 walled villages, 22 strongholds,
+> 443 dwellings behind 4,406 pieces of palisade** across a 1024×1024 overworld — and it is now
+> inhabited: ~620 animals that mostly want
 > nothing to do with you, four kinds of monster whose species depends on which ring sent them, and a
 > combat system where **magic sets a status and a physical blow detonates it**. Sign in, walk,
 > fight, die, wake at your hearth. Next is [P3](ROADMAP.md): village tiers, claims, biome rules.

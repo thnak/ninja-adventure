@@ -189,6 +189,12 @@ enum class Big : std::uint8_t {
     kTentA,
     kTentB,
     kTentC,
+    kLogPost,
+    kRampart,
+    kGate,
+    kStakeA,
+    kStakeB,
+    kStakeC,
     kCount,
 };
 
@@ -210,6 +216,12 @@ inline constexpr AtlasBig kAtlasBigs[static_cast<int>(Big::kCount)] = {
     {1, 1385, 3, 3},  // kTentA
     {1, 1435, 3, 3},  // kTentB
     {1, 1485, 3, 3},  // kTentC
+    {1, 1535, 3, 5},  // kLogPost
+    {1, 1617, 3, 3},  // kRampart
+    {1, 1667, 3, 3},  // kGate
+    {1, 1717, 1, 2},  // kStakeA
+    {1, 1751, 1, 2},  // kStakeB
+    {1, 1785, 1, 2},  // kStakeC
 };
 
 [[nodiscard]] inline constexpr const AtlasBig& big_of(Big b) noexcept {
@@ -244,18 +256,18 @@ enum class Fx : std::uint8_t {
 };
 
 inline constexpr AtlasFx kAtlasFx[static_cast<int>(Fx::kCount)] = {
-    {1, 1535, 12, 7, 6},  // kLeaf
-    {1, 1544, 12, 7, 6},  // kLeafPink
-    {1, 1553, 8, 8, 3},  // kRain
-    {1, 1563, 8, 8, 7},  // kSnow
-    {1, 1573, 16, 16, 1},  // kArrow
-    {1, 1591, 32, 32, 4},  // kSlash
-    {1, 1625, 25, 30, 8},  // kFire
-    {1, 1657, 32, 32, 10},  // kIce
-    {1, 1691, 30, 30, 14},  // kEarth
-    {1, 1723, 20, 28, 8},  // kShock
-    {1, 1753, 40, 40, 9},  // kBlast
-    {1, 1795, 38, 38, 1},  // kFacePlayer
+    {1, 1819, 12, 7, 6},  // kLeaf
+    {1, 1828, 12, 7, 6},  // kLeafPink
+    {1, 1837, 8, 8, 3},  // kRain
+    {1, 1847, 8, 8, 7},  // kSnow
+    {1, 1857, 16, 16, 1},  // kArrow
+    {1, 1875, 32, 32, 4},  // kSlash
+    {1, 1909, 25, 30, 8},  // kFire
+    {1, 1941, 32, 32, 10},  // kIce
+    {1, 1975, 30, 30, 14},  // kEarth
+    {1, 2007, 20, 28, 8},  // kShock
+    {1, 2037, 40, 40, 9},  // kBlast
+    {1, 2079, 38, 38, 1},  // kFacePlayer
 };
 
 [[nodiscard]] inline constexpr const AtlasFx& fx_of(Fx f) noexcept {
@@ -291,17 +303,17 @@ inline constexpr int kEdgeBL = 64, kEdgeB = 128, kEdgeBR = 256;
 inline constexpr int kEdgeFull = 511;
 
 inline constexpr AtlasRect kAtlasTrans[kTransTerrains] = {
-    {1, 1835},  // Grass — generated
-    {1, 1853},  // Dirt — TilesetFloor.png#2
-    {1, 1871},  // Water — TilesetWater.png#18
-    {1, 1889},  // Stone — generated
-    {1, 1907},  // Sand — generated
-    {1, 1925},  // Tree — generated
-    {1, 1943},  // Snow — TilesetSnow.png#17
-    {1, 1961},  // Marsh — generated
-    {1, 1979},  // Ash — generated
-    {1, 1997},  // Path — generated
-    {1, 2015},  // Building — generated
+    {1, 2119},  // Grass — generated
+    {1, 2137},  // Dirt — TilesetFloor.png#2
+    {1, 2155},  // Water — TilesetWater.png#18
+    {1, 2173},  // Stone — generated
+    {1, 2191},  // Sand — generated
+    {1, 2209},  // Tree — generated
+    {1, 2227},  // Snow — TilesetSnow.png#17
+    {1, 2245},  // Marsh — generated
+    {1, 2263},  // Ash — generated
+    {1, 2281},  // Path — generated
+    {1, 2299},  // Building — generated
 };
 
 // Whether this terrain's variant 0 is a genuinely PLAIN fill, derived from the manifest by

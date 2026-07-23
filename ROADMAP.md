@@ -87,7 +87,7 @@ Dựng sân khấu thật, trước khi tune bất cứ thứ gì lên trên nó
 | Thống nhất art: **địa hình + cây** sang Ninja Adventure | ✅ 9 loại địa hình, cây 2 mảnh mọc trên nền đúng vòng |
 | **Thế giới đầu tiên 100% Ninja Adventure** | ✅ không còn ô Kenney nào trong world |
 | Ảnh từng quần xã (`--ring N`) | ✅ `docs/biomes/` |
-| **Worldgen đặt làng / cứ điểm / đường** | ✅ 51 làng, 27 cứ điểm, 519 công trình xếp dọc phố, `src/world/worldgen.hpp` |
+| **Worldgen đặt làng / cứ điểm / đường** | ✅ 51 làng có tường, 22 cứ điểm, 443 nhà + 4.406 mảnh tường, `src/world/worldgen.hpp` + `village.hpp` |
 | **Gỡ nông trại khởi đầu + tường/tháp/rào đặt-từng-ô** | ✅ `BuildKind` còn 2 giá trị |
 | **Lớp không khí**: lá bay / mưa / tuyết theo vòng | ✅ 0 state, 0 message |
 | **BFS đa nguồn** (tới làng gần nhất) | ✅ một lượt quét, không phải một field mỗi làng |
@@ -383,7 +383,48 @@ Tier giờ đọc được từ hình dạng: tier 1 một dãy phố, tier 3 ha
 Còn nợ: **ash/stone vẫn là nền lát đá trong nhà** — bộ CC0 này không có đất cháy hay đá lộ thiên
 nào; đó là art phải tự vẽ, để lại cho P9.
 
+## Xen giữa: R6 — làng có tường, và `village.hpp`
+
+Pack **có sẵn hàng rào cọc**, và đó là thứ dự án này đã bỏ sót suốt: `TilesetHouse` chứa cột gỗ 3×5,
+tường ván 3×3, đúng tường đó khoét vòm, và cọc rào 1×2. Chính bốn mảnh này dựng nên hàng rào trong
+`Village.tscn` của tác giả (lớp House, tile id 39/40/41 xếp chồng = cột, 42 = tường, 43 = vòm,
+44/45/46 = cọc). Không phải đoán — đọc ra từ file scene của ông ấy.
+
+Toàn bộ phần "một cái làng gồm những gì" chuyển sang **`src/world/village.hpp`**. `worldgen.hpp` chỉ
+còn trả lời *ở đâu*: khoảng cách, vòng, đường nối. Hai câu hỏi đó không cùng cỡ — một cái quét cả bản
+đồ, một cái soi xem cột nào của sprite cổng là cái lỗ.
+
+| | |
+|---|---|
+| Tường bắc/nam | ô 3 tile: cột (chẵn) — tường (lẻ) — **cổng vòm ở chính giữa**; số ô luôn lẻ nên hai đầu đều là cột |
+| Tường đông/tây | **cột gỗ xếp chồng** — tường ván vẽ nhìn ngang sẽ thành tường đổ |
+| Cổng đông/tây | ô cột giữa nhường chỗ: cọc rào 2 hàng trên, 2 hàng dưới, chừa **đúng 1 ô** ở giữa |
+| Bốn cổng | `gates_of(tâm, tier)` là hàm thuần — nên **đường được đào tới cổng** chứ không tới tâm |
+| Rào cọc | lối vào bốn cổng, và **vườn rau** trong tường: rào một mặt, đất `kDirt` — đúng thứ P3 cần |
+| Dọn cây | 1/12 cây trong tường ở lại |
+
+**Đường phải nhắm vào cổng.** Đường được đào *trước* khi làng dựng, nên nếu nó nhắm vào tâm thì tường
+sẽ đè lên chính nó và làng có một con đường cụt húc vào hàng rào. `gates_of` thuần chính là để giải
+việc đó.
+
+### Ba lỗi mà chỉ đo mới thấy
+
+| lỗi | cách phát hiện |
+|---|---|
+| **Cọc rào cao 2 ô** nên đặt lệch 1 ô là nó phủ luôn mặt đường | probe: ô tiếp cận cổng có `terrain = kBuilding` |
+| **Vòm cổng bị bịt hàng trên** — hàng trên của sprite là mũ tường, vẽ đặc | flood-fill: **23/51 làng** có cổng nhìn thấy mà không đi qua được |
+| **Cột 3×5 gặp một ô nước là rụng cả cột**, để lại lỗ 15 ô | quét cả 51 làng: chỗ hở rộng nhất 17 ô |
+
+Cả ba đã sửa: cọc lùi thêm một ô, vòm khoét **cả ba hàng** (người chơi khuất sau mũ tường đúng một ô,
+y hệt khi bước vào cửa nhà), và cột rụng thì hạ xuống tường, hạ tiếp xuống cọc. Sau đó thêm một lượt
+**đường vượt nước** dọc hai trục — cùng thứ `carve_road` vẫn làm giữa các làng — vì `pave` từ chối
+nước, nên một cái ao nằm trên trục là một cái cổng dẫn ra hồ.
+
+Kết quả đo lại: **51/51 làng, cả bốn cổng đều đi được từ quảng trường; chỗ hở rộng nhất còn 8 ô.**
+Windows/MSVC ra đúng từng con số của Linux — `grass 347579`, `path 24185`, `buildg 32421`, 51 làng /
+22 cứ điểm / 4849 công trình, cùng điểm spawn.
+
 ## Không còn gì chặn đường
 
-Mọi quyết định đã chốt. **P0, P1, P2 xong, và R0–R5 (dựng hình + bố cục làng) xong.** Việc tiếp theo là
-**P3 — hệ thống thế giới.**
+Mọi quyết định đã chốt. **P0, P1, P2 xong, và R0–R6 (dựng hình + làng có tường) xong.** Việc tiếp theo
+là **P3 — hệ thống thế giới.**

@@ -189,6 +189,26 @@ BIG_MANIFEST = [
     ("TentA",       "NCamp",  4,  0, 3, 3),
     ("TentB",       "NCamp",  7,  0, 3, 3),
     ("TentC",       "NCamp", 10,  0, 3, 3),
+    # --- the rampart. See world/village.hpp for how these four fit together. ---
+    # The pack HAS a palisade, in TilesetHouse, and it is the one thing this manifest was missing:
+    # a 3x5 log post, a 3x3 plank wall to run between two of them, the same wall with an arch cut
+    # through it, and a 1x2 stake fence. The Godot project's own Village.tscn uses exactly these
+    # four (House layer, tile ids 39/40/41 stacked = the log, 42 = wall, 43 = arch, 44/45/46 =
+    # stakes), which is how the rectangles below were found rather than guessed.
+    #
+    # `check_sprite_rects.py --rect NHouse 19 3 3 5` reports 1/1/0/0 — the log is a whole sprite.
+    # The other three deliberately score ~90% on left and right, and that is CORRECT here: a wall
+    # is drawn to butt its own neighbour, so opaque pixels running off both sides is what a tiling
+    # run looks like. The tool cannot tell that from a severed sprite; the grid render can.
+    ("LogPost",     "NHouse", 19,  3, 3, 5),
+    ("Rampart",     "NHouse", 22,  3, 3, 3),
+    ("Gate",        "NHouse", 22,  6, 3, 3),
+    # Three stakes, not one. They are near-identical by design — the difference is a pixel of
+    # highlight — and cycling them along a run is what stops a fence reading as one sprite stamped
+    # forty times.
+    ("StakeA",      "NHouse", 22, 12, 1, 2),
+    ("StakeB",      "NHouse", 23, 12, 1, 2),
+    ("StakeC",      "NHouse", 24, 12, 1, 2),
 ]
 
 # --- Particle strips ---------------------------------------------------------

@@ -113,6 +113,29 @@ butting sand against grass with a hard staircase and scattering props over the j
 eleven terrains still use the generated edge sets in `tools/build_atlas.py`, which cut the pack's
 **own fills** to a contour rather than inventing pixels.
 
+### The third thing it does have: a palisade
+
+Listed here because the two entries above are about art this pack lacks, and this is the opposite
+mistake — art it has that nothing here had noticed.
+
+`TilesetHouse` carries a whole fortification in its right-hand columns: a **3x5 log post** (cols
+19-21, rows 3-7), a **3x3 plank wall** (22-24, 3-5), the same wall with an **arch cut through it**
+(22-24, 6-8), and a **1x2 stake fence** in three near-identical variants (22, 23, 24 at row 12).
+`BuildKind` had already dropped `kWall` and `kFence` on the finding that "this pack has no
+single-tile wall", which was true and was the wrong conclusion: the pack has no single-tile wall
+because its wall is drawn three tiles at a time, not because it has none.
+
+They were found the same way the autotile sets were — by reading the author's own scene file rather
+than by scanning sheets. `World/Maps/Village.tscn`, House layer, tile ids 39/40/41 stacked make one
+post, 42 the wall, 43 the arch, 44/45/46 the stakes. `src/world/village.hpp` puts them back together
+in that rhythm.
+
+`check_sprite_rects.py` scores the wall, the arch and the stakes at ~90% opaque on their left and
+right borders, which for anything else in this file would mean a severed rectangle. Here it is
+correct and expected: a wall is drawn to butt its own neighbour, so a tiling run has no transparent
+edge to find. The tool cannot tell that case from a real severance — only the grid render can, and
+`--rect NHouse 19 3 3 5` (the post, which is a whole object) does score 1/1/0/0.
+
 ### The set count was wrong, and the pack's own project file says so
 
 `autotile_fit.py --scan` reported three complete transition sets across ten tilesets. There are
