@@ -465,5 +465,67 @@ template <typename Neighbour>
     const int slot = kEdgeSlot[mask & 0x1FF];
     return AtlasRect{static_cast<std::int16_t>(row.x + slot * (kAtlasTile + 2)), row.y};
 }
+// --- Deluxe player rig (32px animated) -----------------------------------------------
+// The player's own high-detail rig: 32px frames (a 16px body centred with overflow room so
+// a swing reaches past its tile). Same COLUMN = facing, ROW = frame convention as the 16px
+// sheets, verified by pixel-matching against the pack's master sheet. Bodies come first,
+// then the frame-aligned katana overlays (blade + baked swoosh); empty overlay cells draw
+// nothing. The renderer composites e.g. kKatanaAttack over kAttack per (facing, frame).
+inline constexpr int kDeluxeTile = 32;
+
+struct AtlasDeluxe {
+    std::int16_t x;
+    std::int16_t y;
+    std::uint8_t cols;  // facings
+    std::uint8_t rows;  // frames
+};
+
+enum class Deluxe : std::uint8_t {
+    kIdle,
+    kWalk,
+    kAttack,
+    kHit,
+    kKatanaIdle,
+    kKatanaAttack,
+    kKatanaWalk,
+    kKatanaHit,
+    kCount,
+};
+
+inline constexpr AtlasDeluxe kAtlasDeluxe[static_cast<int>(Deluxe::kCount)] = {
+    {1, 5250, 4, 4},  // kIdle
+    {1, 5386, 4, 4},  // kWalk
+    {1, 5522, 4, 4},  // kAttack
+    {1, 5658, 4, 2},  // kHit
+    {1, 5726, 4, 4},  // kKatanaIdle
+    {1, 5862, 4, 4},  // kKatanaAttack
+    {1, 5998, 4, 4},  // kKatanaWalk
+    {1, 6134, 4, 2},  // kKatanaHit
+};
+
+[[nodiscard]] inline constexpr const AtlasDeluxe& deluxe_of(Deluxe d) noexcept {
+    return kAtlasDeluxe[static_cast<int>(d)];
+}
+
+// `dir` and `frame` are wrapped, so a caller may pass a free-running counter and a facing
+// the sheet has. A one-row sheet (none here yet) would be driven by `frame` as the anims are.
+[[nodiscard]] inline constexpr AtlasRect deluxe_frame(Deluxe d, int dir, int frame) noexcept {
+    const AtlasDeluxe& s = deluxe_of(d);
+    const int c = (dir % s.cols + s.cols) % s.cols;
+    const int r = (frame % s.rows + s.rows) % s.rows;
+    return AtlasRect{static_cast<std::int16_t>(s.x + c * (kDeluxeTile + 2)),
+                     static_cast<std::int16_t>(s.y + r * (kDeluxeTile + 2))};
+}
+
+// The katana the ninja carries on its back when not swinging: a single 6x10 sprite the
+// renderer draws offset and rotated to the facing (the pack's own weapon.gd rule).
+struct AtlasSprite {
+    std::int16_t x;
+    std::int16_t y;
+    std::uint8_t w;
+    std::uint8_t h;
+};
+
+inline constexpr AtlasSprite kKatanaCarry = {1, 6202, 6, 10};
 
 }  // namespace mmo

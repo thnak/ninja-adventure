@@ -409,6 +409,11 @@ struct RaylibBridge::Impl {
     int last_chunks = 0;
     int last_creatures = 0;
     const WorldLayout* layout = nullptr;
+    // Idle-vs-walk detection for the deluxe rig: `steps` is a monotonic move counter, so a change
+    // since last frame means the player moved. We keep walking briefly past the last step so a
+    // stop between tiles does not flicker to idle. Per-slot, driven by the published view alone.
+    mutable std::uint32_t player_prev_steps[kMaxPlayers] = {};
+    mutable double player_walk_until[kMaxPlayers] = {};
 
     // Per-frame scratch, kept as members so a frame costs no allocations once the vectors have
     // reached their working size. `frame_views` and `frame_players` exist to keep the shared_ptrs
@@ -493,6 +498,55 @@ struct RaylibBridge::Impl {
         const Rectangle src{static_cast<float>(r.x), static_cast<float>(r.y), t, t};
         const Rectangle dst{cx, cy, size, size};
         DrawTexturePro(atlas, src, dst, Vector2{size * 0.5f, size * 0.5f}, 0.0f, tint);
+    }
+
+    // One frame of the DELUXE 32px player rig (a body sheet or its frame-aligned katana overlay).
+    // Same column=facing, row=frame wrap rules as `anim`, but the cell is 32px. The 16px body is
+    // centred in that cell, so drawing the whole cell at `size` = 2x the 16px sprite quad lands the
+    // body at the same on-screen size AND its feet on the same point — the overflow room is what a
+    // swing swings into. `size` is the FULL 32px-quad size; the caller doubles the 16px quad.
+    void deluxe(Deluxe d, int dir, int frame, float cx, float cy, float size,
+                Color tint = WHITE) const {
+        if (!atlas_ok) return;
+        const AtlasRect r = deluxe_frame(d, dir, frame);
+        const float t = static_cast<float>(kDeluxeTile);
+        const Rectangle src{static_cast<float>(r.x), static_cast<float>(r.y), t, t};
+        const Rectangle dst{cx, cy, size, size};
+        DrawTexturePro(atlas, src, dst, Vector2{size * 0.5f, size * 0.5f}, 0.0f, tint);
+    }
+
+    // The katana CARRIED on the back when not swinging. This is the pack's own weapon.gd rule: the
+    // 6x10 in-hand sprite is offset along the facing and rotated to the facing angle minus 90 deg,
+    // and it sits BEHIND the body when facing up (the blade is on the far side of the shoulders) and
+    // in front otherwise. `back` selects which of those two draws this call is — the caller makes
+    // both, once before the body and once after, and only the matching one paints.
+    void carry_katana(Facing facing, float cx, float cy, float px_scale, bool back,
+                      Color tint = WHITE) const {
+        if (!atlas_ok) return;
+        const bool facing_up = facing == Facing::kUp;
+        if (facing_up != back) return;  // draw behind only when facing up; in front otherwise
+        const AtlasSprite& s = kKatanaCarry;
+        // Facing unit vector in screen space (y grows downward).
+        float fx = 0.0f, fy = 0.0f;
+        switch (facing) {
+            case Facing::kDown:  fy =  1.0f; break;
+            case Facing::kUp:    fy = -1.0f; break;
+            case Facing::kLeft:  fx = -1.0f; break;
+            case Facing::kRight: fx =  1.0f; break;
+        }
+        // ~(5,5) native-pixel offset along the facing, scaled to our pixels (the pack's weapon.gd
+        // uses ~(10,10) on a scene where the body is drawn at half our scale, so this is the same
+        // displacement). It rides toward the facing side of the body so it does not cover the face.
+        const float off = 5.0f * px_scale;
+        const float wx = cx + fx * off;
+        const float wy = cy + fy * off;
+        const float angle = std::atan2(fy, fx) * 180.0f / 3.14159265f - 90.0f;
+        const float w = static_cast<float>(s.w) * px_scale;
+        const float h = static_cast<float>(s.h) * px_scale;
+        const Rectangle src{static_cast<float>(s.x), static_cast<float>(s.y),
+                            static_cast<float>(s.w), static_cast<float>(s.h)};
+        DrawTexturePro(atlas, src, Rectangle{wx, wy, w, h}, Vector2{w * 0.5f, h * 0.5f}, angle,
+                       tint);
     }
 
     // A multi-tile sprite, anchored bottom-centre on tile (tx,ty): the trunk sits on its own tile
@@ -1246,6 +1300,89 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                     }
                 }
             }
+        }
+    }
+
+    // --- Players ---------------------------------------------------------------------------------
+    // Every live slot, not just the local one. They are read from the same published bus the camera
+    // uses, so a second player costs one more shared_ptr load per frame and nothing else.
+    //
+    // The world tick, read once: `world_tick - p.last_swing_tick` under a small window is how the
+    // deluxe attack animation fires for ANY player, local or remote, off published state alone. That
+    // is what lets a --shot of a staged swing show the swing (the pose no longer lives in poll_input).
+    const std::uint64_t world_tick = status.tick.load(std::memory_order_relaxed);
+    constexpr std::uint64_t kAttackWindowTicks = 4;  // 4 frames, one per tick (~0.4s at 10 t/s)
+    const double now = GetTime();
+    for (int s = 0; s < kMaxPlayers; ++s) {
+        PlayerViewPtr pv = players.load(s);
+        if (!pv || !pv->live() || pv->map != player.map) continue;
+        const PlayerView& p = *pv;
+        // A dead player is a faint ghost lying where they fell, not an absence: watching a friend
+        // go down and waiting for them is a moment, and despawning them deletes it.
+        const bool dead = p.dead_ticks > 0;
+        DrawEllipse(static_cast<int>(p.x * kTilePx), static_cast<int>(p.y * kTilePx + 7),
+                    kTilePx * 0.30f, kTilePx * 0.15f,
+                    Color{0, 0, 0, static_cast<unsigned char>(dead ? 40 : 80)});
+        const Color tint = dead ? Color{255, 255, 255, 90} : WHITE;
+        if (p.mounted) {
+            // Mounted: unchanged. The mount is drawn under the rider, one tile lower and slightly
+            // larger, and the rider stays on the plain 16px rig — the deluxe rig is a walk/idle/swing
+            // set that has no saddle pose, and a katana swing from horseback is disallowed anyway.
+            im.anim(Anim::kHorse, static_cast<int>(p.facing), static_cast<int>(p.steps / 5),
+                    p.x * kTilePx, p.y * kTilePx + 3.0f, kTilePx * 1.3f);
+            im.anim(Anim::kPlayer, static_cast<int>(p.facing), static_cast<int>(p.steps / 4),
+                    p.x * kTilePx, p.y * kTilePx - 5.0f, kTilePx * 1.1f, tint);
+        } else {
+            // On foot: the pack's DELUXE 32px rig. Drawn at 2x the 16px quad so the centred body
+            // lands at the same size and its feet on the same point (see `deluxe`).
+            const float cx = p.x * kTilePx;
+            const float cy = p.y * kTilePx;
+            const float size = kTilePx * 1.1f * 2.0f;
+            const float px_scale = static_cast<float>(kTilePx) / static_cast<float>(kAtlasTile);
+            const int facing = static_cast<int>(p.facing);
+
+            // Idle vs walk: a change in the authoritative `steps` since last frame means moving; we
+            // hold "walking" briefly past the last step so a pause between tiles does not flicker.
+            if (p.steps != im.player_prev_steps[s]) {
+                im.player_prev_steps[s] = p.steps;
+                im.player_walk_until[s] = now + 0.18;
+            }
+            const bool walking = now < im.player_walk_until[s];
+
+            // Attacking: derived purely from published state, so it is correct for a remote player
+            // and provable in a --shot. Frame steps once per tick across the window.
+            const bool attacking =
+                !dead && p.last_swing_tick != 0 && world_tick >= p.last_swing_tick &&
+                (world_tick - p.last_swing_tick) < kAttackWindowTicks;
+            const int attack_frame =
+                attacking ? static_cast<int>(world_tick - p.last_swing_tick) : 0;
+
+            if (!attacking) {
+                // Katana on the back BEHIND the body when facing up (blade on the far shoulder).
+                im.carry_katana(p.facing, cx, cy, px_scale, /*back=*/true, tint);
+                const Deluxe body = walking ? Deluxe::kWalk : Deluxe::kIdle;
+                // `steps` drives the walk exactly as the 16px rig did; idle cycles slowly on the
+                // wall clock (it is ambient, not simulation-authoritative).
+                const int frame =
+                    walking ? static_cast<int>(p.steps / 4) : static_cast<int>(now * 2.5);
+                im.deluxe(body, facing, frame, cx, cy, size, tint);
+                // Katana on the back IN FRONT of the body for every other facing.
+                im.carry_katana(p.facing, cx, cy, px_scale, /*back=*/false, tint);
+            } else {
+                // Swing: attack body + its frame-aligned katana overlay (blade + baked swoosh).
+                im.deluxe(Deluxe::kAttack, facing, attack_frame, cx, cy, size, tint);
+                im.deluxe(Deluxe::kKatanaAttack, facing, attack_frame, cx, cy, size, tint);
+            }
+        }
+        if (s != local_slot) {
+            // Somebody else's health bar, always shown — you cannot help a stranger you cannot read.
+            const int w = std::max(1, (p.hp * (kTilePx - 4)) / std::max<int>(1, p.max_hp));
+            DrawRectangle(static_cast<int>(p.x * kTilePx) - kTilePx / 2 + 2,
+                          static_cast<int>(p.y * kTilePx) - kTilePx / 2 - 6, kTilePx - 4, 3,
+                          Color{0, 0, 0, 140});
+            DrawRectangle(static_cast<int>(p.x * kTilePx) - kTilePx / 2 + 2,
+                          static_cast<int>(p.y * kTilePx) - kTilePx / 2 - 6, w, 3,
+                          Color{90, 220, 120, 255});
         }
     }
 

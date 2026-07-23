@@ -709,6 +709,52 @@ ANIM_MANIFEST = [
     ("Horse",      "Animal/Horse/SpriteSheetBrownSide.png",      2, 1),
 ]
 
+# --- Deluxe player rig (32px animated) ---------------------------------------
+# The plain `Player` walk sheet above is the 16px rig every actor started on. The player alone gets
+# the pack's DELUXE rig: `Actor/CharacterAnimated/NinjaGreen`, whose frames are 32x32 (a 16px body
+# centred with overflow room, so a swing can reach past the body's own tile). Same 4x4 convention as
+# the 16px sheets — COLUMN = facing (down, up, left, right), ROW = frame — VERIFIED here by
+# pixel-matching every frame against the pack's master `SpriteSheet.png` (see below), not assumed.
+#
+# The pack also ships a per-frame WEAPON OVERLAY, `CharacterAnimated/Weapon/Katana.png`: an 8x8 grid
+# of 32px cells (blade + a baked white swoosh) that is frame-aligned to the master sheet's top 8
+# rows. Which overlay cell belongs to which body frame was VERIFIED by cropping each master body
+# cell and comparing it byte-for-byte to the Separate/*.png frames. The result:
+#
+#     master cols 0-3, rows 0-3  = Idle    (col = facing, row = frame)
+#     master cols 4-7, rows 0-3  = Attack
+#     master cols 0-3, rows 4-7  = Walk
+#     master cols 4-7, rows 4-5  = Hit
+#
+# so the overlay lifts straight out of the katana sheet at the same coordinates. Empty overlay cells
+# (e.g. attack windup frame 1, where the blade is hidden behind the body) stay transparent and draw
+# nothing. The overlay is packed for idle/walk/attack/hit only — the four actions the on-foot player
+# uses — matching the body blocks one for one.
+DELUXE_ROOT = NINJA / "CharacterAnimated"
+DELUXE_TILE = 32
+
+# (name, path relative to DELUXE_ROOT, cols=facings, rows=frames)
+DELUXE_BODY = [
+    ("Idle",   "NinjaGreen/Separate/Idle.png",   4, 4),
+    ("Walk",   "NinjaGreen/Separate/Walk.png",   4, 4),
+    ("Attack", "NinjaGreen/Separate/Attack.png", 4, 4),
+    ("Hit",    "NinjaGreen/Separate/Hit.png",    4, 2),
+]
+
+# (name, katana grid col of local (0,0), katana grid row of local (0,0), cols, rows). Lifted from
+# CharacterAnimated/Weapon/Katana.png at the coordinates the pixel-match above proved.
+DELUXE_OVERLAY = [
+    ("KatanaIdle",   0, 0, 4, 4),
+    ("KatanaAttack", 4, 0, 4, 4),
+    ("KatanaWalk",   0, 4, 4, 4),
+    ("KatanaHit",    4, 4, 4, 2),
+]
+
+# The weapon the ninja CARRIES on its back when not swinging. `Items/Weapons/Katana/SpriteInHand.png`
+# is a single 6x10 sprite the pack's own weapon.gd draws offset and rotated to the facing; the
+# renderer does the same. One small sprite, packed like a particle (no grid).
+DELUXE_CARRY = ("Items/Weapons/Katana/SpriteInHand.png", 6, 10)
+
 
 def extrude(cell: Image.Image, tile: Image.Image) -> None:
     """Paste `tile` at (PAD,PAD) and smear its border pixels outward into the padding."""
@@ -1520,6 +1566,95 @@ def main() -> int:
 
     # --- prefab parcels, stacked below the transition sets -----------------------------------
     atlas, anim_y, prefabs = pack_prefabs(atlas, anim_y, cell_px)
+    # --- Deluxe player rig, stacked below the particles --------------------------------------
+    # Self-contained pass (kept last so it merges cleanly next to other appended manifests). The
+    # 32px body blocks and their frame-aligned katana overlay share the same block geometry: a grid
+    # of `cell_d` cells, each an extruded 32px frame. `deluxes` collects both, so the generated
+    # `Deluxe` enum lists bodies then overlays. Extrusion here is the same edge-smear the tile grid
+    # uses, sized for 32px, because these are sampled at fractional texture coords under camera zoom.
+    def extrude_at(dst_x, dst_y, frame, t):
+        cellimg = Image.new("RGBA", (t + 2 * PAD, t + 2 * PAD), (0, 0, 0, 0))
+        cellimg.paste(frame, (PAD, PAD))
+        for i in range(t):
+            top, bot = frame.getpixel((i, 0)), frame.getpixel((i, t - 1))
+            for p in range(PAD):
+                cellimg.putpixel((PAD + i, p), top)
+                cellimg.putpixel((PAD + i, PAD + t + p), bot)
+        for j in range(t):
+            lft, rgt = frame.getpixel((0, j)), frame.getpixel((t - 1, j))
+            for p in range(PAD):
+                cellimg.putpixel((p, PAD + j), lft)
+                cellimg.putpixel((PAD + t + p, PAD + j), rgt)
+        atlas.paste(cellimg, (dst_x, dst_y))
+
+    deluxes = []
+    cell_d = DELUXE_TILE + 2 * PAD
+    katana = Image.open(DELUXE_ROOT / "Weapon/Katana.png").convert("RGBA")
+    for name, rel, dcols, drows in DELUXE_BODY:
+        path = DELUXE_ROOT / rel
+        if not path.exists():
+            print(f"missing deluxe sheet: {path}", file=sys.stderr)
+            return 1
+        sheet = Image.open(path).convert("RGBA")
+        need_w, need_h = dcols * DELUXE_TILE, drows * DELUXE_TILE
+        if sheet.width < need_w or sheet.height < need_h:
+            print(f"{name}: {path.name} is {sheet.width}x{sheet.height}, "
+                  f"expected at least {need_w}x{need_h}", file=sys.stderr)
+            return 1
+        block_w, block_h = dcols * cell_d, drows * cell_d
+        new_w, new_h = max(atlas.width, block_w), anim_y + block_h
+        if new_w > atlas.width or new_h > atlas.height:
+            grown = Image.new("RGBA", (max(new_w, atlas.width), max(new_h, atlas.height)),
+                              (0, 0, 0, 0))
+            grown.paste(atlas, (0, 0))
+            atlas = grown
+        for r in range(drows):
+            for c in range(dcols):
+                frame = sheet.crop((c * DELUXE_TILE, r * DELUXE_TILE,
+                                    c * DELUXE_TILE + DELUXE_TILE, r * DELUXE_TILE + DELUXE_TILE))
+                extrude_at(c * cell_d, anim_y + r * cell_d, frame, DELUXE_TILE)
+        deluxes.append((name, PAD, anim_y + PAD, dcols, drows))
+        anim_y += block_h
+
+    for name, kc0, kr0, dcols, drows in DELUXE_OVERLAY:
+        block_w, block_h = dcols * cell_d, drows * cell_d
+        new_h = anim_y + block_h
+        if new_h > atlas.height or block_w > atlas.width:
+            grown = Image.new("RGBA", (max(block_w, atlas.width), max(new_h, atlas.height)),
+                              (0, 0, 0, 0))
+            grown.paste(atlas, (0, 0))
+            atlas = grown
+        for r in range(drows):
+            for c in range(dcols):
+                frame = katana.crop(((kc0 + c) * DELUXE_TILE, (kr0 + r) * DELUXE_TILE,
+                                     (kc0 + c) * DELUXE_TILE + DELUXE_TILE,
+                                     (kr0 + r) * DELUXE_TILE + DELUXE_TILE))
+                extrude_at(c * cell_d, anim_y + r * cell_d, frame, DELUXE_TILE)
+        deluxes.append((name, PAD, anim_y + PAD, dcols, drows))
+        anim_y += block_h
+
+    # The carried weapon (drawn on the ninja's back, offset+rotated to facing). One 6x10 sprite, no
+    # grid — packed with a 1px transparent margin, no edge-smear: it is drawn rotated in SCREEN space
+    # about its own centre, so any bleed would trail the blade rather than seam a tile.
+    carry_rel, carry_w, carry_h = DELUXE_CARRY
+    carry_path = SRC / "ninja" / carry_rel
+    if not carry_path.exists():
+        print(f"missing carry sprite: {carry_path}", file=sys.stderr)
+        return 1
+    carry_img = Image.open(carry_path).convert("RGBA")
+    if carry_img.width < carry_w or carry_img.height < carry_h:
+        print(f"carry sprite {carry_path.name} is {carry_img.size}, expected "
+              f"{carry_w}x{carry_h}", file=sys.stderr)
+        return 1
+    cw, ch = carry_w + 2 * PAD, carry_h + 2 * PAD
+    new_h = anim_y + ch
+    if new_h > atlas.height or cw > atlas.width:
+        grown = Image.new("RGBA", (max(cw, atlas.width), max(new_h, atlas.height)), (0, 0, 0, 0))
+        grown.paste(atlas, (0, 0))
+        atlas = grown
+    atlas.paste(carry_img.crop((0, 0, carry_w, carry_h)), (PAD, anim_y + PAD))
+    carry = (PAD, anim_y + PAD, carry_w, carry_h)
+    anim_y += ch
 
     out_png = ROOT / "assets" / "atlas.png"
     atlas.save(out_png)
@@ -1774,6 +1909,60 @@ def main() -> int:
         "    const int slot = kEdgeSlot[mask & 0x1FF];",
         "    return AtlasRect{static_cast<std::int16_t>(row.x + slot * (kAtlasTile + 2)), row.y};",
         "}",
+    ]
+    lines += [
+        "// --- Deluxe player rig (32px animated) -----------------------------------------------",
+        "// The player's own high-detail rig: 32px frames (a 16px body centred with overflow room so",
+        "// a swing reaches past its tile). Same COLUMN = facing, ROW = frame convention as the 16px",
+        "// sheets, verified by pixel-matching against the pack's master sheet. Bodies come first,",
+        "// then the frame-aligned katana overlays (blade + baked swoosh); empty overlay cells draw",
+        "// nothing. The renderer composites e.g. kKatanaAttack over kAttack per (facing, frame).",
+        f"inline constexpr int kDeluxeTile = {DELUXE_TILE};",
+        "",
+        "struct AtlasDeluxe {",
+        "    std::int16_t x;",
+        "    std::int16_t y;",
+        "    std::uint8_t cols;  // facings",
+        "    std::uint8_t rows;  // frames",
+        "};",
+        "",
+        "enum class Deluxe : std::uint8_t {",
+    ]
+    lines += [f"    k{name}," for name, _, _, _, _ in deluxes]
+    lines += [
+        "    kCount,",
+        "};",
+        "",
+        "inline constexpr AtlasDeluxe kAtlasDeluxe[static_cast<int>(Deluxe::kCount)] = {",
+    ]
+    lines += [f"    {{{x}, {y}, {c}, {r}}},  // k{name}" for name, x, y, c, r in deluxes]
+    lines += [
+        "};",
+        "",
+        "[[nodiscard]] inline constexpr const AtlasDeluxe& deluxe_of(Deluxe d) noexcept {",
+        "    return kAtlasDeluxe[static_cast<int>(d)];",
+        "}",
+        "",
+        "// `dir` and `frame` are wrapped, so a caller may pass a free-running counter and a facing",
+        "// the sheet has. A one-row sheet (none here yet) would be driven by `frame` as the anims are.",
+        "[[nodiscard]] inline constexpr AtlasRect deluxe_frame(Deluxe d, int dir, int frame) noexcept {",
+        "    const AtlasDeluxe& s = deluxe_of(d);",
+        "    const int c = (dir % s.cols + s.cols) % s.cols;",
+        "    const int r = (frame % s.rows + s.rows) % s.rows;",
+        "    return AtlasRect{static_cast<std::int16_t>(s.x + c * (kDeluxeTile + 2)),",
+        "                     static_cast<std::int16_t>(s.y + r * (kDeluxeTile + 2))};",
+        "}",
+        "",
+        "// The katana the ninja carries on its back when not swinging: a single 6x10 sprite the",
+        "// renderer draws offset and rotated to the facing (the pack's own weapon.gd rule).",
+        "struct AtlasSprite {",
+        "    std::int16_t x;",
+        "    std::int16_t y;",
+        "    std::uint8_t w;",
+        "    std::uint8_t h;",
+        "};",
+        "",
+        f"inline constexpr AtlasSprite kKatanaCarry = {{{carry[0]}, {carry[1]}, {carry[2]}, {carry[3]}}};",
         "",
         "}  // namespace mmo",
         "",
@@ -1781,7 +1970,8 @@ def main() -> int:
     header.write_text("\n".join(lines))
 
     print(f"{out_png}  {atlas.width}x{atlas.height}  "
-          f"({len(entries)} tiles, {len(anims)} anims, {len(bigs)} big, {len(fxs)} fx)")
+          f"({len(entries)} tiles, {len(anims)} anims, {len(bigs)} big, {len(fxs)} fx, "
+          f"{len(deluxes)} deluxe)")
     print(f"{header}")
 
     if prefabs:

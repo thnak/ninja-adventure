@@ -55,6 +55,12 @@ struct PlayerView {
     AbilityId ability[kAbilitySlots] = {AbilityId::kCount, AbilityId::kCount};
     std::uint16_t ability_cd[kAbilitySlots] = {};
 
+    // World tick of this player's last SUCCESSFUL swing, published by PlayerActor when a PlanAttack
+    // is granted. The renderer alone reads it: `world_tick - last_swing_tick` under a small window
+    // is how it draws the deluxe attack frames + katana swoosh for ANY player (local or remote),
+    // keyed off published state rather than off this client's own input. 0 means "never swung".
+    std::uint64_t last_swing_tick = 0;
+
     [[nodiscard]] bool live() const noexcept { return account != 0; }
 };
 

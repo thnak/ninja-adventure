@@ -23,3 +23,6 @@ tools/__pycache__/
 
 # CTest output when ctest is run from the repo root rather than build/.
 Testing/
+
+# Agent worktrees are scratch checkouts, never content.
+.claude/worktrees/

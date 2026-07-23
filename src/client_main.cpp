@@ -75,6 +75,7 @@ int main(int argc, char** argv) {
     int look_ring = -1;                 // --ring N: park the camera in biome ring N
     int stage_fight = 0;                // --fight N: drop N creatures on the player before the shot
     bool stage_ability = false;         // --ability: level into Magic and fire Nova + RainCall
+    bool stage_walk = false;            // --walk: keep the player moving so a shot catches mid-stride
     int look_door = -1;                 // --door N: step onto door N, which takes you inside it
     int look_at_tx = -1;                // --at TX TY: park the camera on an arbitrary tile
     int look_at_ty = -1;
@@ -97,6 +98,8 @@ int main(int argc, char** argv) {
             stage_fight = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--ability") == 0) {
             stage_ability = true;  // level into Magic, then fire Nova + RainCall for the shot
+        } else if (std::strcmp(argv[i], "--walk") == 0) {
+            stage_walk = true;
         } else if (std::strcmp(argv[i], "--at") == 0 && i + 2 < argc) {
             look_at_tx = std::atoi(argv[i + 1]);
             look_at_ty = std::atoi(argv[i + 2]);
@@ -239,6 +242,11 @@ int main(int argc, char** argv) {
             world.cast(me, Element::kIce, player.x + 2.0f, player.y - 1.0f);
             world.shoot(me, player.x + 8.0f, player.y + 1.0f);
             world.swing(me, /*heavy*/ true);
+            // Two ticks, not one: the renderer plays the swing one frame per tick, and its second
+            // frame is the wind-up where the blade is hidden behind the body (that overlay cell is
+            // empty by design). Landing the shot on the third frame — the downward swing — is what
+            // puts the katana and its baked swoosh in the picture.
+            world.step(kTickMs);
             world.step(kTickMs);
             world.sync_world();
         }
@@ -283,6 +291,16 @@ int main(int argc, char** argv) {
     while (bridge.begin_frame()) {
         const float dt = std::min(bridge.frame_time(), 0.25f);
         const PlayerView player = view();
+
+        // --walk: a screenshot fast-forwards the world OUTSIDE this loop, so the renderer never sees
+        // the move counter change across its own frames and always reads the player as standing.
+        // Nudge the player east and tick the world every frame instead, so `steps` advances between
+        // draws and the shot catches the walk cycle. Shot-only staging; a live client never sets it.
+        if (stage_walk && shot_path != nullptr && slot >= 0) {
+            world.move_player(me, kPlayerSpeed * 0.08f, 0.0f);
+            world.step(kTickMs);
+            world.sync_world();
+        }
 
         // --- input becomes messages ---------------------------------------------------------------
         // The shell gets first refusal. When a menu is open it returns true and the world sees no

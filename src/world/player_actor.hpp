@@ -266,6 +266,12 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
                 p.element = m.query.element;
                 break;
         }
+        // Record the tick of a granted swing so the renderer can play the attack animation for this
+        // player — including a remote one — off published state alone. Only melee reads as a body
+        // swing; a shot or a cast has its own effect and leaves the body idle.
+        if (p.ok && (m.query.kind == AttackKind::kLight || m.query.kind == AttackKind::kHeavy)) {
+            last_swing_tick_ = tick_;
+        }
         if (p.ok) publish();
         m.respond(p);
     }
@@ -358,6 +364,7 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         v.stamina = stamina_;
         v.facing = facing_;
         v.steps = steps_;
+        v.last_swing_tick = last_swing_tick_;
         v.dead_ticks = dead_ticks_;
         v.deaths = deaths_;
         v.mounted = mounted_;
@@ -458,6 +465,7 @@ private:
     Facing facing_ = Facing::kDown;
     std::uint32_t steps_ = 0;
     std::uint32_t last_tile_ = 0xFFFF'FFFFu;  // the tile a door was last tested against
+    std::uint64_t last_swing_tick_ = 0;  // tick of the last granted melee swing; drives the anim
     std::uint16_t dead_ticks_ = 0;
     std::uint32_t deaths_ = 0;
     bool mounted_ = false;
