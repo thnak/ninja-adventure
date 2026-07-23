@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 
 namespace mmo {
@@ -533,7 +534,13 @@ enum class EffectKind : std::uint8_t {
     kEarth = 3,
     kShock = 4,
     kBlast = 5,  // a combo detonating
-    kCount = 6,
+    // The ability layer's own flashes (F1a). They ride the SAME published-effect channel as the
+    // basic verbs above rather than being drawn client-side, for exactly the reason in the struct
+    // comment below: a WhirlCleave the other players cannot see is a fight they cannot read.
+    kSlashHeavy = 6,  // WhirlCleave — the 360 arc, at the player
+    kSlashCombo = 7,  // CrushBlow — the finishing strike, at the target
+    kSmoke = 8,       // SmokeBomb — the puff where the zone is thrown
+    kCount = 9,
 };
 
 [[nodiscard]] inline constexpr EffectKind effect_of(Element e) noexcept {
@@ -568,6 +575,11 @@ enum class EffectKind : std::uint8_t {
         case EffectKind::kEarth: return 14;
         case EffectKind::kShock: return 8;
         case EffectKind::kBlast: return 9;
+        // The ability flashes, matching their FX strip frame counts in tools/build_atlas.py
+        // (SlashHeavy 4, SlashCombo 4, Smoke 6) — same one-frame-per-tick playback as the rest.
+        case EffectKind::kSlashHeavy: return 4;
+        case EffectKind::kSlashCombo: return 4;
+        case EffectKind::kSmoke: return 6;
         case EffectKind::kCount: break;
     }
     return 6;
@@ -582,6 +594,32 @@ struct Effect {
     EffectKind kind = EffectKind::kSlash;
     std::uint8_t age = 0;  // counts up; dropped at effect_life_of(kind)
 };
+
+// A ZONE: a lingering circle of effect a player drops on the ground, owned by the chunk it lands in
+// and stepped down each tick until it expires. It is the ability layer's second kind of persistent
+// state after the projectile — and, like the projectile, it is CHUNK state rather than the caster's,
+// because what it does (wet a creature, blind a creature) is a fact about which creatures stand
+// where, and the actor that knows that is the one that owns the tile.
+//
+// This is the minimal F1a shape: a zone belongs to exactly the chunk that owns its centre and only
+// touches that chunk's own creatures. A radius that spills into a neighbour therefore under-covers
+// at the seam — F2 owns the fan-out that fixes it. Kept deliberately small (kMaxZones per chunk) for
+// the same reason effects are capped: a published view is copied, not referenced.
+enum class ZoneKind : std::uint8_t {
+    kWet = 0,           // RainCall — marks everything inside Status::kWet, feeding the Conduct chain
+    kSmokeSuppress = 1, // SmokeBomb — creatures inside drop their target and cannot acquire prey
+    kCount = 2,
+};
+
+struct Zone {
+    ZoneKind kind = ZoneKind::kWet;
+    float x = 0.0f;
+    float y = 0.0f;
+    float radius = 0.0f;
+    std::uint16_t ticks_left = 0;  // counts down; dropped at 0
+};
+
+inline constexpr std::size_t kMaxZones = 8;  // per chunk — a published view is copied, not referenced
 
 struct Crop {
     std::uint16_t tx = 0;  // map-global tile

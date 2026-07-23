@@ -131,7 +131,51 @@ void bar(int x, int y, int w, int h, float frac, Color fill, const char* label) 
     if (label != nullptr) DrawText(label, x + 6, y + (h - 14) / 2, 14, RAYWHITE);
 }
 
-void draw_hud(const ShellState& st, const WorldStatus& status, const PlayerView& player) {
+// The two ability slots, drawn to the right of the element/build hotbar. Everything a slot needs it
+// reads from the published PlayerView (which ability, its cooldown) and derives the rest from the
+// shared ability table plus the vitals already in the view — no `ask`, no client-side ability state.
+void draw_ability_slots(const PlayerView& player, int x0, int y, int slot_px) {
+    static const char* kKeys[kAbilitySlots] = {"F", "G"};
+    for (int i = 0; i < kAbilitySlots; ++i) {
+        const int x = x0 + i * (slot_px + 6);
+        const AbilityId id = player.ability[i];
+        const AbilityDef def = ability_def(id);
+        const bool locked = player.skill_level[static_cast<int>(def.school)] < def.unlock_level;
+        const std::int16_t have =
+            def.cost_kind == AbilityCost::kStamina ? player.stamina : player.mana;
+        const bool poor = have < def.cost;
+        const std::uint16_t cd = player.ability_cd[i];
+        const bool cooling = cd > 0;
+        const bool disabled = locked || poor || cooling;
+
+        DrawRectangle(x, y, slot_px, slot_px, Color{0, 0, 0, 150});
+        // The greyed twin whenever the slot cannot fire, for any of the three reasons.
+        draw_ui_icon(static_cast<int>(id), disabled, static_cast<float>(x + 4),
+                     static_cast<float>(y + 4), static_cast<float>(slot_px - 8));
+
+        // Cooldown wipe: a dark panel over the top of the icon whose height is the fraction of the
+        // cooldown still to run, so it empties downward and the icon fills back in as it readies.
+        // Flat rectangles on purpose — the same idiom as the bars and the hotbar, not a new one.
+        if (cooling && def.cooldown > 0) {
+            const float frac = static_cast<float>(cd) / static_cast<float>(def.cooldown);
+            const int ch = static_cast<int>(frac * static_cast<float>(slot_px));
+            DrawRectangle(x, y, slot_px, ch, Color{10, 12, 18, 170});
+        }
+
+        DrawRectangleLines(x, y, slot_px, slot_px,
+                           disabled ? Color{92, 96, 108, 255} : Color{240, 214, 130, 255});
+        // Keybind, top-left; and the unlock level, bottom, while the school is still too low for it.
+        DrawText(kKeys[i], x + 4, y + 2, 12, Color{210, 214, 222, 255});
+        if (locked) {
+            const char* need = TextFormat("Lv%d", def.unlock_level);
+            DrawText(need, x + (slot_px - MeasureText(need, 10)) / 2, y + slot_px - 12, 10,
+                     Color{200, 150, 140, 255});
+        }
+    }
+}
+
+void draw_hud(const WorldStatus& status, const PlayerView& player, bool build_mode,
+              int selected_slot) {
     const int w = GetScreenWidth();
     const int h = GetScreenHeight();
 
@@ -164,30 +208,38 @@ void draw_hud(const ShellState& st, const WorldStatus& status, const PlayerView&
     static const Color kSchoolTint[4] = {Color{255, 150, 90, 255}, Color{140, 210, 255, 255},
                                          Color{180, 150, 110, 255}, Color{255, 245, 130, 255}};
     static const char* kBuilds[2] = {"Hearth", "Plot"};
-    const int slots = st.build_mode ? 2 : 4;
+    const int slots = build_mode ? 2 : 4;
     constexpr int kSlotPx = 44;
-    const int total = slots * kSlotPx + (slots - 1) * 6;
+    // The element/build slots plus, in combat, the two ability slots — kept as one centred group so
+    // the whole bar reads together and stays put when you switch modes. The ability slots are hidden
+    // in build mode: there is nothing to fire while placing a hearth.
+    const int ability_extent = build_mode ? 0 : (12 + 2 * kSlotPx + 6);
+    const int total = slots * kSlotPx + (slots - 1) * 6 + ability_extent;
     const int hx = (w - total) / 2;
     for (int i = 0; i < slots; ++i) {
         const int x = hx + i * (kSlotPx + 6);
         DrawRectangle(x, h - 60, kSlotPx, kSlotPx, Color{0, 0, 0, 150});
         DrawRectangleLines(x, h - 60, kSlotPx, kSlotPx,
-                           i == st.selected_hotbar ? Color{240, 214, 130, 255}
-                                                   : Color{110, 110, 118, 255});
-        if (!st.build_mode) {
+                           i == selected_slot ? Color{240, 214, 130, 255}
+                                              : Color{110, 110, 118, 255});
+        if (!build_mode) {
             DrawRectangle(x + 10, h - 44, 24, 24, kSchoolTint[i]);
         }
         DrawText(TextFormat("%d", i + 1), x + 4, h - 58, 12, Color{170, 170, 176, 255});
-        const char* name = st.build_mode ? kBuilds[i] : kSchools[i];
+        const char* name = build_mode ? kBuilds[i] : kSchools[i];
         DrawText(name, x + (kSlotPx - MeasureText(name, 10)) / 2, h - 12, 10,
                  Color{170, 174, 182, 255});
+    }
+    if (!build_mode) {
+        const int ax0 = hx + slots * (kSlotPx + 6) + 12;
+        draw_ability_slots(player, ax0, h - 60, kSlotPx);
     }
     // Above the slots rather than beside them: at the narrowest supported window the hotbar reaches
     // most of the way across and a label to its left lands on top of slot one.
     {
-        const char* mode = st.build_mode ? "BUILD  (B)" : "FIGHT  (B)";
+        const char* mode = build_mode ? "BUILD  (B)" : "FIGHT  (B)";
         DrawText(mode, (w - MeasureText(mode, 16)) / 2, h - 92, 16,
-                 st.build_mode ? Color{240, 214, 130, 255} : Color{212, 172, 172, 255});
+                 build_mode ? Color{240, 214, 130, 255} : Color{212, 172, 172, 255});
     }
 
     // Death. A countdown, in the middle, with nothing else competing for attention.
@@ -332,7 +384,8 @@ void apply_theme() {
     GuiSetStyle(DEFAULT, TEXT_COLOR_PRESSED, hex(0xfff3d0ff));
 }
 
-Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player) {
+Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player, bool build_mode,
+            int selected_slot) {
     apply_theme();
 
     switch (st.screen) {
@@ -434,7 +487,7 @@ Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player)
         }
 
         case Screen::kPlaying:
-            draw_hud(st, status, player);
+            draw_hud(status, player, build_mode, selected_slot);
             return Action::kNone;
 
         case Screen::kMainMenu: {
@@ -454,7 +507,7 @@ Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player)
         }
 
         case Screen::kPaused: {
-            draw_hud(st, status, player);
+            draw_hud(status, player, build_mode, selected_slot);
             dim_background();
             title("Paused", GetScreenHeight() / 2 - 170);
             subtitle("The world keeps going while you are here.", GetScreenHeight() / 2 - 120);

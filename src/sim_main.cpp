@@ -364,6 +364,178 @@ int main(int argc, char** argv) {
                 airborne.projectiles);
     chk.expect(shot_ok, "the player could shoot");
 
+    // --- The ability layer (F1a) -----------------------------------------------------------------
+    // Abilities are the first thing in the game with a per-slot cooldown and a school-level gate, so
+    // this section proves the whole chain a basic verb does not exercise: the trusted actor refuses
+    // an ability the school is too low for, debits the right bar, sets a cooldown that rejects an
+    // instant repeat, and — through the world's map-aware fan-out — lands the resolved shape on the
+    // chunks. It also proves the two ZONE abilities: a wet zone that feeds the existing Conduct
+    // chain, and (implicitly, via the same path) a smoke zone.
+    //
+    // A creature is only reliably one-shot in the MEADOW ring (no HP scaling), so the staged fights
+    // below are pinned to a walkable meadow tile found near the map centre. The loadout is the fixed
+    // "strongest school" one, so `me` is levelled into Melee and the second account into Magic —
+    // one player cannot hold both a melee and a magic kit.
+    // A creature is only reliably one-shot in the MEADOW ring (no HP scaling), so the overworld
+    // staged fights are pinned to walkable meadow tiles found near the map centre. Two are used —
+    // one per fighter — because the fixed "strongest school" loadout means `me` is a melee kit and
+    // the second account a magic kit, and parking them apart keeps each fight's slimes to itself.
+    const auto find_meadow_tile = [&](int cx, int cy, int& ox, int& oy) -> bool {
+        for (int r = 0; r < 240; ++r) {
+            for (int dy = -r; dy <= r; ++dy) {
+                for (int dx = -r; dx <= r; ++dx) {
+                    if (std::abs(dx) != r && std::abs(dy) != r) continue;  // ring perimeter only
+                    const int tx = cx + dx;
+                    const int ty = cy + dy;
+                    if (tx < 0 || ty < 0 || tx >= kMapTiles || ty >= kMapTiles) continue;
+                    if (ring_of(kWorldSeed, tx, ty) != Ring::kMeadow) continue;
+                    if (!is_walkable(terrain_of(kWorldSeed, home, tx, ty))) continue;
+                    ox = tx;
+                    oy = ty;
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    int m1x = -1, m1y = -1, m2x = -1, m2y = -1;
+    const bool have_m1 = find_meadow_tile(kHomeTx - 90, kHomeTy, m1x, m1y);
+    const bool have_m2 = find_meadow_tile(kHomeTx + 90, kHomeTy, m2x, m2y);
+    chk.expect(have_m1 && have_m2 && (m1x != m2x || m1y != m2y),
+               "there are two distinct walkable meadow tiles to stage the ability fights on");
+
+    const std::uint64_t guest = world.key_of(slot2);
+
+    // The lock: a fresh account has no fighting levels, so slot A resolves to a Melee ability it is
+    // not allowed to use yet. The request must be refused BEFORE anything is spent.
+    const bool locked = world.use_ability(guest, 0, Element::kNone, 0.0f, 0.0f);
+    chk.expect(!locked, "an ability is refused while the school is below its unlock level");
+
+    if (have_m1 && have_m2) {
+        // Level each account into its kit and park them apart, both on safe (creature-free) meadow
+        // tiles so neither is mauled while idle during the other's staged fight.
+        world.grant_xp(me, Skill::kMelee, 120000);   // Melee to the cap — a meadow slime is one-shot
+        world.grant_xp(guest, Skill::kMagic, 20000);  // Magic past level 10, so RainCall is equipped
+        world.teleport_player(me, home, static_cast<float>(m1x) + 0.5f, static_cast<float>(m1y) + 0.5f);
+        world.teleport_player(guest, home, static_cast<float>(m2x) + 0.5f,
+                              static_cast<float>(m2y) + 0.5f);
+        advance(world, 40);  // regen stamina/mana to full, let the grants settle
+
+        // ---- WhirlCleave: cost, cooldown, and a landed 360 arc (Melee), at M1 ----
+        const PlayerView armed = world.player_view(slot);
+        chk.expect(armed.skill_level[static_cast<int>(Skill::kMelee)] >= 5,
+                   "granting XP raised Melee past the ability unlock");
+        chk.expect(armed.ability[0] == AbilityId::kWhirlCleave,
+                   "slot A is the Melee school's level-5 ability");
+
+        const ChunkCoord m1_chunk = chunk_of(home, static_cast<float>(m1x), static_cast<float>(m1y));
+        world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);  // full bars to start
+        world.spawn_wave_at(static_cast<std::uint16_t>(m1x), static_cast<std::uint16_t>(m1y),
+                            CreatureKind::kSlime, 6, /*seed*/ 31);
+        advance(world, 3);  // beacon reaches, slimes are near
+
+        const PlayerView before_cleave = world.player_view(slot);
+        const std::uint32_t kills_before = world.status().player_kills.load(std::memory_order_relaxed);
+        const bool cleave1 = world.use_ability(me, 0, Element::kNone, 0.0f, 0.0f);
+        advance(world, 1);
+        const bool cleave2 = world.use_ability(me, 0, Element::kNone, 0.0f, 0.0f);  // still cooling
+        const PlayerView after_cleave = world.player_view(slot);
+        std::printf("\nWhirlCleave: first=%s second=%s;  stamina %d -> %d (cost 30);  cd now %u\n",
+                    cleave1 ? "ok" : "refused", cleave2 ? "ok" : "refused", before_cleave.stamina,
+                    after_cleave.stamina, after_cleave.ability_cd[0]);
+        chk.expect(cleave1, "the player could use WhirlCleave with Melee 5 and full stamina");
+        chk.expect(!cleave2, "the cooldown refused an immediate second use");
+        chk.expect(after_cleave.stamina < before_cleave.stamina, "using WhirlCleave debited stamina");
+        chk.expect(after_cleave.ability_cd[0] > 0, "the slot reports a running cooldown");
+
+        // Land more cleaves (waiting out the cooldown) until something dies, proving the arc reaches
+        // creatures and that a kill credits Melee XP.
+        for (int round = 0; round < 5; ++round) {
+            if (world.status().player_kills.load(std::memory_order_relaxed) > kills_before) break;
+            advance(world, 62);  // past the 60-tick cooldown
+            world.use_ability(me, 0, Element::kNone, 0.0f, 0.0f);
+            advance(world, 2);
+        }
+        const std::uint32_t kills_after = world.status().player_kills.load(std::memory_order_relaxed);
+        std::printf("  WhirlCleave kills %u -> %u;  chunk creatures now %u\n", kills_before,
+                    kills_after, world.chunk_stats(m1_chunk).creatures);
+        chk.expect(kills_after > kills_before, "the 360 arc killed creatures");
+
+        // ---- RainCall + Conduct: a wet zone feeds the existing chain (Magic), at M2 ----
+        const PlayerView mage = world.player_view(slot2);
+        chk.expect(mage.ability[1] == AbilityId::kRainCall,
+                   "slot B is the Magic school's level-10 ability once Magic is high enough");
+
+        const ChunkCoord m2_chunk = chunk_of(home, static_cast<float>(m2x), static_cast<float>(m2y));
+        world.grant_vitals(guest, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);  // full mana for the cast
+        world.spawn_wave_at(static_cast<std::uint16_t>(m2x), static_cast<std::uint16_t>(m2y),
+                            CreatureKind::kSlime, 6, /*seed*/ 21);
+        advance(world, 3);
+        const bool rained = world.use_ability(guest, 1, Element::kNone, static_cast<float>(m2x),
+                                              static_cast<float>(m2y));
+        advance(world, 2);  // the zone wets the creatures standing in it
+        const ChunkStats wet = world.chunk_stats(m2_chunk);
+        std::printf("RainCall: cast %s;  zones=%u  afflicted(wet)=%u\n", rained ? "ok" : "refused",
+                    wet.zones, wet.afflicted);
+        chk.expect(rained, "the player could call rain with Magic 10 and full mana");
+        chk.expect(wet.zones > 0, "the rain left a wet zone on the map");
+        chk.expect(wet.afflicted > 0, "the wet zone marked the creatures inside it");
+
+        const std::uint32_t chain_before = world.status().player_kills.load(std::memory_order_relaxed);
+        const bool shocked = world.cast(guest, Element::kShock, static_cast<float>(m2x) + 0.5f,
+                                        static_cast<float>(m2y) + 0.5f);
+        advance(world, 2);
+        const std::uint32_t chain_after = world.status().player_kills.load(std::memory_order_relaxed);
+        std::printf("  shock into the rain: cast %s;  Conduct kills %u -> %u\n",
+                    shocked ? "ok" : "refused", chain_before, chain_after);
+        chk.expect(shocked, "the player could cast shock");
+        chk.expect(chain_after > chain_before, "wet + shock conducted and the chain killed");
+
+        // ---- Interior combat: the map-aware fan-out reaches an interior chunk ----
+        // Before the fix, every combat verb fanned to the OVERWORLD chunks under a room and hit
+        // nothing inside it. Doors map to the top rows of the interior grid, which are the OUTER
+        // rings, so an interior slime is far too tough to one-shot and the proof cannot be a kill.
+        // Instead the second account steps inside and casts ElementalNova: the flash the interior
+        // chunk publishes proves the strike was delivered there, and the STATUS it leaves on a
+        // survivor proves it actually connected with a creature on the interior map — both
+        // impossible if the verb had gone to the overworld. Mana is topped up first for the cast.
+        advance(world, 30);  // regen the caster's mana for Nova after RainCall + shock
+        const Door& d = layout.doors().front();
+        const int idtx = static_cast<int>(d.tile & 0xFFFFu);
+        const int idty = static_cast<int>(d.tile >> 16);
+        world.teleport_player(guest, home, static_cast<float>(idtx) + 0.5f,
+                              static_cast<float>(idty) + 0.5f);
+        const PlayerView inside = world.player_view(slot2);
+        chk.expect(inside.map == kInterior, "stepping onto the door put the caster indoors");
+        chk.expect(inside.ability[0] == AbilityId::kElementalNova, "slot A is the Magic level-5 Nova");
+
+        const auto itx = static_cast<std::uint16_t>(inside.x);
+        const auto ity = static_cast<std::uint16_t>(inside.y);
+        const ChunkCoord interior_chunk =
+            chunk_of(kInterior, static_cast<float>(itx), static_cast<float>(ity));
+        world.grant_vitals(guest, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);  // full mana for Nova
+        world.spawn_wave_at(itx, ity, CreatureKind::kSlime, 3, /*seed*/ 5, kInterior);
+        advance(world, 3);
+        const ChunkStats before_in = world.chunk_stats(interior_chunk);
+        chk.expect(before_in.creatures > 0, "the wave landed on the interior chunk");
+
+        const bool nova = world.use_ability(guest, 0, Element::kFire, 0.0f, 0.0f);
+        advance(world, 1);
+        const ChunkStats after_in = world.chunk_stats(interior_chunk);
+        std::printf("interior fight: chunk (%u,%u) creatures=%u effects=%u afflicted=%u  nova=%s\n",
+                    interior_chunk.cx, interior_chunk.cy, after_in.creatures, after_in.effects,
+                    after_in.afflicted, nova ? "ok" : "refused");
+        chk.expect(nova, "the caster could Nova indoors");
+        chk.expect(after_in.effects > 0,
+                   "the ability strike reached the interior chunk (its flash is there)");
+        chk.expect(after_in.afflicted > 0,
+                   "the strike connected with a creature on the interior map (it left a status)");
+
+        // Put both players back at the spawn tile so the Death section below reads a normal state.
+        world.teleport_player(guest, home, spawn.x, spawn.y);
+        world.teleport_player(me, home, spawn.x, spawn.y);
+    }
+
     // --- Death and respawn -------------------------------------------------------------------------
     // The respawn point is where you lit your hearth. Nothing is taken from you when you die: this
     // game's default is chill (GAME.md §0), and the cost of dying is the walk back.

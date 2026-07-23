@@ -20,6 +20,7 @@
 #include <memory>
 #include <vector>
 
+#include "world/abilities.hpp"
 #include "world/tiles.hpp"
 
 namespace mmo {
@@ -45,6 +46,14 @@ struct PlayerView {
     std::uint8_t skill_level[kSkillCount] = {};
     std::uint32_t skill_xp[kSkillCount] = {};
     std::uint32_t skill_next[kSkillCount] = {};
+
+    // The two equipped ability slots, as the HUD needs to draw them without an `ask`. `ability` is
+    // which ability the fixed loadout resolved each slot to (AbilityId::kCount if the school is not
+    // yet high enough — the HUD greys it), and `ability_cd` is the ticks of cooldown left. Everything
+    // else the HUD wants (locked, affordable, cooldown fraction) it derives from `ability_def` and
+    // the vitals already in this view.
+    AbilityId ability[kAbilitySlots] = {AbilityId::kCount, AbilityId::kCount};
+    std::uint16_t ability_cd[kAbilitySlots] = {};
 
     [[nodiscard]] bool live() const noexcept { return account != 0; }
 };
@@ -92,6 +101,7 @@ struct ChunkView {
     std::vector<Creature> creatures;
     std::vector<Projectile> shots;
     std::vector<Effect> effects;
+    std::vector<Zone> zones;
     std::vector<Crop> crops;
     std::vector<Building> buildings;
 };

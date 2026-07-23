@@ -44,6 +44,8 @@ struct InputFrame {
     bool heavy = false;
     bool shoot = false;
     bool cast = false;
+    bool ability_a = false;  // F — the level-5 ability of your strongest school (edge-triggered)
+    bool ability_b = false;  // G — the level-10 ability of that school (edge-triggered)
     Element element = Element::kFire;
     bool mount = false;   // edge-triggered toggle
     float aim_x = 0.0f;   // cursor, in map tiles (fractional)

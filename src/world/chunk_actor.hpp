@@ -46,8 +46,8 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
                                  quark::DrainBudget<64>, quark::Placement<quark::HashById>> {
     using protocol =
         Protocol<Tick, CreatureEnter, ProjectileEnter, SpawnWave, PlayerBeacon, MeleeSwing,
-                 CastSpell, LaunchArrow, PlantCrop, PlaceBuilding, UpgradeBuilding, TillGround,
-                 HarvestAt, Ask<GetChunkStats, ChunkStats>>;
+                 CastSpell, LaunchArrow, AbilityStrike, SpawnZone, PlantCrop, PlaceBuilding,
+                 UpgradeBuilding, TillGround, HarvestAt, Ask<GetChunkStats, ChunkStats>>;
 
     // --- Wired once at bring-up, before the engine starts -----------------------------------------
     ChunkCoord coord{};
@@ -89,7 +89,7 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         expire_beacons();
 
         const bool empty = creatures_.empty() && crops_.empty() && buildings_.empty() &&
-                           shots_.empty() && effects_.empty();
+                           shots_.empty() && effects_.empty() && zones_.empty();
         if (empty) {
             if (tick_ % kIdlePublish == 0) publish();
             return;
@@ -98,6 +98,7 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         Rng rng(chunk_key(coord) * 0x9E37'79B9'7F4A'7C15ull + t.tick);
         grow_crops();
         step_status();
+        step_zones();  // before creatures: a wet/smoke zone changes what they do this tick
         step_creatures(rng);
         step_projectiles();
         step_effects();
@@ -221,6 +222,81 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         shots_.push_back(p);
     }
 
+    // --- the ability verbs ------------------------------------------------------------------------
+    // A resolved striking ability. Same tier-B contract as MeleeSwing/CastSpell: the damage and the
+    // shape arrive decided, and this chunk only touches creatures it owns, so a border cannot double
+    // a hit. Three abilities share this: WhirlCleave (a ring around the caster), CrushBlow (the one
+    // nearest creature ahead, stunned), ElementalNova (a ring that also leaves an element's status).
+    void handle(const AbilityStrike& s) noexcept {
+        const float fx = facing_dx(s.facing);
+        const float fy = facing_dy(s.facing);
+
+        if (s.shape == AbilityShape::kFront) {
+            // CrushBlow: pick the single nearest creature this chunk owns that is within reach and in
+            // front of the caster, and land the whole blow on it. Only the owning chunk strikes, so
+            // a creature straddling a border is hit exactly once.
+            std::size_t best = creatures_.size();
+            float best_d2 = s.radius * s.radius;
+            for (std::size_t i = 0; i < creatures_.size(); ++i) {
+                const Creature& c = creatures_[i];
+                if (c.hp <= 0) continue;
+                const float dx = c.x - s.x;
+                const float dy = c.y - s.y;
+                const float d2 = dx * dx + dy * dy;
+                if (d2 > best_d2) continue;
+                if (d2 > 0.01f && (dx * fx + dy * fy) < 0.0f) continue;  // behind the caster
+                best_d2 = d2;
+                best = i;
+            }
+            if (best < creatures_.size()) {
+                Creature& c = creatures_[best];
+                add_effect(c.x, c.y, s.fx);
+                strike(c, s.damage, Combo::kNone, s.player, s.skill);
+                if (c.hp > 0 && s.stun_ticks > 0) {
+                    c.stun_ticks = static_cast<std::uint8_t>(s.stun_ticks);
+                }
+            }
+            return;
+        }
+
+        // A ring around the caster (WhirlCleave, Nova). The flash goes at the caster whether or not
+        // it connects — a whiff is information, exactly as a plain swing's arc is.
+        if (owns_point(s.x, s.y)) add_effect(s.x, s.y, s.fx);
+        const Status st = status_of(s.element);
+        for (Creature& c : creatures_) {
+            if (c.hp <= 0) continue;
+            const float dx = c.x - s.x;
+            const float dy = c.y - s.y;
+            if (dx * dx + dy * dy > s.radius * s.radius) continue;
+            if (s.element != Element::kNone) {
+                // Nova is a big CastSpell: it detonates a wet target for Conduct and leaves its own
+                // element's status on the survivors — the same interaction the cast path has.
+                const Combo combo = combo_of(c.status, false, false, s.element);
+                apply_combo_side_effects(combo, c, s.player);
+                strike(c, s.damage, combo, s.player, s.skill);
+                if (c.hp > 0) {
+                    c.status = st;
+                    c.status_ticks = status_ticks_of(st);
+                }
+                if (combo == Combo::kConduct) chain_shock(c, s.damage, s.player);
+            } else {
+                strike(c, s.damage, Combo::kNone, s.player, s.skill);
+            }
+        }
+    }
+
+    // Adopt a lingering zone. Exactly one chunk — the one that owns the centre — keeps it, so the
+    // renderer draws it once and its per-tick effect is applied once. A radius that reaches into a
+    // neighbour therefore under-covers at the seam; that fan-out is F2's, and this is the deliberately
+    // minimal F1a shape (see `Zone`).
+    void handle(const SpawnZone& z) noexcept {
+        if (!owns_point(z.x, z.y)) return;
+        if (zones_.size() >= kMaxZones) return;
+        zones_.push_back(Zone{z.kind, z.x, z.y, z.radius, z.ticks});
+        // The throw is a one-shot puff; the lingering haze is the zone loop the renderer runs.
+        if (z.kind == ZoneKind::kSmokeSuppress) add_effect(z.x, z.y, EffectKind::kSmoke);
+    }
+
     // --- the farming verbs ------------------------------------------------------------------------
 
     void handle(const PlantCrop& p) noexcept {
@@ -313,6 +389,8 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         ChunkStats s{};
         s.creatures = static_cast<std::uint32_t>(creatures_.size());
         s.projectiles = static_cast<std::uint32_t>(shots_.size());
+        s.zones = static_cast<std::uint32_t>(zones_.size());
+        s.effects = static_cast<std::uint32_t>(effects_.size());
         s.watchers = static_cast<std::uint32_t>(players_.size());
         s.crops = static_cast<std::uint32_t>(crops_.size());
         s.buildings = static_cast<std::uint32_t>(buildings_.size());
@@ -494,6 +572,52 @@ private:
         }
     }
 
+    // --- zones ------------------------------------------------------------------------------------
+    // Step every lingering zone down one tick and apply what it does to the creatures this chunk
+    // owns inside it. kWet re-marks each tick, so a creature that just wandered in is a conductor and
+    // one that stays does not dry out mid-storm — but it never overwrites a status a player set on
+    // purpose (frozen/burning), only bare ground or an existing wetting. kSmokeSuppress strips target
+    // and anger here; the "cannot re-acquire" half is enforced in step_creatures, which is where
+    // targeting happens.
+    void step_zones() noexcept {
+        for (std::size_t i = zones_.size(); i-- > 0;) {
+            Zone& z = zones_[i];
+            if (z.ticks_left == 0) {
+                zones_.erase(zones_.begin() + static_cast<std::ptrdiff_t>(i));
+                continue;
+            }
+            --z.ticks_left;
+            const float r2 = z.radius * z.radius;
+            for (Creature& c : creatures_) {
+                if (c.hp <= 0) continue;
+                const float dx = c.x - z.x;
+                const float dy = c.y - z.y;
+                if (dx * dx + dy * dy > r2) continue;
+                if (z.kind == ZoneKind::kWet) {
+                    if (c.status == Status::kNone || c.status == Status::kWet) {
+                        c.status = Status::kWet;
+                        c.status_ticks = status_ticks_of(Status::kWet);
+                    }
+                } else {  // kSmokeSuppress
+                    c.target = 0;
+                    c.anger_ticks = 0;
+                }
+            }
+        }
+    }
+
+    // Is this point under a smoke zone? Cheap and usually a no-op — most chunks hold no zone, and the
+    // caller guards on `zones_.empty()` before asking.
+    [[nodiscard]] bool in_suppress_zone(float px, float py) const noexcept {
+        for (const Zone& z : zones_) {
+            if (z.kind != ZoneKind::kSmokeSuppress) continue;
+            const float dx = px - z.x;
+            const float dy = py - z.y;
+            if (dx * dx + dy * dy <= z.radius * z.radius) return true;
+        }
+        return false;
+    }
+
     // --- creatures ---------------------------------------------------------------------------------
     void step_creatures(Rng& rng) noexcept {
         const float dt = static_cast<float>(kTickMs) / 1000.0f;
@@ -510,17 +634,27 @@ private:
                 continue;  // a stunned creature does not move, turn or strike
             }
 
+            // Inside a smoke zone a creature is blinded: it drops what it was chasing and cannot pick
+            // up prey again while it stands there. It still wanders and still flees — the suppression
+            // is of AGGRESSION, not of movement.
+            const bool suppressed = !zones_.empty() && in_suppress_zone(c.x, c.y);
+            if (suppressed) {
+                c.target = 0;
+                c.anger_ticks = 0;
+            }
+
             // A neutral animal that has not been touched still resents being crowded. Its personal
             // space is deliberately much smaller than a monster's aggro radius: you can walk past a
             // boar, you just cannot walk over one.
             const bool angry = c.anger_ticks > 0;
-            if (!angry && c.disposition == Disposition::kNeutral) {
+            if (!angry && !suppressed && c.disposition == Disposition::kNeutral) {
                 if (const PlayerBeacon* p = nearest_player(c.x, c.y, st.aggro * 0.45f)) {
                     provoke(c, p->player, /*by_attack*/ false);
                 }
             }
 
-            const bool will_fight = c.disposition == Disposition::kHostile || c.anger_ticks > 0;
+            const bool will_fight =
+                !suppressed && (c.disposition == Disposition::kHostile || c.anger_ticks > 0);
             const PlayerBeacon* prey =
                 will_fight ? nearest_player(c.x, c.y, st.aggro * (angry ? 1.8f : 1.0f)) : nullptr;
             const PlayerBeacon* threat =
@@ -928,6 +1062,7 @@ private:
         v->creatures = creatures_;
         v->shots = shots_;
         v->effects = effects_;
+        v->zones = zones_;
         v->crops = crops_;
         v->buildings = buildings_;
         bus->publish(coord, std::move(v));
@@ -937,6 +1072,7 @@ private:
     std::vector<Creature> creatures_;
     std::vector<Projectile> shots_;
     std::vector<Effect> effects_;
+    std::vector<Zone> zones_;
     std::vector<Crop> crops_;
     std::vector<Building> buildings_;
     std::vector<PlayerBeacon> players_;  // soft state: who is near enough to matter

@@ -13,6 +13,7 @@
 
 #include <cstdint>
 
+#include "world/abilities.hpp"
 #include "world/tiles.hpp"
 
 namespace mmo {
@@ -141,6 +142,38 @@ struct CastSpell {
     std::uint64_t player = 0;
 };
 
+// An ability's HIT, resolved by the chunk exactly like MeleeSwing/CastSpell: the damage arrives
+// already computed by the trusted PlayerActor, and the SHAPE (a ring around the caster, or the one
+// creature ahead of them) is spelled out so tier B only has to apply it, never decide it. Covers the
+// three striking abilities — WhirlCleave (kRing), CrushBlow (kFront), ElementalNova (kRing + a
+// status). Fanned to the 3x3 neighbourhood by the player's map, the same as a swing.
+struct AbilityStrike {
+    float x = 0.0f;
+    float y = 0.0f;
+    Facing facing = Facing::kDown;
+    AbilityShape shape = AbilityShape::kRing;
+    float radius = 0.0f;
+    std::int16_t damage = 0;
+    std::uint16_t stun_ticks = 0;       // CrushBlow leaves the target stunned
+    Element element = Element::kNone;   // Nova leaves this element's status; kNone for melee
+    Skill skill = Skill::kMelee;        // which skill the kill credits — "you level what you use"
+    EffectKind fx = EffectKind::kSlash; // the flash the chunk publishes where it lands
+    std::uint64_t player = 0;
+};
+
+// Drop a lingering ZONE onto the map. The chunk that owns the centre adopts it (see `Zone`), steps
+// it down each tick, and applies its effect to the creatures it owns inside the radius. One message
+// for both zone abilities — SmokeBomb (kSmokeSuppress) and RainCall (kWet) — because a zone is a
+// zone; only the kind and the numbers differ.
+struct SpawnZone {
+    ZoneKind kind = ZoneKind::kWet;
+    float x = 0.0f;
+    float y = 0.0f;
+    float radius = 0.0f;
+    std::uint16_t ticks = 0;
+    std::uint64_t player = 0;
+};
+
 // Create an arrow. The chunk owns it from here (see `Projectile`).
 struct LaunchArrow {
     float x = 0.0f;
@@ -158,6 +191,8 @@ struct ChunkStats {
     std::uint32_t hostile = 0;    // of those, how many are currently willing to fight the player
     std::uint32_t afflicted = 0;  // ... and how many are carrying an elemental status
     std::uint32_t projectiles = 0;
+    std::uint32_t zones = 0;      // lingering ability zones (smoke/rain) this chunk owns
+    std::uint32_t effects = 0;    // live flashes — proves a verb/ability landed on THIS chunk
     std::uint32_t watchers = 0;   // players whose beacon this chunk currently holds
     std::uint32_t crops = 0;
     std::uint32_t ripe = 0;
@@ -244,6 +279,37 @@ struct AttackPlan {
     Facing facing = Facing::kDown;
     float x = 0.0f;  // where the actor believes the player is — the client is not asked
     float y = 0.0f;
+    // Which map the swing happens on. The trusted actor is the only thing that knows for certain —
+    // the client's view can be a step stale across a doorway — so the world fans the verb to THIS
+    // map's chunks rather than assuming the overworld. Interiors get combat because of this field.
+    std::uint16_t map = 0;
+};
+
+// "May I use the ability in this slot, and how does it land?" — the ability layer's counterpart of
+// PlanAttack, and check-and-debit for the same reason: stamina/mana and the per-slot cooldown are
+// state a compromised chunk host must not be able to answer for itself. The client names only the
+// SLOT (0 = A, 1 = B); which ability that is, whether the school is high enough, whether it is off
+// cooldown and affordable — all of that the trusted actor decides. `element` is the caster's current
+// school, read only by ElementalNova (exactly as PlanAttack's element is read only by a cast).
+struct UseAbility {
+    std::uint8_t slot = 0;
+    Element element = Element::kNone;
+    float aim_x = 0.0f;  // where the cursor is, in map tiles — used only to aim FanVolley
+    float aim_y = 0.0f;
+};
+
+struct AbilityPlan {
+    bool ok = false;
+    AbilityReject reason = AbilityReject::kUnavailable;
+    AbilityId ability = AbilityId::kCount;  // which one the slot resolved to
+    std::int16_t damage = 0;                // pre-scaled melee/spell damage for a striking ability
+    Element element = Element::kNone;       // the element Nova will imprint
+    Facing facing = Facing::kDown;
+    float x = 0.0f;  // where the actor believes the player is — the client is not asked
+    float y = 0.0f;
+    std::uint16_t map = 0;  // and on which map — the fan-out target, as for AttackPlan
+    float aim_x = 0.0f;     // echoed back so the world can aim FanVolley without re-reading the client
+    float aim_y = 0.0f;
 };
 
 struct GetPlayer {};

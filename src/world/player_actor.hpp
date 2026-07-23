@@ -55,7 +55,7 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
     using protocol =
         Protocol<Tick, MoveIntent, Teleport, GrantItems, HurtPlayer, GrantVitals, GrantXp,
                  SetRespawn, BindAccount, SetMounted, Ask<SpendItems, bool>, Ask<GetPlayer, PlayerView>,
-                 Ask<PlanAttack, AttackPlan>>;
+                 Ask<PlanAttack, AttackPlan>, Ask<UseAbility, AbilityPlan>>;
 
     // Set once at bring-up, before the engine starts.
     std::uint64_t id = 0;
@@ -71,6 +71,13 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         tick_ = t.tick;
         world_ms_ = t.world_ms;
         if (account_ == 0) return;  // unbound slot: inert, and not published
+
+        // Ability cooldowns. This is the first per-slot timer the sim has ever held — the basic
+        // verbs are rationed by stamina alone, but an ability's whole shape is that it is powerful
+        // AND scarce, and scarcity is a cooldown. Ticked while dead too, so it is not a free reset.
+        for (std::uint16_t& cd : ability_cd_) {
+            if (cd > 0) --cd;
+        }
 
         if (dead_ticks_ > 0) {
             if (--dead_ticks_ == 0) respawn();
@@ -222,6 +229,7 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         AttackPlan p{};
         p.x = x_;
         p.y = y_;
+        p.map = map;
         p.facing = facing_;
         if (account_ == 0 || dead_ticks_ > 0 || mounted_) {
             m.respond(p);  // ok stays false — you cannot fight from the saddle
@@ -262,6 +270,77 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         m.respond(p);
     }
 
+    // "May I use slot A/B, and how does it land?" The trusted counterpart of every check the client
+    // must not make for itself: is the school high enough to have this ability at all, is it off
+    // cooldown, can it be paid for. Same check-and-debit atomicity as PlanAttack and SpendItems —
+    // either the caller gets `ok` AND the vital is spent AND the cooldown is set, or it gets a reason
+    // and nothing moved.
+    void handle(const Ask<UseAbility, AbilityPlan>& m) noexcept {
+        AbilityPlan p{};
+        p.x = x_;
+        p.y = y_;
+        p.map = map;
+        p.facing = facing_;
+        p.aim_x = m.query.aim_x;
+        p.aim_y = m.query.aim_y;
+        if (account_ == 0 || dead_ticks_ > 0 || mounted_) {
+            p.reason = AbilityReject::kUnavailable;  // you cannot use an ability dead or from the saddle
+            m.respond(p);
+            return;
+        }
+        const int slot = (m.query.slot < kAbilitySlots) ? static_cast<int>(m.query.slot) : 0;
+        const AbilityId id = equipped_ability(level_, slot);
+        p.ability = id;
+        if (id == AbilityId::kCount) {
+            p.reason = AbilityReject::kLocked;  // no fighting school has reached level 5 yet
+            m.respond(p);
+            return;
+        }
+        const AbilityDef def = ability_def(id);
+        if (level_[static_cast<int>(def.school)] < def.unlock_level) {
+            p.reason = AbilityReject::kLocked;
+            m.respond(p);
+            return;
+        }
+        if (ability_cd_[static_cast<int>(id)] > 0) {
+            p.reason = AbilityReject::kCooldown;
+            m.respond(p);
+            return;
+        }
+        if (def.cost_kind == AbilityCost::kStamina) {
+            if (stamina_ < def.cost) {
+                p.reason = AbilityReject::kResource;
+                m.respond(p);
+                return;
+            }
+            stamina_ = static_cast<std::int16_t>(stamina_ - def.cost);
+        } else {
+            if (mana_ < def.cost) {
+                p.reason = AbilityReject::kResource;
+                m.respond(p);
+                return;
+            }
+            mana_ = static_cast<std::int16_t>(mana_ - def.cost);
+        }
+        ability_cd_[static_cast<int>(id)] = def.cooldown;
+        p.ok = true;
+        p.reason = AbilityReject::kOk;
+        // The damage the chunk will apply, scaled here so the untrusted side never computes how hard
+        // the player hits — exactly as PlanAttack does. Zones carry no direct damage.
+        if (def.kind == AbilityKind::kStrike) {
+            const std::int16_t base =
+                (def.school == Skill::kMelee) ? kBaseMeleeDamage : kBaseSpellDamage;
+            p.damage = static_cast<std::int16_t>(static_cast<float>(scaled(base, def.school)) *
+                                                 def.damage_scale);
+        } else if (def.kind == AbilityKind::kVolley) {
+            p.damage = scaled(kBaseRangedDamage, Skill::kRanged);
+        }
+        // Nova imprints the caster's currently-selected element; every other ability ignores it.
+        p.element = def.applies_element ? m.query.element : Element::kNone;
+        publish();
+        m.respond(p);
+    }
+
     void handle(const Ask<GetPlayer, PlayerView>& m) noexcept { m.respond(view()); }
 
     // ================================ bring-up ====================================================
@@ -289,6 +368,14 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
             v.skill_level[i] = level_[i];
             v.skill_xp[i] = xp_[i];
             v.skill_next[i] = xp_for_level(level_[i]);
+        }
+        // The fixed loadout, resolved from levels, plus each slot's remaining cooldown — everything
+        // the HUD draws a slot from without asking. A slot whose school is still too low reports its
+        // intended ability (so the greyed icon is the right one) and zero cooldown.
+        for (int s = 0; s < kAbilitySlots; ++s) {
+            const AbilityId id = equipped_ability(level_, s);
+            v.ability[s] = id;
+            v.ability_cd[s] = (id == AbilityId::kCount) ? 0 : ability_cd_[static_cast<int>(id)];
         }
         return v;
     }
@@ -383,6 +470,10 @@ private:
     std::int32_t items_[kItemKinds] = {};
     std::uint8_t level_[kSkillCount] = {};
     std::uint32_t xp_[kSkillCount] = {};
+    // Per-ability cooldown, in ticks, keyed by AbilityId. Keyed by the ABILITY rather than the slot
+    // so the timer belongs to the move and survives a future loadout-picker unchanged; with the
+    // fixed F1a loadout each slot maps to a distinct ability, so this reads identically to per-slot.
+    std::uint16_t ability_cd_[kAbilityCount] = {};
 };
 
 // Build costs, consulted before a PlaceBuilding is issued.

@@ -309,6 +309,47 @@ inline constexpr AtlasFx kAtlasFx[static_cast<int>(Fx::kCount)] = {
     return AtlasRect{static_cast<std::int16_t>(s.x + i * (s.w + 2)), s.y};
 }
 
+// --- Ability icons -------------------------------------------------------------------
+// The two-slot ability HUD's icons, 24x24, each with its greyed twin packed one cell to the
+// right so `icon_rect(icon, disabled)` is a single offset. Off the tile grid, like the FX
+// strips. The enum is in AbilityId order, so an ability maps to its icon by a plain cast.
+// Picks (looked at, not guessed): WhirlCleave=Spell/Cut — a sweeping slash reads as a
+// spinning cleave where a fist (Punch) reads as a jab; CrushBlow=Spell/AttackUpgrade — a
+// charged weapon with impact sparkles for the heavy finisher; FanVolley=Arrow; SmokeBomb=
+// Spell/Mist; ElementalNova=Spell/Explosion; RainCall=Meteo/Rain.
+struct AtlasIcon {
+    std::int16_t x;
+    std::int16_t y;
+};
+
+inline constexpr int kIconPx = 24;
+
+enum class Icon : std::uint8_t {
+    kWhirlCleave,
+    kCrushBlow,
+    kFanVolley,
+    kSmokeBomb,
+    kElementalNova,
+    kRainCall,
+    kCount,
+};
+
+inline constexpr AtlasIcon kAtlasIcons[static_cast<int>(Icon::kCount)] = {
+    {1, 2700},  // kWhirlCleave (lit at x; disabled at x + kIconPx + 2)
+    {1, 2726},  // kCrushBlow (lit at x; disabled at x + kIconPx + 2)
+    {1, 2752},  // kFanVolley (lit at x; disabled at x + kIconPx + 2)
+    {1, 2778},  // kSmokeBomb (lit at x; disabled at x + kIconPx + 2)
+    {1, 2804},  // kElementalNova (lit at x; disabled at x + kIconPx + 2)
+    {1, 2830},  // kRainCall (lit at x; disabled at x + kIconPx + 2)
+};
+
+// `disabled` picks the greyed twin, packed one cell to the right of the lit icon.
+[[nodiscard]] inline constexpr AtlasRect icon_rect(Icon i, bool disabled) noexcept {
+    const AtlasIcon& s = kAtlasIcons[static_cast<int>(i)];
+    return AtlasRect{static_cast<std::int16_t>(s.x + (disabled ? 1 : 0) * (kIconPx + 2)),
+                     s.y};
+}
+
 // --- Terrain edge sets ---------------------------------------------------------------
 // One EDGE set per terrain (see EDGE_MANIFEST in the packer). Where two terrains meet, the
 // tile is filled with the lower-priority one and the higher-priority terrain's edge tile is
@@ -331,17 +372,17 @@ inline constexpr int kEdgeBL = 64, kEdgeB = 128, kEdgeBR = 256;
 inline constexpr int kEdgeFull = 511;
 
 inline constexpr AtlasRect kAtlasTrans[kTransTerrains] = {
-    {1, 2700},  // Grass — generated
-    {1, 2718},  // Dirt — TilesetFloor.png#2
-    {1, 2736},  // Water — TilesetWater.png#18
-    {1, 2754},  // Stone — generated
-    {1, 2772},  // Sand — generated
-    {1, 2790},  // Tree — generated
-    {1, 2808},  // Snow — TilesetSnow.png#17
-    {1, 2826},  // Marsh — generated
-    {1, 2844},  // Ash — generated
-    {1, 2862},  // Path — generated
-    {1, 2880},  // Building — generated
+    {1, 2856},  // Grass — generated
+    {1, 2874},  // Dirt — TilesetFloor.png#2
+    {1, 2892},  // Water — TilesetWater.png#18
+    {1, 2910},  // Stone — generated
+    {1, 2928},  // Sand — generated
+    {1, 2946},  // Tree — generated
+    {1, 2964},  // Snow — TilesetSnow.png#17
+    {1, 2982},  // Marsh — generated
+    {1, 3000},  // Ash — generated
+    {1, 3018},  // Path — generated
+    {1, 3036},  // Building — generated
 };
 
 // Whether this terrain's variant 0 is a genuinely PLAIN fill, derived from the manifest by

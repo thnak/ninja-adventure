@@ -323,6 +323,30 @@ FX_MANIFEST = [
     ("FacePlayer", "Actor/Character/NinjaGreen/Faceset.png", 38, 38, 1),
 ]
 
+# --- Ability icons -------------------------------------------------------------
+# The six ability icons for the two-slot HUD, from the pack's own Ui/Skill Icon set. They are 24x24
+# — off the 16px tile grid, exactly like the FX strips — which is why they get their own pass and
+# their own header section rather than joining MANIFEST. Each ships a *Disabled twin, packed beside
+# it so the greyed version (cooldown / locked / can't afford) is one offset away.
+#
+# The picks, in AbilityId order, chosen by looking at the art (see atlas_slots.hpp for the why):
+#   WhirlCleave   -> Spell/Cut          a sweeping slash reads as a spinning cleave; a fist does not
+#   CrushBlow     -> Spell/AttackUpgrade a charged weapon with impact sparkles — the heavy finisher
+#   FanVolley     -> Items & Weapon/Arrow
+#   SmokeBomb     -> Spell/Mist
+#   ElementalNova -> Spell/Explosion
+#   RainCall      -> Meteo/Rain
+ICON_MANIFEST = [
+    ("WhirlCleave",   "Spell/Cut"),
+    ("CrushBlow",     "Spell/AttackUpgrade"),
+    ("FanVolley",     "Items & Weapon/Arrow"),
+    ("SmokeBomb",     "Spell/Mist"),
+    ("ElementalNova", "Spell/Explosion"),
+    ("RainCall",      "Meteo/Rain"),
+]
+ICON_PX = 24
+ICON_DIR = SRC / "ninja" / "Ui" / "Skill Icon"
+
 COLS = 8  # atlas width in cells; keeps the texture small and squarish
 
 # --- Terrain edge sets ---------------------------------------------------------
@@ -1381,6 +1405,33 @@ def main() -> int:
         fxs.append((name, PAD, anim_y + PAD, fw, fh, frames))
         anim_y += fh + 2 * PAD
 
+    # --- ability icons, stacked below the particle strips ------------------------------------
+    # One row per ability: the lit icon, then its greyed twin one cell to the right. No extrusion
+    # for the same reason the particle strips have none — an icon is drawn at a fixed screen size,
+    # never sampled at a fractional texture coordinate.
+    icons = []
+    for name, rel in ICON_MANIFEST:
+        row_w = 2 * (ICON_PX + 2 * PAD)
+        new_h = anim_y + ICON_PX + 2 * PAD
+        if new_h > atlas.height or row_w > atlas.width:
+            grown = Image.new("RGBA", (max(row_w, atlas.width), max(new_h, atlas.height)),
+                              (0, 0, 0, 0))
+            grown.paste(atlas, (0, 0))
+            atlas = grown
+        for col, suffix in enumerate(("", "Disabled")):
+            path = ICON_DIR / (rel + suffix + ".png")
+            if not path.exists():
+                print(f"missing icon: {path}", file=sys.stderr)
+                return 1
+            img = Image.open(path).convert("RGBA")
+            if img.size != (ICON_PX, ICON_PX):
+                print(f"{name}{suffix}: {path.name} is {img.width}x{img.height}, "
+                      f"expected {ICON_PX}x{ICON_PX}", file=sys.stderr)
+                return 1
+            atlas.paste(img, (col * (ICON_PX + 2 * PAD) + PAD, anim_y + PAD))
+        icons.append((name, PAD, anim_y + PAD))
+        anim_y += ICON_PX + 2 * PAD
+
     # --- terrain transition sets, generated ---------------------------------------------------
     # Two octaves of wrapping noise: the coarse one gives the boundary a shape, the fine one gives
     # it a ragged pixel edge. One octave alone was either too smooth to read as a coastline or too
@@ -1612,6 +1663,42 @@ def main() -> int:
         "    const AtlasFx& s = fx_of(f);",
         "    const int i = (frame % s.frames + s.frames) % s.frames;",
         "    return AtlasRect{static_cast<std::int16_t>(s.x + i * (s.w + 2)), s.y};",
+        "}",
+        "",
+        "// --- Ability icons -------------------------------------------------------------------",
+        "// The two-slot ability HUD's icons, 24x24, each with its greyed twin packed one cell to the",
+        "// right so `icon_rect(icon, disabled)` is a single offset. Off the tile grid, like the FX",
+        "// strips. The enum is in AbilityId order, so an ability maps to its icon by a plain cast.",
+        "// Picks (looked at, not guessed): WhirlCleave=Spell/Cut — a sweeping slash reads as a",
+        "// spinning cleave where a fist (Punch) reads as a jab; CrushBlow=Spell/AttackUpgrade — a",
+        "// charged weapon with impact sparkles for the heavy finisher; FanVolley=Arrow; SmokeBomb=",
+        "// Spell/Mist; ElementalNova=Spell/Explosion; RainCall=Meteo/Rain.",
+        "struct AtlasIcon {",
+        "    std::int16_t x;",
+        "    std::int16_t y;",
+        "};",
+        "",
+        f"inline constexpr int kIconPx = {ICON_PX};",
+        "",
+        "enum class Icon : std::uint8_t {",
+    ]
+    lines += [f"    k{name}," for name, _, _ in icons]
+    lines += [
+        "    kCount,",
+        "};",
+        "",
+        "inline constexpr AtlasIcon kAtlasIcons[static_cast<int>(Icon::kCount)] = {",
+    ]
+    lines += [f"    {{{x}, {y}}},  // k{name} (lit at x; disabled at x + kIconPx + 2)"
+              for name, x, y in icons]
+    lines += [
+        "};",
+        "",
+        "// `disabled` picks the greyed twin, packed one cell to the right of the lit icon.",
+        "[[nodiscard]] inline constexpr AtlasRect icon_rect(Icon i, bool disabled) noexcept {",
+        "    const AtlasIcon& s = kAtlasIcons[static_cast<int>(i)];",
+        "    return AtlasRect{static_cast<std::int16_t>(s.x + (disabled ? 1 : 0) * (kIconPx + 2)),",
+        "                     s.y};",
         "}",
         "",
         "// --- Terrain edge sets ---------------------------------------------------------------",

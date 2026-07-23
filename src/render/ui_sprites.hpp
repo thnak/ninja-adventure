@@ -16,4 +16,10 @@ namespace mmo {
 // scaled so its longest side is `size`. A no-op if the atlas failed to load.
 void draw_ui_fx(int fx, int frame, float cx, float cy, float size);
 
+// Draw ability icon `icon` (an `Icon` enumerator), lit or greyed, filling a `size`x`size` box whose
+// TOP-LEFT is (x, y) in SCREEN pixels. Used by the HUD's two ability slots. A no-op if the atlas
+// failed to load. `icon` is an `int` for the same reason `draw_ui_fx` takes one: the shell must not
+// need to include `atlas_slots.hpp`.
+void draw_ui_icon(int icon, bool disabled, float x, float y, float size);
+
 }  // namespace mmo

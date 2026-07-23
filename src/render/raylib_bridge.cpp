@@ -293,6 +293,10 @@ inline constexpr int kTreeStride = 3;
         case EffectKind::kEarth: return Fx::kEarth;
         case EffectKind::kShock: return Fx::kShock;
         case EffectKind::kBlast: return Fx::kBlast;
+        // The ability flashes (F1a): a 360 arc, a curved finisher, a smoke puff.
+        case EffectKind::kSlashHeavy: return Fx::kSlashHeavy;
+        case EffectKind::kSlashCombo: return Fx::kSlashCombo;
+        case EffectKind::kSmoke: return Fx::kSmoke;
         case EffectKind::kCount: break;
     }
     return Fx::kSlash;
@@ -377,6 +381,15 @@ void draw_ui_fx(int fx, int frame, float cx, float cy, float size) {
                    Rectangle{static_cast<float>(r.x), static_cast<float>(r.y),
                              static_cast<float>(s.w), static_cast<float>(s.h)},
                    Rectangle{cx, cy, w, h}, Vector2{w * 0.5f, h * 0.5f}, 0.0f, WHITE);
+}
+
+void draw_ui_icon(int icon, bool disabled, float x, float y, float size) {
+    if (!g_atlas_ok || icon < 0 || icon >= static_cast<int>(Icon::kCount)) return;
+    const AtlasRect r = icon_rect(static_cast<Icon>(icon), disabled);
+    DrawTexturePro(g_atlas,
+                   Rectangle{static_cast<float>(r.x), static_cast<float>(r.y),
+                             static_cast<float>(kIconPx), static_cast<float>(kIconPx)},
+                   Rectangle{x, y, size, size}, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
 }
 
 struct RaylibBridge::Impl {
@@ -1176,6 +1189,66 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                         Color{200, 220, 255, 110});
     }
 
+    // --- Ability zones, over the fighters ---------------------------------------------------------
+    // Rain over a wet zone, drifting smoke over a smoke zone. Like the weather ambience, every
+    // particle's position is a closed-form function of (its index, the zone centre, the WORLD clock)
+    // — no stored state, no per-frame RNG — so two machines watching the same zone see the same
+    // haze and a screenshot at a given world time is reproducible. The per-particle Rng is seeded
+    // from the index and the zone's tile, which is fixed, not from the frame.
+    {
+        const double zt =
+            static_cast<double>(status.world_ms.load(std::memory_order_relaxed)) / 1000.0;
+        for (int cy = min_cy; cy <= max_cy; ++cy) {
+            for (int cx = min_cx; cx <= max_cx; ++cx) {
+                ChunkViewPtr v = bus.load(ChunkCoord{player.map, static_cast<std::uint16_t>(cx),
+                                                     static_cast<std::uint16_t>(cy)});
+                if (!v) continue;
+                for (const Zone& z : v->zones) {
+                    const float cxp = z.x * kTilePx;
+                    const float cyp = z.y * kTilePx;
+                    const float rpx = z.radius * kTilePx;
+                    const std::uint64_t base =
+                        (static_cast<std::uint64_t>(static_cast<int>(z.x)) << 20) ^
+                        static_cast<std::uint64_t>(static_cast<int>(z.y)) ^
+                        (z.kind == ZoneKind::kWet ? 0x5A17ull : 0x5A2Bull);
+                    // Fade the whole zone out over its last second so it does not pop off.
+                    const float life = z.ticks_left < 10 ? static_cast<float>(z.ticks_left) / 10.0f
+                                                         : 1.0f;
+                    if (z.kind == ZoneKind::kWet) {
+                        // A scatter of drops falling through the circle; density tracks area.
+                        const int drops = std::clamp(static_cast<int>(z.radius * z.radius * 2.5f), 8, 44);
+                        for (int i = 0; i < drops; ++i) {
+                            Rng r(static_cast<std::uint64_t>(i) * 0x9E37'79B9ull ^ base);
+                            const float ang = r.unit() * 6.2831853f;
+                            const float rad = std::sqrt(r.unit()) * rpx;
+                            const float bx = cxp + std::cos(ang) * rad;
+                            const float span = rpx * 1.2f + static_cast<float>(kTilePx);
+                            const float fall = std::fmod(static_cast<float>(zt) * 520.0f * (0.6f + r.unit()) +
+                                                             r.unit() * span,
+                                                         span);
+                            const float by = cyp + std::sin(ang) * rad * 0.6f - rpx * 0.6f + fall;
+                            im.fx(Fx::kRain, static_cast<int>(zt * 14.0) + i, bx, by, 0.55f * life);
+                        }
+                    } else {
+                        // A few overlapping puffs, drifting slowly and cycling their frames.
+                        const int puffs = std::clamp(static_cast<int>(z.radius * z.radius * 1.1f), 5, 16);
+                        for (int i = 0; i < puffs; ++i) {
+                            Rng r(static_cast<std::uint64_t>(i) * 0x85EB'CA6Bull ^ base);
+                            const float ang = r.unit() * 6.2831853f;
+                            const float rad = std::sqrt(r.unit()) * rpx;
+                            const float drift = std::sin(static_cast<float>(zt) * 0.6f + r.unit() * 6.28f) *
+                                                static_cast<float>(kTilePx) * 0.4f;
+                            const float bx = cxp + std::cos(ang) * rad + drift;
+                            const float by = cyp + std::sin(ang) * rad * 0.7f;
+                            im.fx(Fx::kSmoke, static_cast<int>(zt * 6.0) + i * 2, bx, by, 0.5f * life,
+                                  0.0f, 1.5f);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // --- Combat effects, over the fighters ---------------------------------------------------------
     // A second sweep of the same chunks rather than drawing these inline, because an arc has to land
     // ON TOP of whatever it hit — including the player, who is drawn after the creatures are.
@@ -1321,6 +1394,11 @@ InputFrame RaylibBridge::poll_input(const PlayerView& player) const {
             in.heavy = in.swing && heavy;
             in.cast = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
             in.shoot = IsKeyPressed(KEY_Q) || IsKeyPressed(KEY_SPACE);
+            // The two ability slots. F and G, edge-triggered — a discrete event like a swing, not a
+            // held rhythm, so `Pressed` not `Down`. Both keys are otherwise free (see the input map
+            // in the journal). The cooldown that paces them lives in the trusted actor, not here.
+            in.ability_a = IsKeyPressed(KEY_F);
+            in.ability_b = IsKeyPressed(KEY_G);
         }
     }
 

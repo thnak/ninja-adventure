@@ -223,7 +223,7 @@ public:
         s.damage = p.damage;
         s.heavy = heavy;
         s.player = player;
-        fan_to_neighbours(p.x, p.y, s);
+        fan_to_neighbours(p.map, p.x, p.y, s);
         return true;
     }
 
@@ -249,7 +249,7 @@ public:
         a.damage = p.damage;
         a.player = player;
         if (!in_map(p.x, p.y)) return false;
-        chunk_ref_at(kOverworld, p.x, p.y).tell(a);
+        chunk_ref_at(p.map, p.x, p.y).tell(a);
         return true;
     }
 
@@ -272,7 +272,90 @@ public:
         s.radius = kSpellRadius;
         s.damage = p.damage;
         s.player = player;
-        fan_to_neighbours(s.x, s.y, s);
+        fan_to_neighbours(p.map, s.x, s.y, s);
+        return true;
+    }
+
+    // An ability. Ask the TRUSTED actor whether slot A/B may fire and how it lands, then fan the
+    // resolved shape to the chunks BY THE PLAYER'S MAP — the same ask-then-tell ordering and the
+    // same interior-aware fan-out as the basic verbs. One entry point for all six; the ability's
+    // `kind` decides which chunk message carries it.
+    bool use_ability(std::uint64_t player, std::uint8_t slot, Element element, float aim_x,
+                     float aim_y) {
+        UseAbility q{};
+        q.slot = slot;
+        q.element = element;
+        q.aim_x = aim_x;
+        q.aim_y = aim_y;
+        quark::result<AbilityPlan> r =
+            quark::block_on(player_ref_by_key(player).ask<AbilityPlan>(q));
+        const AbilityPlan p = r.has_value() ? r.value() : AbilityPlan{};
+        if (!p.ok) return false;
+        const AbilityDef def = ability_def(p.ability);
+        switch (def.kind) {
+            case AbilityKind::kStrike: {
+                AbilityStrike s{};
+                s.x = p.x;
+                s.y = p.y;
+                s.facing = p.facing;
+                s.shape = def.shape;
+                s.radius = def.radius;
+                s.damage = p.damage;
+                s.stun_ticks = def.stun_ticks;
+                s.element = p.element;
+                s.skill = def.school;
+                // Nova's flash is the CURRENT element's own effect (a fire bloom, an ice burst),
+                // which is what makes a nova read as "the school I have selected"; the other strikes
+                // carry their fixed flash from the table.
+                s.fx = def.applies_element ? effect_of(p.element) : def.fx;
+                s.player = player;
+                fan_to_neighbours(p.map, p.x, p.y, s);
+                break;
+            }
+            case AbilityKind::kVolley: {
+                if (!in_map(p.x, p.y)) return false;
+                // Aim toward the cursor, defaulting to the facing when it sits on the player, then
+                // spread the arrows evenly across the fan angle.
+                float dx = p.aim_x - p.x;
+                float dy = p.aim_y - p.y;
+                const float len = std::sqrt(dx * dx + dy * dy);
+                float base;
+                if (len < 0.01f) {
+                    base = std::atan2(facing_y(p.facing), facing_x(p.facing));
+                } else {
+                    base = std::atan2(dy, dx);
+                }
+                const float spread = static_cast<float>(def.spread_deg) * 3.14159265f / 180.0f;
+                const int n = def.shots;
+                for (int i = 0; i < n; ++i) {
+                    const float t = (n <= 1) ? 0.0f
+                                             : static_cast<float>(i) / static_cast<float>(n - 1) -
+                                                   0.5f;  // -0.5 .. 0.5
+                    const float ang = base + t * spread;
+                    LaunchArrow a{};
+                    a.x = p.x;
+                    a.y = p.y;
+                    a.vx = std::cos(ang) * kArrowSpeed;
+                    a.vy = std::sin(ang) * kArrowSpeed;
+                    a.damage = p.damage;
+                    a.player = player;
+                    chunk_ref_at(p.map, p.x, p.y).tell(a);
+                }
+                break;
+            }
+            case AbilityKind::kZone: {
+                if (!in_map(p.x, p.y)) return false;
+                SpawnZone z{};
+                z.kind = def.zone_kind;
+                z.x = p.x;
+                z.y = p.y;
+                z.radius = def.radius;
+                z.ticks = def.zone_ticks;
+                z.player = player;
+                chunk_ref_at(p.map, p.x, p.y).tell(z);
+                break;
+            }
+        }
         return true;
     }
 
@@ -330,7 +413,7 @@ public:
     // debug key. It deliberately does not bypass anything — the chunk validates the placement and
     // scales the creature for its ring exactly as it does for a raid.
     void spawn_wave_at(std::uint16_t tx, std::uint16_t ty, CreatureKind kind, std::uint16_t count,
-                       std::uint32_t seed = 1) {
+                       std::uint32_t seed = 1, std::uint16_t map = kOverworld) {
         if (!in_map(tx, ty)) return;
         SpawnWave w{};
         w.count = count;
@@ -339,7 +422,22 @@ public:
         w.tx = tx;
         w.ty = ty;
         w.radius = 2;
-        chunk_ref(kOverworld, tx, ty).tell(w);
+        chunk_ref(map, tx, ty).tell(w);
+    }
+
+    // Debug/tools: hand a player experience directly, so a staged scenario can reach the school
+    // level an ability needs without grinding a fight for it. It rides the same GrantXp a kill uses
+    // and is clamped by the same level cap in PlayerActor — it bypasses nothing but the grind.
+    void grant_xp(std::uint64_t player, Skill skill, std::uint32_t amount) {
+        player_ref_by_key(player).tell(GrantXp{skill, amount});
+    }
+
+    // Debug/tools: top a player's bars up. Amounts ADD and are clamped to the maxima by the trusted
+    // actor, so passing the maxima refills from any state. Used by the headless runner to start each
+    // staged ability fight from full, so the test measures the ability rather than the wildlife.
+    void grant_vitals(std::uint64_t player, std::int16_t hp, std::int16_t mana,
+                      std::int16_t stamina) {
+        player_ref_by_key(player).tell(GrantVitals{hp, mana, stamina});
     }
 
     // The generated world, for anything that needs to know where things ARE rather than what a
@@ -365,18 +463,22 @@ private:
     // A swing near a chunk border must reach across it, and a chunk only ever resolves hits against
     // creatures it owns — so the message goes to the 3x3 neighbourhood and each recipient filters.
     // Nothing can be hit twice because no two chunks own the same creature.
+    //
+    // The MAP is a parameter, not a constant. It used to be hard-coded to kOverworld, which quietly
+    // meant a swing indoors fanned to the overworld chunks under the room and hit nothing in it — no
+    // combat inside a building at all. The map comes from the trusted actor's plan, so a fight in a
+    // dojo lands on the interior chunks that own the dojo's creatures.
     template <class M>
-    void fan_to_neighbours(float x, float y, const M& msg) {
+    void fan_to_neighbours(std::uint16_t map, float x, float y, const M& msg) {
         if (!in_map(x, y)) return;
-        const ChunkCoord home = chunk_of(kOverworld, x, y);
+        const ChunkCoord home = chunk_of(map, x, y);
         for (int dy = -1; dy <= 1; ++dy) {
             for (int dx = -1; dx <= 1; ++dx) {
                 const int cx = static_cast<int>(home.cx) + dx;
                 const int cy = static_cast<int>(home.cy) + dy;
                 if (cx < 0 || cy < 0 || cx >= kMapChunks || cy >= kMapChunks) continue;
                 router_
-                    ->get<ChunkActor>(chunk_key(ChunkCoord{kOverworld,
-                                                           static_cast<std::uint16_t>(cx),
+                    ->get<ChunkActor>(chunk_key(ChunkCoord{map, static_cast<std::uint16_t>(cx),
                                                            static_cast<std::uint16_t>(cy)}))
                     .tell(msg);
             }

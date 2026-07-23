@@ -49,8 +49,11 @@ inline constexpr int kJoinAddrMax = 64;  // "255.255.255.255:65535" and a hostna
 struct ShellState {
     Screen screen = Screen::kLogin;
     bool debug_overlay = false;  // F3
-    int selected_hotbar = 0;
-    bool build_mode = false;
+
+    // NOTE: the selected element/building and build-vs-fight mode used to be MIRRORED here from the
+    // renderer every frame, which was two sources of one truth waiting to drift. They are owned by
+    // the bridge alone now (it is where the number keys and `B` are read), and passed straight into
+    // `draw` for the one frame that needs them — see `draw`.
 
     // The sign-in box. Held here rather than in `client_main` because raygui is immediate-mode: the
     // text buffer has to survive between frames and the widget has to own the edit flag.
@@ -76,8 +79,11 @@ struct ShellState {
 bool handle_shell_keys(ShellState& st);
 
 // Draws whichever screen is current, plus the in-game HUD when playing. Call between the world
-// renderer's draw and its end_frame, so UI lands on top.
-[[nodiscard]] Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player);
+// renderer's draw and its end_frame, so UI lands on top. `build_mode` and `selected_slot` are the
+// renderer's selection state (the single source of truth), passed in for the HUD rather than mirrored
+// into the shell: `selected_slot` is the lit element (0..3) or building (0..1) in that mode.
+[[nodiscard]] Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player,
+                          bool build_mode, int selected_slot);
 
 // The F3 overlay: engine and simulation counters that used to sit permanently on the HUD. They are
 // genuinely useful — just not to a player who is trying to farm.

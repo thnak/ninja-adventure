@@ -74,6 +74,7 @@ int main(int argc, char** argv) {
     const char* shot_screen = nullptr;  // --screen NAME: force a shell screen for the screenshot
     int look_ring = -1;                 // --ring N: park the camera in biome ring N
     int stage_fight = 0;                // --fight N: drop N creatures on the player before the shot
+    bool stage_ability = false;         // --ability: level into Magic and fire Nova + RainCall
     int look_door = -1;                 // --door N: step onto door N, which takes you inside it
     int look_at_tx = -1;                // --at TX TY: park the camera on an arbitrary tile
     int look_at_ty = -1;
@@ -94,6 +95,8 @@ int main(int argc, char** argv) {
             look_door = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--fight") == 0 && i + 1 < argc) {
             stage_fight = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--ability") == 0) {
+            stage_ability = true;  // level into Magic, then fire Nova + RainCall for the shot
         } else if (std::strcmp(argv[i], "--at") == 0 && i + 2 < argc) {
             look_at_tx = std::atoi(argv[i + 1]);
             look_at_ty = std::atoi(argv[i + 2]);
@@ -239,6 +242,33 @@ int main(int argc, char** argv) {
             world.step(kTickMs);
             world.sync_world();
         }
+
+        // Stage the ability layer for a screenshot: level the shot account into Magic (so both magic
+        // slots are live), drop a wave, then call rain and fire a nova. The shot then shows the wet
+        // ZONE rendering, the nova RING going off, and both ability slots mid-cooldown in the HUD.
+        if (stage_ability) {
+            world.grant_xp(me, Skill::kMagic, 20000);  // Magic past 10 — Nova (A) and RainCall (B)
+            world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+            world.sync_world();
+            player = view();
+            world.spawn_wave_at(static_cast<std::uint16_t>(player.x),
+                                static_cast<std::uint16_t>(player.y), CreatureKind::kSlime, 6);
+            for (int i = 0; i < 4; ++i) world.step(kTickMs);
+            world.sync_world();
+            player = view();
+            // RainCall first so its zone is established and raining by the time the frame is taken;
+            // then the nova, one tick before the shot so its ring is caught mid-animation.
+            world.use_ability(me, 1, Element::kShock, player.x, player.y);
+            for (int i = 0; i < 4; ++i) world.step(kTickMs);
+            world.sync_world();
+            // Both magic abilities together cost more than one mana bar holds, and four ticks of six
+            // slimes have dented the photographer — so refill before the nova. The staging is showing
+            // off both abilities at once, not testing the economy or survival.
+            world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+            world.use_ability(me, 0, Element::kShock, player.x, player.y);
+            world.step(kTickMs);
+            world.sync_world();
+        }
     }
     int frames = 0;
 
@@ -285,6 +315,15 @@ int main(int argc, char** argv) {
         }
         if (can_act && in.shoot) {
             if (world.shoot(me, in.aim_x, in.aim_y)) audio.play(ui::Sfx::kShoot);
+        }
+        // The two ability slots (F / G). Which ability each is, and whether it may fire, is the
+        // trusted actor's call — the client just names the slot and passes the current element (for
+        // Nova) and the cursor (to aim FanVolley). A refusal (cooldown, locked, empty bar) is silent.
+        if (can_act && in.ability_a) {
+            if (world.use_ability(me, 0, in.element, in.aim_x, in.aim_y)) audio.play(ui::Sfx::kCast);
+        }
+        if (can_act && in.ability_b) {
+            if (world.use_ability(me, 1, in.element, in.aim_x, in.aim_y)) audio.play(ui::Sfx::kCast);
         }
 
         if (can_act && in.build) {
@@ -390,11 +429,14 @@ int main(int argc, char** argv) {
 
         bridge.draw(world.bus(), world.status(), world.players(), slot < 0 ? 0 : slot);
 
-        shell.build_mode = bridge.build_mode();
-        shell.selected_hotbar = shell.build_mode
-                                    ? static_cast<int>(bridge.selected_build())
-                                    : static_cast<int>(bridge.selected_element()) - 1;
-        const ui::Action act = ui::draw(shell, world.status(), player);
+        // The renderer is the single owner of the element/build selection and the mode (it reads the
+        // number keys and B). Read them once here and pass them straight to the HUD, rather than
+        // mirroring them into the shell where a second copy could drift.
+        const bool build_mode = bridge.build_mode();
+        const int selected_slot = build_mode ? static_cast<int>(bridge.selected_build())
+                                             : static_cast<int>(bridge.selected_element()) - 1;
+        const ui::Action act =
+            ui::draw(shell, world.status(), player, build_mode, selected_slot);
         if (shell.debug_overlay) {
             ui::draw_debug_overlay(world.status(), player, bridge.drawn_chunks(),
                                    bridge.drawn_creatures());
