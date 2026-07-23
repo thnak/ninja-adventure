@@ -1,8 +1,8 @@
 # Ninja Adventure — world rendering spec
 
-> **Status: R0–R3 are DONE** (2026-07-22). §7 has the per-phase state. R4 — extending to the pack's
-> own hand-drawn transition sets — is open, and §5.1 explains why it is optional rather than
-> pending.
+> **Status: R0–R4 are DONE** (2026-07-23). §7 has the per-phase state. §9 covers R4 and corrects
+> the set count in §5.1, which was measured by a scan rather than read from the pack's own
+> project file. The old wording is left in place rather than deleted.
 >
 > **§0 has been corrected.** The headline measurement this document was written around turned out to
 > be measuring the demo GIFs' screen-recording scale, not our rendering. The defects it pointed at
@@ -284,6 +284,11 @@ what it cannot measure is the sense of depth, and depth comes from here.
 
 ### 5.1 The change of plan: the edge sets are GENERATED, not found
 
+> **R4 corrected the central claim of this section — see §9. The pack ships 13 complete sets, not
+> three, and the author's own Godot project names every one of them with coordinates. The scan below
+> undercounted because it looked for the wrong mask layout. What survives is the conclusion: there
+> is still no sand-on-grass set, so seven of the eleven terrains are still generated.**
+
 The spec called for a `TRANSITION_MANIFEST` naming sets recovered from the pack by
 `autotile_fit.py`. **That is not what was built, and the reason is a measurement.**
 
@@ -317,9 +322,8 @@ arrangements no tileset draws; generating the set removes the warning's teeth, a
 the overlay rule in §7.1 that the spec's own model forbids.
 
 > The pack's four water sets — on grass, on sand, on ice, on marsh — **were** recovered and do share
-> one 5×5 geometry, measured by quadrant vote rather than read by eye. They are better than what is
-> generated: they carry a white foam ring and a brown bank. Swapping them in for the four
-> water-adjacent pairs is R4, and it is optional rather than pending.
+> one geometry. They are better than what is generated: they carry a white foam ring and a brown
+> bank. Swapping them in was R4, and it is **done** — see §9.
 
 ### 5.2 Budget
 
@@ -407,7 +411,7 @@ correct. The current branch is never blocked.
 | R1 | Drop decor density to ~24%, cluster it, free offsets | **done** — `textured_here` |
 | R2 | Corner-vertex terrain + a transition set per terrain | **done** — see §5.1 for the change of plan |
 | R3 | Y-sort: actors and sprites in one pass | **done** — `Sprite`, `draw_sprite`, the sorted pass |
-| R4 | Swap generated edge sets for the pack's hand-drawn ones where they exist | open, optional |
+| R4 | Swap generated edge sets for the pack's hand-drawn ones where they exist | **done** — §9 |
 
 ### What each phase actually cost, against what was predicted
 
@@ -542,3 +546,123 @@ python3 tools/check_sprite_rects.py --rect NTree 4 2 4 3
 # render a trial patch and measure it
 python3 tools/mock_world.py --measure
 ```
+
+---
+
+## 9. R4 — the pack's own 47-mask sets
+
+The pack ships **its author's Godot project**, in `assets/_src/ninja/GodotProject.zip`, and it is
+the project the four `Example N.gif` demos were recorded from. That file answers by hand almost
+every question §5.1 answered by measurement, and it corrects one of them.
+
+### 9.1 What the project file says
+
+**The set count in §5.1 is wrong.** `autotile_fit.py --scan` reported three complete sets. There are
+**thirteen**, and `World/Backgrounds/Tileset/*.tres` gives each one's texture, origin and mask table.
+The scan undercounted because it was looking for a **16-mask corner layout**. The pack's sets are
+`tile_mode = 1, autotile/bitmask_mode = 1` — Godot 3's **BITMASK_3X3_MINIMAL**, a 47-tile blob in an
+11×5 block, where a corner bit counts only when both adjacent sides do. A 16-mask scan cannot find a
+47-mask set no matter how many tilesets it sweeps.
+
+The crop was never the problem: scanning all 256 pixel offsets, offset (0,0) ranks **1 of 256** for
+every set, with a standard deviation of exactly 0.00 across the fully-surrounded tile.
+
+**How the demos are assembled**, from `World/Maps/Village.tscn`:
+
+| layer | z | sorting | tile origin |
+|---|---|---|---|
+| `Floor`, `Snow`, `Relief`, `FloorDetail` | −1 | none | top-left |
+| `House` | 0 | `cell_y_sort` | **bottom-left** |
+| `Element` | 0 | `cell_y_sort` | centre |
+| `Destroyable`, `Actors` | 0 | `YSort` | — |
+
+Four flat ground layers, then everything else Y-sorted in one space with the tile origin moved to
+the cell's foot. That is what R3 already does.
+
+**Decoration density is a weighted die, not a noise field.** Each set has three fully-surrounded
+tiles and `priority_map` weights them 8 : 1 : 1. Counted on the author's own map: 82.6% / 7.6% /
+9.9% against a predicted 80 / 10 / 10 — so **~17.5%** of interior ground carries a motif. `Element`
+is 14.8% of floor cells, `FloorDetail` 0.6%.
+
+**`project.godot` renders at 320×176 and displays at 1280×704** — exactly 4×, with
+`stretch/mode = "viewport"` and `flags/filter = false`. That is independent confirmation of §0: the
+`grid_lock` separation is the recording scale, derived there from pixel run lengths and stated here
+by the author's own configuration.
+
+### 9.2 What was taken, and what still is not there
+
+Four terrains now use the pack's art; seven are still generated. §5.1's conclusion holds even though
+its count did not — **there is no sand-on-grass set.** Rebuilding the author's Village map from the
+scene file shows why: he butts sand against grass with a hard staircase and scatters props over the
+join.
+
+| terrain | source | what it brings |
+|---|---|---|
+| Water | `TilesetWater#18` | white foam ring, brown bank |
+| Dirt | `TilesetFloor#2` | grass fringe overhanging the earth |
+| Snow | `TilesetSnow#17` | the pack's only alpha-cut overlay set |
+| Marsh, Sand, Grass, Stone, Ash, Path, Building | generated | contour only; the pixels are still the pack's fills |
+
+`TilesetSnow.png` **is not in the pack** — it ships only inside the zip.
+
+Two traps, both found by measuring rather than by looking:
+
+* **The pack's sets are opaque PAIRS**, not overlays: `#18` has grass baked into its rim. Laid over
+  sand it would ring the coast in grass. `edge_from_pack` knocks the outside terrain out by exact
+  colour, reading which colours are outside off the art itself — a border row whose side bit is
+  clear lies wholly outside the blob. Inside and outside share **zero** colours in all four sets
+  used, so the knockout takes the outside and nothing else.
+* **`TilesetWater#27` is the obvious pick for Marsh and is wrong.** Its interior is poison water at
+  `(188, 132, 181)`; our Marsh is wetland *ground* at `(116, 163, 52)`. Taking it because the name
+  matched would have ringed every marsh in purple. Marsh is generated.
+
+The pack's own data has a defect worth knowing about: `TilesetFloor#8` declares cell (1,4) as
+fully-surrounded and (3,3) as isolated, and **both are entirely transparent**. Godot renders holes
+there too. The importer drops any declared cell that is not drawn.
+
+### 9.3 Three renderer changes this forced
+
+**Terrain is sampled per TILE again.** The corner lattice existed to make a boundary cross a tile
+interior when a tile could only hold one flat colour. A blob set already carries the rounded corner
+and the overhanging bank, and asking one for a corner mask it was never drawn for is exactly the
+failure §3.1 warns about. `build_corners` became `build_terrain`; `edge_mask` in the generated
+header is the single place the minimal rule is written.
+
+**Water moved from the bottom of `terrain_priority` to near the top.** The old order read as "what
+sits under what" and put water lowest, reasoning that a bank overhangs a shore. That is a fine
+description and it is not how the art is drawn: the bank and foam are painted on the **water** tile.
+With water lowest it was never the terrain doing the drawing, so its shoreline stayed a staircase
+while the generated boundaries beside it wandered. Water also had to move above **Path**: a village
+square stamped around a pond was cutting it into a rectangle.
+
+**The generated contour displaces the sample point, not the field value.** These look equivalent and
+are not. How far a given amount of field moves a contour depends on the local gradient, and the
+gradient across a straight edge is the steepest in the tile — so exactly where wobble was needed
+most it did least, and a long run of one mask (a road edge, the side of a village square) came out
+ruled. Displacing the coordinate moves the contour a fixed number of pixels wherever it falls.
+
+**A fourth change was made and then removed.** `shot_village` measured 0.265 under the corner
+lattice and 0.462 straight after the rewrite, so the rim of every placed region was eroded with a
+noise field to give the art something to be ragged about. Both halves of that number turned out to
+be the two fixes above, and the erosion cost a great deal: a road is two tiles wide, so every tile
+of it is a rim tile, and a field eroding both sides at once ate it into a dashed line of crumbs.
+Guarding on thickness did not save it — the roads run diagonally, so their axis-aligned
+cross-section is wider than the road is. It is gone rather than tuned.
+
+### 9.4 Measured
+
+| scene | R2 (corner) | R4 | crossings R2 → R4 |
+|---|---|---|---|
+| `shot_forest` | 0.162 | **0.143** | 1278 → 1143 |
+| `shot_wetland` | 0.249 | **0.171** | 1068 → 1120 |
+| `shot_meadow` | 0.182 | *nan* | 154 → 106 |
+| `shot_village` | 0.265 | *nan* | 136 → 108 |
+
+Chance is 0.031. The two scenes with over a thousand crossings both improved. The other two now fall
+under `shoreline_lock`'s 120-crossing floor and it reports `nan` rather than a number nobody should
+quote — **which is a consequence of the change, not a failure of it**: water now recedes behind its
+own foam and bank, so a small pond has less open water than it used to. `shot_village`'s R2 figure
+rested on 136 crossings, barely over the floor, and was never worth much.
+
+`ctest` passes. The wasteland is unchanged and still reads as interior masonry — that is the art gap
+recorded in `assets/CREDITS.md`, and no autotile set fixes it.

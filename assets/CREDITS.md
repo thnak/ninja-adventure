@@ -105,13 +105,38 @@ cobbles, they are the only two terrains with no plain fill, and they are the onl
 still mirrors per tile — see RENDER_SPEC.md §5.2. It shows: the wasteland reads as paving next to
 any other biome. This is art that has to be drawn, not found.
 
-**A sand-on-grass transition set.** `autotile_fit.py --scan` finds 31 candidate corner sets across
-all ten tilesets and exactly three that cover all 16 masks — none of them sand/grass, the boundary
-that dominates every outdoor shot in this game because the meadow puts a beach around every pond.
-The closest candidates cover 6 masks of 16. The pack's transition art is drawn for the pack's own
-world, which is grass, dirt paths and water; ours is eleven noise-thresholded terrains. Hence the
-generated edge sets in `tools/build_atlas.py`, which cut the pack's **own fills** to an irregular
-contour rather than inventing pixels.
+**A sand-on-grass transition set.** This one is still true, but the reasoning under it was wrong
+and is corrected below. Sand-against-grass is the boundary that dominates every outdoor shot in this
+game, because the meadow puts a beach around every pond, and the pack draws no set for it. The
+author does not have the problem: rebuilding his own Village map from the scene file shows him
+butting sand against grass with a hard staircase and scattering props over the join. So seven of the
+eleven terrains still use the generated edge sets in `tools/build_atlas.py`, which cut the pack's
+**own fills** to a contour rather than inventing pixels.
+
+### The set count was wrong, and the pack's own project file says so
+
+`autotile_fit.py --scan` reported three complete transition sets across ten tilesets. There are
+**thirteen**. The scan was looking for a 16-mask corner layout; the pack's sets are Godot 3's
+`BITMASK_3X3_MINIMAL` — a **47-tile blob in an 11×5 block** — so a 16-mask scan could not have found
+one however many sheets it swept.
+
+The correction did not come from looking harder. `assets/_src/ninja/GodotProject.zip` is the
+author's own Godot project, and it is the project the four `Example N.gif` demos were recorded from.
+`World/Backgrounds/Tileset/*.tres` names every set with its texture, origin and full mask table;
+`World/Maps/Village.tscn` is the map in the GIFs. Four of the thirteen are now used directly —
+water, dirt, snow — and the tables are read out of the zip at build time (`godot_autotile` in
+`tools/build_atlas.py`) rather than transcribed.
+
+Three things worth knowing if you touch this:
+
+* **The sets are opaque PAIRS, not overlays.** `TilesetWater#18` has grass baked into its rim; laid
+  over sand it would ring the coast in grass. The importer knocks the outside terrain out by exact
+  colour, working out which colours are outside from the art itself.
+* **`TilesetSnow.png` is not in this folder.** It ships only inside the zip — a complete 47-mask
+  snow set, and the one set in the pack the author drew with a transparent outside.
+* **`TilesetFloor#8` is broken in the pack.** It declares cell (1,4) as fully-surrounded and (3,3)
+  as isolated and both are entirely transparent. Godot renders holes there too. The importer drops
+  any declared cell that is not drawn.
 
 ### The trees were cut in half for a whole phase
 

@@ -61,68 +61,79 @@ bool g_atlas_ok = false;
     return Slot::kTerrainGrass;
 }
 
-// --- Terrain corners and transitions ---------------------------------------------------------
-// Which terrain is drawn ON TOP where two meet. Where the corners of a tile disagree, the tile is
-// filled with the lower-priority terrain and the higher one's edge tile is laid over it, so this
-// order is the whole per-pair table: 11 numbers instead of 55 hand-authored sets.
+// --- Terrain edges -----------------------------------------------------------------------------
+// WHICH OF TWO TERRAINS DRAWS THE BOUNDARY. The higher one lays its own blob tile over a fill of the
+// lower one, so this order is the whole per-pair table: 11 numbers instead of 55 hand-authored sets.
 //
-// The order reads as "what sits on what" in the world, not as a preference. Water is at the bottom
-// because a bank overhangs a shore rather than the other way round; the two terrains world
-// GENERATION writes are at the top because a road that fades into the grass under it is a road that
-// was not built.
+// WATER IS AT THE TOP, and it used to be at the bottom. The old order read as "what sits under
+// what" and put water lowest, on the reasoning that a bank overhangs a shore. That is a fine
+// description of a shore and it is not how the art is drawn: `TilesetWater#18` is a WATER blob, and
+// the brown bank and white foam are painted on the water tile, not on the grass one. With water
+// lowest it was never the terrain doing the drawing, so its shoreline was the only thing on screen
+// still stepping tile by tile while the generated boundaries beside it wandered — visible in
+// shot_ring0 before this line changed. The rule now matches the art: read it as "what is cut INTO
+// what". Water is cut into land; a road is cut into whatever it crosses.
 [[nodiscard]] int terrain_priority(Terrain t) {
     switch (t) {
-        case Terrain::kWater: return 0;
-        case Terrain::kMarsh: return 1;
-        case Terrain::kSand: return 2;
-        case Terrain::kAsh: return 3;
-        case Terrain::kSnow: return 4;
-        case Terrain::kStone: return 5;
-        case Terrain::kGrass: return 6;
-        case Terrain::kTree: return 6;  // a tree stands ON ground; see corner_terrain
-        case Terrain::kDirt: return 7;
-        case Terrain::kPath: return 8;
+        case Terrain::kGrass: return 0;
+        case Terrain::kTree: return 0;  // a tree stands ON ground; see tile_terrain
+        case Terrain::kSand: return 1;
+        case Terrain::kAsh: return 2;
+        case Terrain::kStone: return 3;
+        case Terrain::kMarsh: return 4;
+        case Terrain::kSnow: return 5;
+        case Terrain::kDirt: return 6;
+        // Water sits above the road, not below it. A village square stamped around a pond used to
+        // cut it into a rectangle — the square was the higher terrain, so it drew the boundary with
+        // a generated contour and the pond's own bank and foam were never used. Putting water on top
+        // means the pond keeps its shoreline and the road simply stops at it, which is also what a
+        // road does.
+        case Terrain::kPath: return 7;
+        case Terrain::kWater: return 8;
         case Terrain::kBuilding: return 9;
         case Terrain::kCount: break;
     }
     return 0;
 }
 
-// The terrain at a CORNER VERTEX, on the (kMapTiles+1)² lattice of corners rather than the tile
-// grid.
+
+// The terrain one TILE is drawn as, which is not always the terrain the simulation reports.
 //
-// This is the crux of the whole change, and it costs nothing because of an accident of how terrain
-// is defined: `terrain_base` evaluates its noise fields at (gx, gy) — the tile's TOP-LEFT CORNER,
-// not its centre. The sample lattice was always the corner lattice. Deciding terrain per tile and
-// then inferring corners from the neighbours is the obvious alternative and it is wrong: it
-// produces arrangements the art has to fudge back to a flat fill, which puts the hard edges
-// straight back.
+// SAMPLED PER TILE, NOT PER CORNER, and that is a reversal from the first version of this code. The
+// corner lattice was a way to make a boundary cross a tile's interior when every tile could only be
+// one flat colour. It is unnecessary once the edge art is a nine-bit blob set: the pack's own tiles
+// already carry the rounded corner and the overhanging bank, and they line up with their neighbours
+// because the author drew them to. Asking a blob set for a corner mask it was never drawn for is
+// precisely the failure RENDER_SPEC.md §3.1 warns about, so the mask has to be built the way the art
+// expects — from the eight neighbours, with Godot's minimal corner rule.
 //
-// THE OVERLAY NEEDS A DIFFERENT RULE and it is the one thing here that is not free. Roads, village
-// squares and building footprints are placed per TILE by world generation; they are not a noise
-// field and have no value at a corner at all. Leaving them out was the first attempt, and a village
-// then rendered as a flat brown rectangle with a staircase border — the exact defect this change
-// removes from the coastlines, now the most visible thing on screen.
-//
-// So a corner takes the highest-priority overlay among the FOUR TILES that meet at it. That grows a
-// placed region by half a tile in every direction, which is what turns a hand-drawn road into one
-// with a soft wandering edge. It is the "infer corners from neighbours" rule §3.1 of the spec warns
-// against — and the warning does not apply, because it is a warning about producing corner
-// arrangements no tileset draws. Our sets are generated, so all sixteen exist.
-[[nodiscard]] Terrain corner_terrain(std::uint16_t map, int vx, int vy) {
-    for (int dy = -1; dy <= 0; ++dy) {
-        for (int dx = -1; dx <= 0; ++dx) {
-            const Terrain o = terrain_of(kWorldSeed, map, vx + dx, vy + dy);
-            // A footprint and the square around it are the same trodden earth and share art, so
-            // they are one terrain as far as the boundary is concerned. Keeping them separate put a
-            // seam between every house and the ground it stands on.
-            if (o == Terrain::kPath || o == Terrain::kBuilding) return Terrain::kPath;
-        }
-    }
-    const Terrain t = terrain_base(kWorldSeed, map, vx, vy);
+// The two rewrites below are unchanged from the corner version, because they were never about
+// corners:
+[[nodiscard]] Terrain tile_terrain(std::uint16_t map, int gx, int gy) {
+    const Terrain o = terrain_of(kWorldSeed, map, gx, gy);
+
+    // A footprint and the square around it are the same trodden earth and share art, so they are one
+    // terrain as far as the boundary is concerned. Keeping them separate put a seam between every
+    // house and the ground it stands on.
+    if (o == Terrain::kPath || o == Terrain::kBuilding) return Terrain::kPath;
+
+    // NOTHING ERODES THE RIM OF A PLACED REGION, and that was tried and removed rather than tuned.
+    // Roads and village squares are stamped as rectangles by world generation, and the worry was
+    // that a blob set rounds a rectangle into a rounded rectangle and no further — `shot_village`
+    // did measure 0.265 under the corner lattice and 0.462 immediately after the rewrite. So the rim
+    // was eroded with a noise field to give the art something to be ragged about.
+    //
+    // It was the wrong fix for both halves of that number. The rectangular POND was the priority
+    // order (see `terrain_priority`); the ruled ROAD EDGES were the generated art displacing the
+    // field value instead of the sample point (see `edge_generated` in the packer). With those two
+    // corrected the erosion bought nothing the metric could see and cost a great deal: a road here
+    // is two tiles wide, so every tile of it is a rim tile, and a field eroding both sides at once
+    // ate it into a dashed line of crumbs. Guarding on thickness did not save it — the roads run
+    // diagonally, so their axis-aligned cross-section is wider than the road is.
+
     // A tree is not a terrain you can stand on — it is something standing on one. Resolving it to
     // its ring's ground here is what lets a forest floor take part in transitions at all.
-    return (t == Terrain::kTree) ? ground_under_tree(ring_of(kWorldSeed, vx, vy)) : t;
+    return (o == Terrain::kTree) ? ground_under_tree(ring_of(kWorldSeed, gx, gy)) : o;
 }
 
 // --- The Y-sorted draw list -------------------------------------------------------------------
@@ -347,34 +358,35 @@ struct RaylibBridge::Impl {
     std::vector<std::uint32_t> frame_structures;
     PlayerViewPtr frame_players[kMaxPlayers];
 
-    // The corner lattice for this frame's view rect, one Terrain per vertex.
+    // This frame's view rect, one Terrain per TILE, with a one-tile skirt so that every drawn tile
+    // can read all eight of its neighbours without falling off the edge.
     //
-    // Not an optimisation for its own sake: every corner is shared by four tiles, so evaluating it
-    // where it is used costs four times what it should — and a corner is not cheap. `terrain_base`
-    // runs three two-octave noise fields and `ring_of` a fourth, so a naive `ground()` would do
-    // about thirty noise evaluations per tile. Filling the lattice once cuts that to eight.
-    std::vector<std::uint8_t> corners;
-    int corner_x0 = 0, corner_y0 = 0, corner_w = 0, corner_h = 0;
+    // Not an optimisation for its own sake: a tile's terrain is read nine times, once by itself and
+    // once by each neighbour, and it is not cheap to compute. `terrain_base` runs three two-octave
+    // noise fields and `ring_of` a fourth, so a naive `ground()` would do about eighty noise
+    // evaluations per tile. Filling the rect once cuts that to eight.
+    std::vector<std::uint8_t> terrain_cache;
+    int cache_x0 = 0, cache_y0 = 0, cache_w = 0, cache_h = 0;
 
-    void build_corners(std::uint16_t map, int x0, int y0, int x1, int y1) {
-        corner_x0 = x0;
-        corner_y0 = y0;
-        corner_w = x1 - x0 + 1;
-        corner_h = y1 - y0 + 1;
-        corners.resize(static_cast<std::size_t>(corner_w) * corner_h);
-        for (int vy = y0; vy <= y1; ++vy) {
-            for (int vx = x0; vx <= x1; ++vx) {
-                corners[static_cast<std::size_t>(vy - y0) * corner_w + (vx - x0)] =
-                    static_cast<std::uint8_t>(corner_terrain(map, vx, vy));
+    void build_terrain(std::uint16_t map, int x0, int y0, int x1, int y1) {
+        cache_x0 = x0 - 1;
+        cache_y0 = y0 - 1;
+        cache_w = x1 - x0 + 3;
+        cache_h = y1 - y0 + 3;
+        terrain_cache.resize(static_cast<std::size_t>(cache_w) * cache_h);
+        for (int gy = 0; gy < cache_h; ++gy) {
+            for (int gx = 0; gx < cache_w; ++gx) {
+                terrain_cache[static_cast<std::size_t>(gy) * cache_w + gx] =
+                    static_cast<std::uint8_t>(tile_terrain(map, cache_x0 + gx, cache_y0 + gy));
             }
         }
     }
 
-    [[nodiscard]] Terrain corner(int vx, int vy) const {
-        const int cx = vx - corner_x0;
-        const int cy = vy - corner_y0;
-        if (cx < 0 || cy < 0 || cx >= corner_w || cy >= corner_h) return Terrain::kGrass;
-        return static_cast<Terrain>(corners[static_cast<std::size_t>(cy) * corner_w + cx]);
+    [[nodiscard]] Terrain terrain_at(int gx, int gy) const {
+        const int cx = gx - cache_x0;
+        const int cy = gy - cache_y0;
+        if (cx < 0 || cy < 0 || cx >= cache_w || cy >= cache_h) return Terrain::kGrass;
+        return static_cast<Terrain>(terrain_cache[static_cast<std::size_t>(cy) * cache_w + cx]);
     }
 
     // One sprite, scaled from the atlas' 16px cell to whatever world size the caller wants.
@@ -428,16 +440,19 @@ struct RaylibBridge::Impl {
         DrawTexturePro(atlas, src, dst, Vector2{w * 0.5f, h}, 0.0f, tint);
     }
 
-    // One ground tile, resolved from its four CORNERS rather than from its own terrain value.
+    // One ground tile: this tile's own terrain, blob-masked against its eight neighbours.
     //
-    // The tile the simulation reports is still what decides the common case — a tile of grass whose
-    // corners are all grass draws a grass fill, exactly as before. What changes is the boundary: a
-    // tile with two grass corners and two sand corners is drawn as sand with grass laid over the
-    // half that is grass, and because both tiles either side of that edge read the SAME two shared
-    // corners, the contour runs straight through the tile border instead of stopping at it.
+    // The tile the simulation reports decides the common case — a tile of grass surrounded by grass
+    // draws a grass fill, exactly as before. What changes is the boundary. A shore tile is drawn
+    // twice: the strongest LOWER-priority neighbour supplies the fill, and this tile's own edge art
+    // for the mask its neighbourhood produces goes over the top. Because the mask is Godot's minimal
+    // rule and the art is the pack's own blob set, the piece drawn here is the piece the author drew
+    // to meet the piece its neighbour will draw.
     //
-    // Roads and building footprints are exempt. They are placed per tile by world generation and
-    // have no value at a corner at all, so they draw flat — see `corner_terrain`.
+    // A neighbour counts as "mine" when its priority is at least this tile's, not when it is equal.
+    // Equality alone would cut a hole in a lake wherever a road ran down to it: the road tile would
+    // read as outside the water, so the water would draw itself a shoreline against its own bank.
+    // Ordering by priority instead means the boundary is always drawn once, by the weaker side.
     void ground(std::uint16_t map, int gx, int gy) const {
         // NOT MIRRORED, and that is a reversal worth explaining. Mirroring a fill per tile is free
         // and used to be here to break the repeat of a single motif — but a motif that reaches the
@@ -449,32 +464,34 @@ struct RaylibBridge::Impl {
         const int variant = tile_variant(map, gx, gy);
         const int pick = textured_here(map, gx, gy) ? 1 + ((variant >> 2) & 1) : 0;
 
-        const Terrain c[4] = {corner(gx, gy), corner(gx + 1, gy), corner(gx, gy + 1),
-                              corner(gx + 1, gy + 1)};
+        const Terrain self = terrain_at(gx, gy);
+        const int mine = terrain_priority(self);
+        const int mask = edge_mask([&](int dx, int dy) {
+            return terrain_priority(terrain_at(gx + dx, gy + dy)) >= mine;
+        });
 
-        // Highest priority wins the overlay; the runner-up becomes the fill. Three or more terrains
-        // can meet at one tile, and the third is simply drawn as the second — a lie confined to the
-        // handful of tiles where three biomes touch at a point, and invisible at any zoom.
-        Terrain top = c[0];
-        for (const Terrain q : c) {
-            if (terrain_priority(q) > terrain_priority(top)) top = q;
-        }
-        int mask = 0;
-        Terrain base = top;
-        for (int i = 0; i < 4; ++i) {
-            if (c[i] == top) {
-                mask |= 1 << i;
-            } else if (base == top || terrain_priority(c[i]) > terrain_priority(base)) {
-                base = c[i];
-            }
-        }
-
-        if (mask == 0b1111) {
-            im_tile_fill(top, gx, gy, pick);
+        if (mask == kEdgeFull) {
+            im_tile_fill(self, gx, gy, pick);
             return;
         }
+
+        // The fill is the strongest neighbour weaker than this tile. Three or more terrains can meet
+        // at one tile and only the strongest of the weak ones is drawn — a lie confined to the
+        // handful of tiles where three biomes touch, and invisible at any zoom.
+        Terrain base = self;
+        int best = -1;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const Terrain n = terrain_at(gx + dx, gy + dy);
+                const int p = terrain_priority(n);
+                if (p < mine && p > best) {
+                    best = p;
+                    base = n;
+                }
+            }
+        }
         im_tile_fill(base, gx, gy, pick);
-        trans(top, mask, gx, gy);
+        trans(self, mask, gx, gy);
     }
 
     // The plain-or-textured fill for one terrain, with the variant run resolved.
@@ -492,8 +509,8 @@ struct RaylibBridge::Impl {
         tile(static_cast<Slot>(first + (pick % kTerrainVariants)), gx, gy, WHITE, mirror);
     }
 
-    // One transition tile: `t`'s own art, cut to the corners `mask` says belong to it, over
-    // whatever has already been drawn on this tile. Never mirrored — the mask IS the orientation.
+    // One edge tile: `t`'s own art for the neighbourhood `mask` describes, over whatever has
+    // already been drawn on this tile. Never mirrored — the mask IS the orientation.
     void trans(Terrain t, int mask, int tx, int ty) const {
         if (!atlas_ok) return;
         const AtlasRect r = trans_rect(static_cast<int>(t), mask);
@@ -825,7 +842,7 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
     im.frame_sprites.clear();
     for (PlayerViewPtr& slot : im.frame_players) slot.reset();
     // One extra vertex past each edge: a tile at the view's right edge reads the corner beyond it.
-    im.build_corners(player.map, min_tx, min_ty, max_tx + 1, max_ty + 1);
+    im.build_terrain(player.map, min_tx, min_ty, max_tx, max_ty);
     for (int cy = min_cy; cy <= max_cy; ++cy) {
         for (int cx = min_cx; cx <= max_cx; ++cx) {
             const ChunkCoord c{player.map, static_cast<std::uint16_t>(cx),

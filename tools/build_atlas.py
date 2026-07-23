@@ -16,8 +16,11 @@ This is the role ARCHITECTURE.md reserves for Python: build-time tooling, never 
 
     tools/build_atlas.py            # writes assets/atlas.png + src/render/atlas_slots.hpp
 """
+import math
 import pathlib
+import re
 import sys
+from pathlib import Path
 
 from PIL import Image
 
@@ -223,52 +226,102 @@ FX_MANIFEST = [
 
 COLS = 8  # atlas width in cells; keeps the texture small and squarish
 
-# --- Terrain transition sets --------------------------------------------------
+# --- Terrain edge sets ---------------------------------------------------------
 # ONE OVERLAY SET PER TERRAIN, NOT ONE SET PER PAIR. `Terrain` has 11 values, so a set for every
-# pair would be 55 x 14 = 770 tiles. Where two terrains meet, the renderer fills the tile with the
+# pair would be 55 x 47 = 2585 tiles. Where two terrains meet, the renderer fills the tile with the
 # LOWER-priority one and lays the higher-priority terrain's own edge tile over it, so this costs
-# 11 x 14 = 154 tiles and covers every pair including ones that never occur.
+# 11 x 47 = 517 tiles and covers every pair including ones that never occur.
 #
-# WHY THESE ARE GENERATED RATHER THAN TAKEN FROM THE PACK, which is a real departure from
-# RENDER_SPEC.md §5.1 and needs a reason. The pack ships 1113 tiles with role `transition_edge` and
-# they are good, but they are drawn for the pack's OWN world, which is grass with dirt paths and
-# water. Ours is eleven noise-thresholded terrains, and the boundary that dominates every outdoor
-# screenshot is sand against grass — a beach. `autotile_fit.py --scan` over all ten tilesets finds
-# exactly three sets covering all 16 corner masks, and not one of them is sand/grass; the closest
-# candidates (TilesetVillageAbandoned:0-1#1, TilesetNature:3-7#3) cover 6 masks of 16. So for the
-# single most visible boundary in the game the art does not exist, and a scheme that handles only
-# the pairs the pack happens to draw would leave it hard-edged.
+# THE MASK LAYOUT IS GODOT 3'S, BECAUSE THE ART IS GODOT 3'S. The pack ships a Godot project
+# (assets/_src/ninja/GodotProject.zip) that is the very project its example GIFs were recorded from,
+# and its tilesets declare `tile_mode = 1, autotile/bitmask_mode = 1` — BITMASK_3X3_MINIMAL, the
+# 47-tile blob. Each set is an 11x5 block of which 47 cells carry a mask; the layout is not a grid
+# anyone should read by eye, which is exactly why the coordinates are taken from the author's own
+# `.tres` tables rather than eyeballed off a contact sheet.
 #
-# What is generated is only the SHAPE of the boundary. The pixels are still the pack's own fill
-# tiles, cut to an irregular contour — so this adds no new art, and re-arting a terrain changes its
-# transitions automatically.
-#
-# Masks 1..14 (0 and 15 are the plain fills, which already exist). Bit 0 = top-left corner is this
-# terrain, 1 = top-right, 2 = bottom-left, 3 = bottom-right — the convention autotile_fit.py uses.
-TRANS_MASKS = list(range(1, 15))
+# The bits are Godot's `TileSet::BIND_*`. A corner bit is set only when BOTH adjacent sides are
+# also set — that "minimal" rule is what collapses 256 neighbourhoods to 47 tiles, and the renderer
+# has to apply the same rule or it will ask for masks that were never drawn.
+EDGE_TL, EDGE_T, EDGE_TR = 1, 2, 4
+EDGE_L, EDGE_C, EDGE_R = 8, 16, 32
+EDGE_BL, EDGE_B, EDGE_BR = 64, 128, 256
 
-# Which fill each terrain's edge set is cut from, in `Terrain` enum order. Index N here IS
+# The pack's Godot project, read straight out of the zip. `assets/_src/` is gitignored in its
+# entirety — the pack is a download, not a checked-in asset — so this adds no new precondition
+# beyond the PNGs the rest of this file already reads from the same directory.
+GODOT_ZIP = SRC / "ninja/GodotProject.zip"
+GODOT_TRES = "GodotProject/World/Backgrounds/Tileset/"
+
+# Which 47-mask set each terrain's edge overlay comes from, in `Terrain` enum order. Index N here IS
 # `static_cast<int>(Terrain)` N, so the renderer indexes without a lookup table.
-TRANS_MANIFEST = [
-    ("Grass",    "NFloor",  0, 12),
-    ("Dirt",     "NFloor", 11, 19),
-    ("Water",    "NWater", 11,  2),
-    ("Stone",    "NIntFloor",  5, 13),
-    ("Sand",     "NFloor",  0,  5),
+#
+#   ("pack", tres, tile_id, fallback_fill)  take the author's own art, alpha-cut (see edge_cut)
+#   ("gen",  sheet, col, row)               generate the contour from that terrain's plain fill
+#
+# Only four terrains get pack art, and that is the honest result of looking rather than the result
+# of settling. The pack draws boundaries for ITS world — water against grass, water against sand,
+# dirt against grass, snow over anything — and those are four of the five boundaries that dominate
+# an outdoor shot. It draws no sand-against-grass set at all: the author butts the two together with
+# a hard staircase edge and scatters props over the join (visible in the rebuilt Village map). So
+# the generated contour is not a placeholder waiting to be replaced; for seven terrains it is the
+# only thing there is.
+EDGE_MANIFEST = [
+    ("Grass",    ("gen", "NFloor", 0, 12)),
+    ("Dirt",     ("pack", "TilesetFloor.tres", 2, ("NFloor", 11, 19))),
+    ("Water",    ("pack", "TilesetFloor.tres", 18, ("NWater", 11, 2))),
+    ("Stone",    ("gen", "NIntFloor", 5, 13)),
+    ("Sand",     ("gen", "NFloor", 0, 5)),
     # kTree draws the ground of its own ring and never uses its own set; it is here to keep the
     # index equal to the enum value.
-    ("Tree",     "NFloor",  0, 12),
-    ("Snow",     "NFloor",  0, 19),
-    ("Marsh",    "NFloor", 11, 12),
-    ("Ash",      "NIntFloor", 16, 13),
-    ("Path",     "NFloor", 12,  8),
-    ("Building", "NFloor", 12,  8),
+    ("Tree",     ("gen", "NFloor", 0, 12)),
+    ("Snow",     ("pack", "TilesetFloor.tres", 17, ("NFloor", 0, 19))),
+    # NOT TilesetWater#27, which is the obvious candidate and is wrong. That set's interior is
+    # poison water at (188, 132, 181); our Marsh is the wetland GROUND, a dark swamp green at
+    # (116, 163, 52). Reaching for it because the name matched would have ringed every marsh in
+    # purple. The pack has no marsh-ground edge set, so this one is generated.
+    ("Marsh",    ("gen", "NFloor", 11, 12)),
+    ("Ash",      ("gen", "NIntFloor", 16, 13)),
+    ("Path",     ("gen", "NFloor", 12, 8)),
+    ("Building", ("gen", "NFloor", 12, 8)),
 ]
 
-# How far the boundary is allowed to wander from the straight interpolated contour, as a fraction of
-# a tile. Zero gives clean arcs and straight half-tile lines — better than a tile-edge staircase but
+# How far a GENERATED boundary is allowed to wander from the smooth contour, as a fraction of a
+# tile. Zero gives clean arcs and straight half-tile lines — better than a tile-edge staircase but
 # still visibly ruled. This is what turns it into a coastline.
 TRANS_WOBBLE = 0.17
+
+# Spread of the kernel that turns a 9-bit mask into a contour, in tiles. 0.55 was picked so that the
+# isolated mask (centre only) closes into an island inside its own tile instead of bleeding to the
+# border, and so that a straight edge sits on the tile boundary rather than inside it.
+EDGE_SIGMA = 0.55
+
+
+def godot_autotile(tres: str, tile_id: int) -> dict:
+    """The author's own bitmask table for one autotile, read out of GodotProject.zip.
+
+    Returns the source PNG's basename, the region origin in pixels, `flags` mapping each mask to
+    the cells that carry it, and `prio` the weights among equal-mask cells.
+    """
+    import zipfile
+
+    with zipfile.ZipFile(GODOT_ZIP) as zf:
+        txt = zf.read(GODOT_TRES + tres).decode("utf-8")
+    ext = {i: p for p, i in re.findall(r'\[ext_resource path="res://(.+?)".*?id=(\d+)\]', txt)}
+
+    def field(key: str, default: str = "") -> str:
+        m = re.search(rf"^{tile_id}/{key} = (.+)$", txt, re.M)
+        return m.group(1) if m else default
+
+    tex = re.search(r"\d+", field("texture", "0")).group(0)
+    # Rect2's own "2" is a digit and would be read as a coordinate; strip the constructor first.
+    rx, ry = [int(float(v)) for v in
+              re.findall(r"-?[\d.]+", field("region", "0,0,0,0").replace("Rect2", ""))][:2]
+    flags: dict[int, list[tuple[int, int]]] = {}
+    for ax, ay, m in re.findall(r"Vector2\( (\d+), (\d+) \), (\d+)", field("autotile/bitmask_flags")):
+        flags.setdefault(int(m), []).append((int(ax), int(ay)))
+    prio = {(int(a), int(b)): int(c) for a, b, c in
+            re.findall(r"Vector3\( (\d+), (\d+), (\d+) \)", field("autotile/priority_map"))}
+    return {"png": Path(ext[tex]).name, "rx": rx, "ry": ry, "flags": flags, "prio": prio}
 
 
 def _wrap_noise(seed: int, period: int) -> list[list[float]]:
@@ -308,33 +361,191 @@ def _wrap_noise(seed: int, period: int) -> list[list[float]]:
     return out
 
 
-def transition_tile(fill: Image.Image, mask: int, noise: list[list[float]]) -> Image.Image:
-    """`fill`, cut to the region where the four corner bits of `mask` say this terrain wins.
+def minimal_mask(bits: dict[tuple[int, int], bool]) -> int:
+    """Godot's BITMASK_3X3_MINIMAL rule, in one place so the packer and the renderer agree.
 
-    The field is a bilinear interpolation of the four corner bits, thresholded at 0.5. That single
-    choice is what makes the whole scheme work:
+    `bits[(dx, dy)]` is whether the neighbour at that offset counts as this terrain. A corner bit is
+    set only when BOTH adjacent sides are also set; that is what collapses 256 neighbourhoods onto
+    47 drawn tiles, and it is the rule the pack's own art was drawn against.
+    """
+    t, b = bits[(0, -1)], bits[(0, 1)]
+    left, right = bits[(-1, 0)], bits[(1, 0)]
+    m = EDGE_C
+    if t:
+        m |= EDGE_T
+    if b:
+        m |= EDGE_B
+    if left:
+        m |= EDGE_L
+    if right:
+        m |= EDGE_R
+    if t and left and bits[(-1, -1)]:
+        m |= EDGE_TL
+    if t and right and bits[(1, -1)]:
+        m |= EDGE_TR
+    if b and left and bits[(-1, 1)]:
+        m |= EDGE_BL
+    if b and right and bits[(1, 1)]:
+        m |= EDGE_BR
+    return m
 
-      * mask 15 is 1 everywhere and mask 0 is 0 everywhere, so the plain fills stay consistent;
-      * along any shared edge the field depends only on the two corners of that edge, which both
-        tiles agree on, so the contour is CONTINUOUS across tile borders;
-      * the diagonal masks 6 and 9 come out as two opposite corners, which is a shape no tileset in
-        the pack draws — the reason RENDER_SPEC.md §3.1 warns that per-tile sampling produces masks
-        with no art. Generating the set means all 16 exist and there is nothing to fall back on.
+
+# The 47 masks the minimal rule can actually produce, in a fixed order. DERIVED by enumerating all
+# 256 neighbourhoods rather than transcribed, because a hand-written list of 47 nine-bit constants
+# is a transcription error waiting to happen — and the count is checked against the pack's own
+# tables at build time, so if this and the art ever disagreed the build would say so.
+def _edge_masks() -> list[int]:
+    seen = set()
+    for n in range(256):
+        bits = {}
+        i = 0
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if (dx, dy) == (0, 0):
+                    bits[(dx, dy)] = True
+                else:
+                    bits[(dx, dy)] = bool(n & (1 << i))
+                    i += 1
+        seen.add(minimal_mask(bits))
+    return sorted(seen)
+
+
+EDGE_MASKS = _edge_masks()
+
+
+def edge_generated(fill: Image.Image, mask: int, jitter: tuple) -> Image.Image:
+    """`fill`, cut to the region a nine-bit `mask` says this terrain wins.
+
+    The field is a Gaussian-weighted vote of the nine cells, thresholded at half the total weight.
+    That gives the two properties the shape has to have: a fully-surrounded mask is 1 everywhere so
+    the plain fill stays consistent, and a straight edge lands on the tile boundary so two tiles
+    either side of it meet without a step.
+
+    THE WOBBLE DISPLACES THE SAMPLE POINT, NOT THE FIELD VALUE, and the first version did the
+    latter. Adding noise to the field looks equivalent and is not: how far a given amount of field
+    moves the contour depends on the local gradient, and the gradient across a straight edge is the
+    steepest anywhere in the tile. So exactly where the wobble was needed most it did the least, and
+    a long straight run of one mask — the edge of a road, the side of a village square — came out as
+    a ruled line. Displacing the coordinate moves the contour by a fixed number of pixels wherever
+    it falls.
 
     Threshold, never blend: a soft alpha ramp would put half-transparent pixels along every
     coastline, and this is pixel art at a 2x zoom where that reads as blur, not as a gradient.
     """
-    tl, tr, bl, br = mask & 1, (mask >> 1) & 1, (mask >> 2) & 1, (mask >> 3) & 1
+    bits = {
+        (-1, -1): mask & EDGE_TL, (0, -1): mask & EDGE_T, (1, -1): mask & EDGE_TR,
+        (-1, 0): mask & EDGE_L, (0, 0): mask & EDGE_C, (1, 0): mask & EDGE_R,
+        (-1, 1): mask & EDGE_BL, (0, 1): mask & EDGE_B, (1, 1): mask & EDGE_BR,
+    }
+    jx, jy = jitter
+    two_sigma_sq = 2.0 * EDGE_SIGMA * EDGE_SIGMA
     out = Image.new("RGBA", (TILE, TILE), (0, 0, 0, 0))
     src, dst = fill.load(), out.load()
     for y in range(TILE):
-        v = (y + 0.5) / TILE
         for x in range(TILE):
-            u = (x + 0.5) / TILE
-            a = (tl * (1 - u) * (1 - v) + tr * u * (1 - v) + bl * (1 - u) * v + br * u * v)
-            a += (noise[y][x] - 0.5) * 2.0 * TRANS_WOBBLE
-            if a > 0.5:
+            u = (x + 0.5) / TILE - 0.5 + (jx[y][x] - 0.5) * 2.0 * TRANS_WOBBLE
+            v = (y + 0.5) / TILE - 0.5 + (jy[y][x] - 0.5) * 2.0 * TRANS_WOBBLE
+            on = total = 0.0
+            for (dx, dy), b in bits.items():
+                w = math.exp(-((u - dx) ** 2 + (v - dy) ** 2) / two_sigma_sq)
+                total += w
+                if b:
+                    on += w
+            if on / total > 0.5:
                 dst[x, y] = src[x, y]
+    return out
+
+
+def godot_sheet(png: str) -> Image.Image:
+    """The PNG an autotile points at, from the pack directory if it is there and the zip if not.
+
+    `TilesetSnow.png` is only in the zip. It is a complete 47-mask snow overlay — the one set in the
+    whole pack the author drew with a transparent outside — and it ships in the Godot project
+    without ever appearing in `Backgrounds/Tilesets/`. Reading both places is how it gets used.
+    """
+    import io
+    import zipfile
+
+    local = SRC / "ninja/Backgrounds/Tilesets" / png
+    if local.exists():
+        return Image.open(local).convert("RGBA")
+    interior = SRC / "ninja/Backgrounds/Tilesets/Interior" / png
+    if interior.exists():
+        return Image.open(interior).convert("RGBA")
+    with zipfile.ZipFile(GODOT_ZIP) as zf:
+        for name in zf.namelist():
+            if name.endswith("/" + png):
+                return Image.open(io.BytesIO(zf.read(name))).convert("RGBA")
+    raise FileNotFoundError(f"{png} is in neither the pack nor {GODOT_ZIP.name}")
+
+
+def edge_from_pack(auto: dict, sheet: Image.Image) -> dict[int, Image.Image]:
+    """The pack's own 47 tiles for one autotile, alpha-cut so they overlay any base.
+
+    The pack's sets are OPAQUE PAIRS: `Water id18` carries grass at its rim and water in its middle,
+    baked together. That is unusable as an overlay — laid over sand it would ring the coast in
+    grass. So the outside terrain is knocked out, leaving the inside terrain plus its bank and foam,
+    which is exactly what should be drawn over whatever the neighbour happens to be.
+
+    Which colours are "outside" is READ OFF THE ART, not configured. For every drawn tile, a border
+    row or column whose corresponding side bit is clear lies wholly outside the blob, so its colours
+    are outside colours. Accumulating those over all 47 tiles gives the palette to remove. Pixel art
+    has flat palettes and the inside and outside of all four sets used here share no colour at all
+    (checked: zero overlap), so an exact-colour knockout takes the outside and nothing else.
+
+    Cells declared for a mask but drawn empty are dropped. That is not defensive coding: the pack's
+    `Floor id8` declares cell (1,4) as fully-surrounded and (3,3) as isolated, and both are entirely
+    transparent — Godot renders holes there too.
+    """
+    def cell(cx: int, cy: int) -> Image.Image:
+        x, y = auto["rx"] + cx * TILE, auto["ry"] + cy * TILE
+        return sheet.crop((x, y, x + TILE, y + TILE))
+
+    outside: set[tuple[int, int, int]] = set()
+    for mask, cells in auto["flags"].items():
+        for cx, cy in cells:
+            px = cell(cx, cy).convert("RGBA").load()
+            spans = []
+            if not mask & EDGE_T:
+                spans += [(x, 0) for x in range(TILE)]
+            if not mask & EDGE_B:
+                spans += [(x, TILE - 1) for x in range(TILE)]
+            if not mask & EDGE_L:
+                spans += [(0, y) for y in range(TILE)]
+            if not mask & EDGE_R:
+                spans += [(TILE - 1, y) for y in range(TILE)]
+            for x, y in spans:
+                if px[x, y][3] > 127:
+                    outside.add(px[x, y][:3])
+
+    # The fully-surrounded tile is pure inside; never knock any of its colours out, even if some
+    # border sampling happened to catch one.
+    full = auto["flags"].get(EDGE_TL | EDGE_T | EDGE_TR | EDGE_L | EDGE_C | EDGE_R
+                             | EDGE_BL | EDGE_B | EDGE_BR, [])
+    for cx, cy in full:
+        for p in cell(cx, cy).convert("RGBA").getdata():
+            if p[3] > 127:
+                outside.discard(p[:3])
+
+    out: dict[int, Image.Image] = {}
+    for mask, cells in auto["flags"].items():
+        best = None
+        for cx, cy in cells:
+            img = cell(cx, cy).convert("RGBA")
+            if sum(1 for p in img.getdata() if p[3] > 127) < TILE * TILE // 4:
+                continue  # declared but not drawn
+            weight = auto["prio"].get((cx, cy), 1)
+            if best is None or weight > best[0]:
+                best = (weight, img)
+        if best is None:
+            continue
+        img = best[1]
+        px = img.load()
+        for y in range(TILE):
+            for x in range(TILE):
+                if px[x, y][3] > 127 and px[x, y][:3] in outside:
+                    px[x, y] = (0, 0, 0, 0)
+        out[mask] = img
     return out
 
 # --- Animation sheets --------------------------------------------------------
@@ -516,31 +727,55 @@ def main() -> int:
     # busy to read as a boundary at all.
     coarse = _wrap_noise(0x51A3, 8)
     fine = _wrap_noise(0x2C77, 4)
-    noise = [[0.62 * coarse[y][x] + 0.38 * fine[y][x] for x in range(TILE)] for y in range(TILE)]
+    jx = [[0.62 * coarse[y][x] + 0.38 * fine[y][x] for x in range(TILE)] for y in range(TILE)]
+    coarse_y = _wrap_noise(0x7B19, 8)
+    fine_y = _wrap_noise(0x3D41, 4)
+    jy = [[0.62 * coarse_y[y][x] + 0.38 * fine_y[y][x] for x in range(TILE)] for y in range(TILE)]
+    jitter = (jx, jy)
 
     trans = []
-    for name, key_sheet, col, row in TRANS_MANIFEST:
+    edge_source = {}
+    for name, spec in EDGE_MANIFEST:
+        if spec[0] == "pack":
+            _, tres, tile_id, fallback = spec
+            auto = godot_autotile(tres, tile_id)
+            if len(auto["flags"]) != len(EDGE_MASKS):
+                print(f"Edge{name}: {tres}#{tile_id} declares {len(auto['flags'])} masks, "
+                      f"expected {len(EDGE_MASKS)}", file=sys.stderr)
+                return 1
+            tiles = edge_from_pack(auto, godot_sheet(auto["png"]))
+            edge_source[name] = f"{auto['png']}#{tile_id}"
+            key_sheet, col, row = fallback
+        else:
+            _, key_sheet, col, row = spec
+            tiles = {}
+            edge_source[name] = "generated"
+
         sheet, stride = sheets[key_sheet]
         sx, sy = col * stride, row * stride
         if sx + TILE > sheet.width or sy + TILE > sheet.height:
-            print(f"Trans{name}: ({col},{row}) is outside {key_sheet}", file=sys.stderr)
+            print(f"Edge{name}: ({col},{row}) is outside {key_sheet}", file=sys.stderr)
             return 1
         fill = sheet.crop((sx, sy, sx + TILE, sy + TILE))
-        strip_w = len(TRANS_MASKS) * cell_px
+
+        strip_w = len(EDGE_MASKS) * cell_px
         new_h = anim_y + cell_px
         if new_h > atlas.height or strip_w > atlas.width:
             grown = Image.new("RGBA", (max(strip_w, atlas.width), max(new_h, atlas.height)),
                               (0, 0, 0, 0))
             grown.paste(atlas, (0, 0))
             atlas = grown
-        for i, mask in enumerate(TRANS_MASKS):
+        for i, mask in enumerate(EDGE_MASKS):
             cell = Image.new("RGBA", (cell_px, cell_px), (0, 0, 0, 0))
+            # A mask the pack declared but drew empty falls back to the generated contour, so every
+            # row is complete however patchy its source was.
+            art = tiles.get(mask) or edge_generated(fill, mask, jitter)
             # No extrusion. Extrusion smears a tile's border colour outward so that sampling at a
             # fractional texture coordinate cannot pick up the neighbour — but these tiles are
             # deliberately transparent right up to their edge, and smearing that transparency
             # outward is a no-op while smearing the OPAQUE side outward would thicken the coastline
             # by a pixel wherever it touches a tile border. The 1px gap between cells is enough.
-            cell.paste(transition_tile(fill, mask, noise), (PAD, PAD))
+            cell.paste(art, (PAD, PAD))
             atlas.paste(cell, (i * cell_px, anim_y))
         trans.append((name, PAD, anim_y + PAD))
         anim_y += cell_px
@@ -550,7 +785,7 @@ def main() -> int:
     # question — they always differ, including for the two terrains that have no plain fill at all.
     by_name = {n: (s, c, r) for n, s, c, r in MANIFEST}
     has_plain = {}
-    for name, _, _, _ in TRANS_MANIFEST:
+    for name, _ in EDGE_MANIFEST:
         entry = by_name.get(f"Terrain{name}")
         if entry is None:
             # kTree has no fill of its own — it draws its ring's ground, so it inherits grass.
@@ -716,21 +951,30 @@ def main() -> int:
         "    return AtlasRect{static_cast<std::int16_t>(s.x + i * (s.w + 2)), s.y};",
         "}",
         "",
-        "// --- Terrain transition sets ---------------------------------------------------------",
-        "// One EDGE set per terrain, cut from that terrain's own fill (see TRANS_MANIFEST in the",
-        "// packer). Where two terrains meet, the tile is filled with the lower-priority one and the",
-        "// higher-priority terrain's edge tile is laid over it — so this is 11 sets rather than the",
-        "// 55 a per-pair scheme would need, and it covers pairs the pack draws no art for.",
+        "// --- Terrain edge sets ---------------------------------------------------------------",
+        "// One EDGE set per terrain (see EDGE_MANIFEST in the packer). Where two terrains meet, the",
+        "// tile is filled with the lower-priority one and the higher-priority terrain's edge tile is",
+        "// laid over it — so this is 11 sets rather than the 55 a per-pair scheme would need, and it",
+        "// covers pairs the pack draws no art for.",
         "//",
-        "// Indexed by `static_cast<int>(Terrain)` and by a four-bit CORNER mask: bit 0 = top-left",
-        "// corner is this terrain, 1 = top-right, 2 = bottom-left, 3 = bottom-right. Masks 0 and 15",
-        "// are the plain fills and are not stored, so a row holds masks 1..14.",
-        f"inline constexpr int kTransMasks = {len(TRANS_MASKS)};",
-        f"inline constexpr int kTransTerrains = {len(TRANS_MANIFEST)};",
+        "// The mask is Godot 3's BITMASK_3X3_MINIMAL, because four of these sets ARE the pack's own",
+        "// autotiles and that is what they were drawn against. A corner bit counts only when both",
+        "// adjacent sides are set; `edge_mask` below is the only place that rule is written, and it",
+        "// mirrors `minimal_mask` in the packer.",
+        f"inline constexpr int kTransMasks = {len(EDGE_MASKS)};",
+        f"inline constexpr int kTransTerrains = {len(EDGE_MANIFEST)};",
+        "",
+        "inline constexpr int kEdgeTL = 1, kEdgeT = 2, kEdgeTR = 4;",
+        "inline constexpr int kEdgeL = 8, kEdgeC = 16, kEdgeR = 32;",
+        "inline constexpr int kEdgeBL = 64, kEdgeB = 128, kEdgeBR = 256;",
+        "",
+        "// Every mask the minimal rule can produce is drawn, so the plain fill is the only case a",
+        "// caller has to branch on.",
+        f"inline constexpr int kEdgeFull = {EDGE_MASKS[-1]};",
         "",
         "inline constexpr AtlasRect kAtlasTrans[kTransTerrains] = {",
     ]
-    lines += [f"    {{{x}, {y}}},  // {name}" for name, x, y in trans]
+    lines += [f"    {{{x}, {y}}},  // {name} — {edge_source[name]}" for name, x, y in trans]
     lines += [
         "};",
         "",
@@ -745,11 +989,40 @@ def main() -> int:
     lines += [
         "};",
         "",
-        "// `mask` must be 1..14; 0 and 15 have no transition tile because they are plain fills.",
+        "// Column of each mask in a row. Only 47 of the 512 nine-bit values are reachable through",
+        "// the minimal rule; the rest are -1 and a caller that lands on one has built its mask by",
+        "// some other rule than `edge_mask`.",
+        "inline constexpr std::int8_t kEdgeSlot[512] = {",
+    ]
+    slot_of_mask = {m: i for i, m in enumerate(EDGE_MASKS)}
+    for base in range(0, 512, 16):
+        lines.append("    " + " ".join(
+            f"{slot_of_mask.get(base + k, -1)}," for k in range(16)))
+    lines += [
+        "};",
+        "",
+        "// Godot's BITMASK_3X3_MINIMAL. `n` answers \"does the neighbour at (dx, dy) count as this",
+        "// terrain\"; a corner counts only when both of its adjacent sides do.",
+        "template <typename Neighbour>",
+        "[[nodiscard]] inline constexpr int edge_mask(Neighbour n) noexcept {",
+        "    const bool t = n(0, -1), b = n(0, 1), l = n(-1, 0), r = n(1, 0);",
+        "    int m = kEdgeC;",
+        "    if (t) m |= kEdgeT;",
+        "    if (b) m |= kEdgeB;",
+        "    if (l) m |= kEdgeL;",
+        "    if (r) m |= kEdgeR;",
+        "    if (t && l && n(-1, -1)) m |= kEdgeTL;",
+        "    if (t && r && n(1, -1)) m |= kEdgeTR;",
+        "    if (b && l && n(-1, 1)) m |= kEdgeBL;",
+        "    if (b && r && n(1, 1)) m |= kEdgeBR;",
+        "    return m;",
+        "}",
+        "",
+        "// `mask` must be one `edge_mask` can return; kEdgeFull is the plain fill and has a tile too.",
         "[[nodiscard]] inline constexpr AtlasRect trans_rect(int terrain, int mask) noexcept {",
         "    const AtlasRect& row = kAtlasTrans[terrain];",
-        "    return AtlasRect{static_cast<std::int16_t>(row.x + (mask - 1) * (kAtlasTile + 2)),",
-        "                     row.y};",
+        "    const int slot = kEdgeSlot[mask & 0x1FF];",
+        "    return AtlasRect{static_cast<std::int16_t>(row.x + slot * (kAtlasTile + 2)), row.y};",
         "}",
         "",
         "}  // namespace mmo",

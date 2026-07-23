@@ -269,30 +269,39 @@ inline constexpr AtlasFx kAtlasFx[static_cast<int>(Fx::kCount)] = {
     return AtlasRect{static_cast<std::int16_t>(s.x + i * (s.w + 2)), s.y};
 }
 
-// --- Terrain transition sets ---------------------------------------------------------
-// One EDGE set per terrain, cut from that terrain's own fill (see TRANS_MANIFEST in the
-// packer). Where two terrains meet, the tile is filled with the lower-priority one and the
-// higher-priority terrain's edge tile is laid over it — so this is 11 sets rather than the
-// 55 a per-pair scheme would need, and it covers pairs the pack draws no art for.
+// --- Terrain edge sets ---------------------------------------------------------------
+// One EDGE set per terrain (see EDGE_MANIFEST in the packer). Where two terrains meet, the
+// tile is filled with the lower-priority one and the higher-priority terrain's edge tile is
+// laid over it — so this is 11 sets rather than the 55 a per-pair scheme would need, and it
+// covers pairs the pack draws no art for.
 //
-// Indexed by `static_cast<int>(Terrain)` and by a four-bit CORNER mask: bit 0 = top-left
-// corner is this terrain, 1 = top-right, 2 = bottom-left, 3 = bottom-right. Masks 0 and 15
-// are the plain fills and are not stored, so a row holds masks 1..14.
-inline constexpr int kTransMasks = 14;
+// The mask is Godot 3's BITMASK_3X3_MINIMAL, because four of these sets ARE the pack's own
+// autotiles and that is what they were drawn against. A corner bit counts only when both
+// adjacent sides are set; `edge_mask` below is the only place that rule is written, and it
+// mirrors `minimal_mask` in the packer.
+inline constexpr int kTransMasks = 47;
 inline constexpr int kTransTerrains = 11;
 
+inline constexpr int kEdgeTL = 1, kEdgeT = 2, kEdgeTR = 4;
+inline constexpr int kEdgeL = 8, kEdgeC = 16, kEdgeR = 32;
+inline constexpr int kEdgeBL = 64, kEdgeB = 128, kEdgeBR = 256;
+
+// Every mask the minimal rule can produce is drawn, so the plain fill is the only case a
+// caller has to branch on.
+inline constexpr int kEdgeFull = 511;
+
 inline constexpr AtlasRect kAtlasTrans[kTransTerrains] = {
-    {1, 1835},  // Grass
-    {1, 1853},  // Dirt
-    {1, 1871},  // Water
-    {1, 1889},  // Stone
-    {1, 1907},  // Sand
-    {1, 1925},  // Tree
-    {1, 1943},  // Snow
-    {1, 1961},  // Marsh
-    {1, 1979},  // Ash
-    {1, 1997},  // Path
-    {1, 2015},  // Building
+    {1, 1835},  // Grass — generated
+    {1, 1853},  // Dirt — TilesetFloor.png#2
+    {1, 1871},  // Water — TilesetWater.png#18
+    {1, 1889},  // Stone — generated
+    {1, 1907},  // Sand — generated
+    {1, 1925},  // Tree — generated
+    {1, 1943},  // Snow — TilesetSnow.png#17
+    {1, 1961},  // Marsh — generated
+    {1, 1979},  // Ash — generated
+    {1, 1997},  // Path — generated
+    {1, 2015},  // Building — generated
 };
 
 // Whether this terrain's variant 0 is a genuinely PLAIN fill, derived from the manifest by
@@ -314,11 +323,66 @@ inline constexpr bool kTerrainHasPlain[kTransTerrains] = {
     true,  // Building
 };
 
-// `mask` must be 1..14; 0 and 15 have no transition tile because they are plain fills.
+// Column of each mask in a row. Only 47 of the 512 nine-bit values are reachable through
+// the minimal rule; the rest are -1 and a caller that lands on one has built its mask by
+// some other rule than `edge_mask`.
+inline constexpr std::int8_t kEdgeSlot[512] = {
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    0, -1, 1, -1, -1, -1, -1, -1, 2, -1, 3, 4, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    5, -1, 6, -1, -1, -1, 7, -1, 8, -1, 9, 10, -1, -1, 11, 12,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    13, -1, 14, -1, -1, -1, -1, -1, 15, -1, 16, 17, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    18, -1, 19, -1, -1, -1, 20, -1, 21, -1, 22, 23, -1, -1, 24, 25,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, 26, -1, 27, 28, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, 29, -1, 30, 31, -1, -1, 32, 33,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    34, -1, 35, -1, -1, -1, 36, -1, 37, -1, 38, 39, -1, -1, 40, 41,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, 42, -1, 43, 44, -1, -1, 45, 46,
+};
+
+// Godot's BITMASK_3X3_MINIMAL. `n` answers "does the neighbour at (dx, dy) count as this
+// terrain"; a corner counts only when both of its adjacent sides do.
+template <typename Neighbour>
+[[nodiscard]] inline constexpr int edge_mask(Neighbour n) noexcept {
+    const bool t = n(0, -1), b = n(0, 1), l = n(-1, 0), r = n(1, 0);
+    int m = kEdgeC;
+    if (t) m |= kEdgeT;
+    if (b) m |= kEdgeB;
+    if (l) m |= kEdgeL;
+    if (r) m |= kEdgeR;
+    if (t && l && n(-1, -1)) m |= kEdgeTL;
+    if (t && r && n(1, -1)) m |= kEdgeTR;
+    if (b && l && n(-1, 1)) m |= kEdgeBL;
+    if (b && r && n(1, 1)) m |= kEdgeBR;
+    return m;
+}
+
+// `mask` must be one `edge_mask` can return; kEdgeFull is the plain fill and has a tile too.
 [[nodiscard]] inline constexpr AtlasRect trans_rect(int terrain, int mask) noexcept {
     const AtlasRect& row = kAtlasTrans[terrain];
-    return AtlasRect{static_cast<std::int16_t>(row.x + (mask - 1) * (kAtlasTile + 2)),
-                     row.y};
+    const int slot = kEdgeSlot[mask & 0x1FF];
+    return AtlasRect{static_cast<std::int16_t>(row.x + slot * (kAtlasTile + 2)), row.y};
 }
 
 }  // namespace mmo
