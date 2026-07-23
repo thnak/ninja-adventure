@@ -44,6 +44,7 @@ int main(int argc, char** argv) {
     const char* shot_screen = nullptr;  // --screen NAME: force a shell screen for the screenshot
     int look_ring = -1;                 // --ring N: park the camera in biome ring N
     int stage_fight = 0;                // --fight N: drop N creatures on the player before the shot
+    int look_door = -1;                 // --door N: step onto door N, which takes you inside it
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--shot") == 0 && i + 2 < argc) {
             shot_seconds = std::atoi(argv[i + 1]);
@@ -56,6 +57,8 @@ int main(int argc, char** argv) {
             look_ring = std::atoi(argv[i + 1]);  // 0..4 — put the camera in that biome ring
         } else if (std::strcmp(argv[i], "--screen") == 0 && i + 1 < argc) {
             shot_screen = argv[i + 1];  // menu | journal | character | paused | login
+        } else if (std::strcmp(argv[i], "--door") == 0 && i + 1 < argc) {
+            look_door = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--fight") == 0 && i + 1 < argc) {
             stage_fight = std::atoi(argv[i + 1]);
         }
@@ -130,7 +133,7 @@ int main(int argc, char** argv) {
             // fraction of it in y so the shot is not on a perfect diagonal.
             const float bx = half + mid * half;
             const float by = half + mid * half * 0.35f;
-            world.move_player(me, bx - player.x, by - player.y);
+            world.teleport_player(me, kOverworld, bx, by);
             world.sync_world();
             player = view();
         }
@@ -139,15 +142,24 @@ int main(int argc, char** argv) {
             const Village& v = lay.villages()[static_cast<std::size_t>(look_village)];
             // Stand a little south of the square: the houses are drawn from their bottom edge, so
             // looking from below is what shows their faces rather than their roofs.
-            world.move_player(me, static_cast<float>(v.tx) - player.x,
-                              static_cast<float>(v.ty) + 5.0f - player.y);
+            world.teleport_player(me, kOverworld, static_cast<float>(v.tx),
+                                  static_cast<float>(v.ty) + 5.0f);
+            world.sync_world();
+            player = view();
+        }
+        // Stepping onto a doorway is all it takes — the portal is in the player actor, so this
+        // exercises the real path rather than a screenshot-only teleport into the room.
+        if (look_door >= 0 && look_door < static_cast<int>(lay.doors().size())) {
+            const Door& d = lay.doors()[static_cast<std::size_t>(look_door)];
+            world.teleport_player(me, kOverworld, static_cast<float>(d.tile & 0xFFFFu) + 0.5f,
+                                  static_cast<float>(d.tile >> 16) + 0.5f);
             world.sync_world();
             player = view();
         }
         if (look_hold >= 0 && look_hold < static_cast<int>(lay.strongholds().size())) {
             const Stronghold& h = lay.strongholds()[static_cast<std::size_t>(look_hold)];
-            world.move_player(me, static_cast<float>(h.tx) - player.x,
-                              static_cast<float>(h.ty) + 6.0f - player.y);
+            world.teleport_player(me, kOverworld, static_cast<float>(h.tx),
+                                  static_cast<float>(h.ty) + 6.0f);
             world.sync_world();
             player = view();
         }

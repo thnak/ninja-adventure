@@ -14,8 +14,8 @@ are villages, joined by roads. Walk until you find one. Built on the
 | [RENDER_SPEC.md](RENDER_SPEC.md) | how the world is assembled on screen — and one measurement that turned out to be wrong |
 
 > **P0, P1 and P2 are done.** The world generates itself — **51 walled villages, 22 strongholds,
-> 443 dwellings behind 4,406 pieces of palisade** across a 1024×1024 overworld — and it is now
-> inhabited: ~620 animals that mostly want
+> 443 dwellings behind 4,406 pieces of palisade, and a door into every one of them** across a
+> 1024×1024 overworld — and it is now inhabited: ~620 animals that mostly want
 > nothing to do with you, four kinds of monster whose species depends on which ring sent them, and a
 > combat system where **magic sets a status and a physical blow detonates it**. Sign in, walk,
 > fight, die, wake at your hearth. Next is [P3](ROADMAP.md): village tiers, claims, biome rules.
@@ -54,10 +54,13 @@ Nothing on this screen was placed by hand, including the village.</sub>
 | | |
 |---|---|
 | ![village](docs/shot_village.png) | ![night](docs/shot_night.png) |
-| A tier-5 village in the meadow ring | The same world at night |
+| A tier-5 village behind its palisade | The same world at night |
+| ![interior](docs/shot_interior.png) | ![map](docs/worldmap.png) |
+| Every house has a door, and every door leads inside | The whole 1024x1024 overworld |
 
 <sub>`./build/mmo_client --shot 20 out.png --ring N` parks the camera in biome ring N;
-`--village N` and `--hold N` point it at a settlement, `--fight N` stages a scrap first.
+`--village N` and `--hold N` point it at a settlement, `--door N` walks into a doorway,
+`--fight N` stages a scrap first.
 `mmo_worldmap` prints one village index per ring to feed it.</sub>
 
 ## Build & run

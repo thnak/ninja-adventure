@@ -200,6 +200,11 @@ public:
         player_ref_by_key(player).tell(MoveIntent{dx, dy});
     }
 
+    // Debug and bring-up only — see the note on `Teleport`. Nothing the player can press reaches it.
+    void teleport_player(std::uint64_t player, std::uint16_t map, float x, float y) {
+        player_ref_by_key(player).tell(Teleport{map, x, y});
+    }
+
     void set_mounted(std::uint64_t player, bool on) {
         player_ref_by_key(player).tell(SetMounted{on});
     }
@@ -437,7 +442,10 @@ private:
                     ch->router = router_.get();
                     ch->bus = &bus_;
                     ch->status = &status_;
-                    ch->flow = &flow_[static_cast<std::size_t>(map)];
+                    // Null indoors, and said rather than left to `ready()` to catch: the flow field
+                    // routes monsters to the nearest VILLAGE, and there is no village to walk to
+                    // from inside somebody's front room. Only `flow_[kOverworld]` is ever built.
+                    ch->flow = (map == kOverworld) ? &flow_[kOverworld] : nullptr;
                     // Fallback heading for a creature the flow field cannot route (an island, a
                     // pocket walled in by cliffs): the village nearest this chunk's own centre.
                     const int mid_x = cx * kChunkTiles + kChunkTiles / 2;
@@ -450,7 +458,11 @@ private:
                     // Villages and roads are already in the terrain the line above cached — they
                     // are part of the world, not entities placed on top of it. Nothing is seeded
                     // here except wildlife: a new world starts with no player buildings anywhere.
-                    ch->seed_wildlife(kWorldSeed);
+                    //
+                    // And no wildlife indoors. `seed_wildlife` places animals on walkable ground,
+                    // and every room on the interior map is walkable ground — so without this every
+                    // house on the overworld would have had a boar in it.
+                    if (map == kOverworld) ch->seed_wildlife(kWorldSeed);
                     ch->publish_now();
 
                     auto act = std::make_unique<quark::Activation>(

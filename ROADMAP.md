@@ -424,7 +424,52 @@ Kết quả đo lại: **51/51 làng, cả bốn cổng đều đi được từ
 Windows/MSVC ra đúng từng con số của Linux — `grass 347579`, `path 24185`, `buildg 32421`, 51 làng /
 22 cứ điểm / 4849 công trình, cùng điểm spawn.
 
+## Xen giữa: R7 — cửa dẫn vào nhà
+
+Mỗi ngôi nhà đều có cửa, và giờ cửa dẫn đi đâu đó thật.
+
+**Vị trí ô cửa là ĐO chứ không đoán.** Quét hàng ô dưới cùng của cả 15 sprite công trình tìm dải
+pixel gần-đen: cửa sổ 16px tối nhất rơi vào **cột 1** ở cả 15 cái — nhà 3 ô rộng, nhà 4 ô rộng, lều
+tuyết, tàn tích, lều trại. Một hằng số, `kDoorDx`. Trước đó không chỗ nào trong dự án biết cửa ở đâu:
+`size_of` trả về một hình chữ nhật, mà hình chữ nhật thì không có mặt trước.
+
+| | |
+|---|---|
+| Map nội thất | **một** map phụ, lưới 64×64 phòng, mỗi phòng một khối 16×16 ô — 4096 chỗ cho 443 nhà |
+| Địa hình phòng | thuần số học (`interior_tile`), **không** overlay — nên mọi node tự tính được, y như terrain |
+| Sprite phòng | ghép lúc đóng gói từ nine-slice của chính pack (`compose_room`); ruột **trong suốt** để nền sàn vẫn đi qua đường terrain thường |
+| Bảng cửa | mảng ~440 phần tử **sắp xếp theo ô**, tìm nhị phân; publish y như overlay |
+| Ra ngoài | về ô **thềm** (dưới cửa một ô), không phải về ô cửa |
+
+### Điều kiện cần: người chơi phải va được vào tường
+
+Trước hôm nay **người chơi đi xuyên qua mọi thứ** — nước, cây, nhà. `MoveIntent` chỉ kẹp vào biên bản
+đồ. Lý do cũ vẫn đúng cho *chunk state*, nhưng `terrain_of` không phải chunk state: nó là hàm tự do
+trên seed + overlay, đúng cái flow field gọi hàng nghìn lần mỗi lần dựng lại.
+
+Cái đã đổi là **giờ có thứ phụ thuộc vào câu trả lời**. Hàng rào mà đi xuyên qua được thì chỉ là bức
+tranh hàng rào; và ô cửa chỉ là ô cửa khi bức tường bên cạnh nó không phải.
+
+Hai trục được giải **riêng**, đó là khác biệt giữa *trượt dọc tường* và *dính vào tường* — với một cái
+làng toàn hình chữ nhật thì đó là phần lớn thời gian.
+
+Kèm theo: `Teleport` tách khỏi `MoveIntent`. Một bước đi bị kiểm tra từng ô, còn dịch chuyển 200 ô chỉ
+kiểm tra ô đích — hai việc khác nhau, hai verb khác nhau, và `Teleport` không nối được với input.
+
+### Vòng lặp vô hạn suýt xảy ra
+
+Ra cửa mà rơi đúng vào ô cửa thì ô đó lại là cổng dẫn vào — nhảy qua nhảy lại 10 lần một giây, mãi
+mãi. Chặn hai lớp: ra về ô **thềm**, và cổng chỉ kích hoạt khi **ô thay đổi** (`last_tile_`).
+
+### Cái giá
+
+`kMapCount` 1 → 2, tức **2048 chunk actor** thay vì 1024. `mmo_sim 600` từ 5,4s lên 8,3s. Đó là giá
+thật và ghi ra đây chứ không giấu; đổi lại là kiến trúc không phải có ngoại lệ nào cho map thứ hai.
+
+Windows/MSVC ra đúng từng con số của Linux, và `mmo_sim` (gồm cả hai phép thử mới: tường chặn được
+người, cửa dẫn vào rồi ra đúng ô thềm) **OK** trên cả hai.
+
 ## Không còn gì chặn đường
 
-Mọi quyết định đã chốt. **P0, P1, P2 xong, và R0–R6 (dựng hình + làng có tường) xong.** Việc tiếp theo
-là **P3 — hệ thống thế giới.**
+Mọi quyết định đã chốt. **P0, P1, P2 xong, và R0–R7 (dựng hình + làng có tường + cửa vào nhà) xong.**
+Việc tiếp theo là **P3 — hệ thống thế giới.**

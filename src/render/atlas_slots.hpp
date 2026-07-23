@@ -174,6 +174,7 @@ struct AtlasBig {
 enum class Big : std::uint8_t {
     kTreeBroad,
     kTreePine,
+    kRoom,
     kHouseOrange,
     kHouseCream,
     kHouseAmber,
@@ -201,27 +202,28 @@ enum class Big : std::uint8_t {
 inline constexpr AtlasBig kAtlasBigs[static_cast<int>(Big::kCount)] = {
     {1, 685, 4, 3},  // kTreeBroad
     {1, 735, 4, 3},  // kTreePine
-    {1, 785, 4, 3},  // kHouseOrange
-    {1, 835, 4, 3},  // kHouseCream
-    {1, 885, 4, 3},  // kHouseAmber
-    {1, 935, 4, 3},  // kHouseRed
-    {1, 985, 3, 3},  // kHouseBlue
-    {1, 1035, 3, 3},  // kHouseTan
-    {1, 1085, 3, 3},  // kHouseWood
-    {1, 1135, 3, 3},  // kHutSnowA
-    {1, 1185, 3, 3},  // kHutSnowB
-    {1, 1235, 3, 3},  // kHutSnowC
-    {1, 1285, 3, 3},  // kRuinA
-    {1, 1335, 3, 3},  // kRuinB
-    {1, 1385, 3, 3},  // kTentA
-    {1, 1435, 3, 3},  // kTentB
-    {1, 1485, 3, 3},  // kTentC
-    {1, 1535, 3, 5},  // kLogPost
-    {1, 1617, 3, 3},  // kRampart
-    {1, 1667, 3, 3},  // kGate
-    {1, 1717, 1, 2},  // kStakeA
-    {1, 1751, 1, 2},  // kStakeB
-    {1, 1785, 1, 2},  // kStakeC
+    {1, 785, 12, 9},  // kRoom
+    {1, 931, 4, 3},  // kHouseOrange
+    {1, 981, 4, 3},  // kHouseCream
+    {1, 1031, 4, 3},  // kHouseAmber
+    {1, 1081, 4, 3},  // kHouseRed
+    {1, 1131, 3, 3},  // kHouseBlue
+    {1, 1181, 3, 3},  // kHouseTan
+    {1, 1231, 3, 3},  // kHouseWood
+    {1, 1281, 3, 3},  // kHutSnowA
+    {1, 1331, 3, 3},  // kHutSnowB
+    {1, 1381, 3, 3},  // kHutSnowC
+    {1, 1431, 3, 3},  // kRuinA
+    {1, 1481, 3, 3},  // kRuinB
+    {1, 1531, 3, 3},  // kTentA
+    {1, 1581, 3, 3},  // kTentB
+    {1, 1631, 3, 3},  // kTentC
+    {1, 1681, 3, 5},  // kLogPost
+    {1, 1763, 3, 3},  // kRampart
+    {1, 1813, 3, 3},  // kGate
+    {1, 1863, 1, 2},  // kStakeA
+    {1, 1897, 1, 2},  // kStakeB
+    {1, 1931, 1, 2},  // kStakeC
 };
 
 [[nodiscard]] inline constexpr const AtlasBig& big_of(Big b) noexcept {
@@ -256,18 +258,18 @@ enum class Fx : std::uint8_t {
 };
 
 inline constexpr AtlasFx kAtlasFx[static_cast<int>(Fx::kCount)] = {
-    {1, 1819, 12, 7, 6},  // kLeaf
-    {1, 1828, 12, 7, 6},  // kLeafPink
-    {1, 1837, 8, 8, 3},  // kRain
-    {1, 1847, 8, 8, 7},  // kSnow
-    {1, 1857, 16, 16, 1},  // kArrow
-    {1, 1875, 32, 32, 4},  // kSlash
-    {1, 1909, 25, 30, 8},  // kFire
-    {1, 1941, 32, 32, 10},  // kIce
-    {1, 1975, 30, 30, 14},  // kEarth
-    {1, 2007, 20, 28, 8},  // kShock
-    {1, 2037, 40, 40, 9},  // kBlast
-    {1, 2079, 38, 38, 1},  // kFacePlayer
+    {1, 1965, 12, 7, 6},  // kLeaf
+    {1, 1974, 12, 7, 6},  // kLeafPink
+    {1, 1983, 8, 8, 3},  // kRain
+    {1, 1993, 8, 8, 7},  // kSnow
+    {1, 2003, 16, 16, 1},  // kArrow
+    {1, 2021, 32, 32, 4},  // kSlash
+    {1, 2055, 25, 30, 8},  // kFire
+    {1, 2087, 32, 32, 10},  // kIce
+    {1, 2121, 30, 30, 14},  // kEarth
+    {1, 2153, 20, 28, 8},  // kShock
+    {1, 2183, 40, 40, 9},  // kBlast
+    {1, 2225, 38, 38, 1},  // kFacePlayer
 };
 
 [[nodiscard]] inline constexpr const AtlasFx& fx_of(Fx f) noexcept {
@@ -303,17 +305,17 @@ inline constexpr int kEdgeBL = 64, kEdgeB = 128, kEdgeBR = 256;
 inline constexpr int kEdgeFull = 511;
 
 inline constexpr AtlasRect kAtlasTrans[kTransTerrains] = {
-    {1, 2119},  // Grass — generated
-    {1, 2137},  // Dirt — TilesetFloor.png#2
-    {1, 2155},  // Water — TilesetWater.png#18
-    {1, 2173},  // Stone — generated
-    {1, 2191},  // Sand — generated
-    {1, 2209},  // Tree — generated
-    {1, 2227},  // Snow — TilesetSnow.png#17
-    {1, 2245},  // Marsh — generated
-    {1, 2263},  // Ash — generated
-    {1, 2281},  // Path — generated
-    {1, 2299},  // Building — generated
+    {1, 2265},  // Grass — generated
+    {1, 2283},  // Dirt — TilesetFloor.png#2
+    {1, 2301},  // Water — TilesetWater.png#18
+    {1, 2319},  // Stone — generated
+    {1, 2337},  // Sand — generated
+    {1, 2355},  // Tree — generated
+    {1, 2373},  // Snow — TilesetSnow.png#17
+    {1, 2391},  // Marsh — generated
+    {1, 2409},  // Ash — generated
+    {1, 2427},  // Path — generated
+    {1, 2445},  // Building — generated
 };
 
 // Whether this terrain's variant 0 is a genuinely PLAIN fill, derived from the manifest by

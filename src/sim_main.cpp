@@ -187,6 +187,50 @@ int main(int argc, char** argv) {
                    spawn.stamina == kPlayerMaxStamina,
                "a bound player starts with full bars");
 
+    // --- A wall you cannot walk through, and a door you can -------------------------------------
+    // Both halves matter and neither is worth much alone. A palisade the player walks through is a
+    // painting; a door in a wall that is not a wall is a formality.
+    {
+        const Village& v = layout.villages().front();
+        const VillagePlan vp = plan_of(v.tier);
+        // Stand just inside the west wall, then push west for a second of ticks. The wall line is
+        // three tiles thick, so a player that crossed it did not clip a corner.
+        world.teleport_player(me, kOverworld, static_cast<float>(v.tx - vp.hw + 4) + 0.5f,
+                              static_cast<float>(v.ty) + 4.5f);
+        for (int i = 0; i < 20; ++i) world.move_player(me, -0.6f, 0.0f);
+        const PlayerView shoved = world.player_view(slot);
+        chk.expect(shoved.x > static_cast<float>(v.tx - vp.hw),
+                   "the palisade stops a player walking straight at it");
+
+        // Now the door. Stepping onto a doorway tile is the whole interaction — there is no verb.
+        const Door& d = layout.doors().front();
+        const int dtx = static_cast<int>(d.tile & 0xFFFFu);
+        const int dty = static_cast<int>(d.tile >> 16);
+        world.teleport_player(me, kOverworld, static_cast<float>(dtx) + 0.5f,
+                              static_cast<float>(dty) + 0.5f);
+        const PlayerView inside = world.player_view(slot);
+        chk.expect(inside.map == kInterior, "stepping into a doorway puts the player indoors");
+        chk.expect(is_walkable(terrain_of(kWorldSeed, kInterior, static_cast<int>(inside.x),
+                                          static_cast<int>(inside.y))),
+                   "and puts them on floor, not inside the wall");
+
+        // And out again: the way out is the tile below, the one the room's own doorway sits on.
+        // Stepped one at a time and STOPPED as soon as the map changes — walking on past the exit
+        // would test where the player wandered to, not where the door put them.
+        // `player_view` and not `sync_world`: the authoritative ask is a barrier on the ONE actor
+        // that matters, while `sync_world` asks all 2048 chunks and running that twelve times in a
+        // loop cost this test fifteen seconds on its own.
+        PlayerView back = inside;
+        for (int i = 0; i < 12 && back.map != kOverworld; ++i) {
+            world.move_player(me, 0.0f, 0.35f);
+            back = world.player_view(slot);
+        }
+        chk.expect(back.map == kOverworld, "walking out of the doorway puts the player back outside");
+        chk.expect(static_cast<int>(back.x) == dtx && static_cast<int>(back.y) == dty + 1,
+                   "on the doorstep, not on the door — landing on the door is an infinite loop");
+        world.teleport_player(me, kOverworld, spawn.x, spawn.y);
+    }
+
     // An unbound slot must be genuinely inert, not merely undrawn.
     const PlayerView empty_slot = world.player_view(kMaxPlayers - 1);
     chk.expect(!empty_slot.live(), "a slot nobody logged into is not a player");

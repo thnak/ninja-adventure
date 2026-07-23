@@ -112,6 +112,11 @@ bool g_atlas_ok = false;
 [[nodiscard]] Terrain tile_terrain(std::uint16_t map, int gx, int gy) {
     const Terrain o = terrain_of(kWorldSeed, map, gx, gy);
 
+    // Indoors, `kBuilding` is a WALL and not a footprint, so it keeps its own identity — see
+    // `ground`, which then declines to draw it at all. Remapping it to path here is what would
+    // otherwise carpet the whole interior map in road, room and void alike.
+    if (map != kOverworld) return o;
+
     // A footprint and the square around it are the same trodden earth and share art, so they are one
     // terrain as far as the boundary is concerned. Keeping them separate put a seam between every
     // house and the ground it stands on.
@@ -367,6 +372,10 @@ struct RaylibBridge::Impl {
     // evaluations per tile. Filling the rect once cuts that to eight.
     std::vector<std::uint8_t> terrain_cache;
     int cache_x0 = 0, cache_y0 = 0, cache_w = 0, cache_h = 0;
+    // Which room the camera is in, or -1 outdoors. The floor of every OTHER room is blanked, for the
+    // same reason only one room's walls are drawn: the interior map is a lattice and a house has one
+    // room in it. Blanking the walls alone left the neighbours' floors hanging in the dark.
+    int active_room = -1;
 
     void build_terrain(std::uint16_t map, int x0, int y0, int x1, int y1) {
         cache_x0 = x0 - 1;
@@ -376,8 +385,12 @@ struct RaylibBridge::Impl {
         terrain_cache.resize(static_cast<std::size_t>(cache_w) * cache_h);
         for (int gy = 0; gy < cache_h; ++gy) {
             for (int gx = 0; gx < cache_w; ++gx) {
-                terrain_cache[static_cast<std::size_t>(gy) * cache_w + gx] =
-                    static_cast<std::uint8_t>(tile_terrain(map, cache_x0 + gx, cache_y0 + gy));
+                const int tx = cache_x0 + gx;
+                const int ty = cache_y0 + gy;
+                const bool other_room = map != kOverworld && active_room >= 0 &&
+                                        room_index_at(tx, ty) != active_room;
+                terrain_cache[static_cast<std::size_t>(gy) * cache_w + gx] = static_cast<std::uint8_t>(
+                    other_room ? Terrain::kBuilding : tile_terrain(map, tx, ty));
             }
         }
     }
@@ -465,6 +478,12 @@ struct RaylibBridge::Impl {
         const int pick = textured_here(map, gx, gy) ? 1 + ((variant >> 2) & 1) : 0;
 
         const Terrain self = terrain_at(gx, gy);
+        // Everything on the interior map that is not floor is either wall or the void between one
+        // room and the next, and BOTH are drawn by leaving the tile alone: the room sprite supplies
+        // the wall, and what is between rooms should be the black the pack's own Interior map has
+        // around its room. Painting a fill here and covering it is the same picture at twice the
+        // cost, and painting a fill and NOT covering it is a floor where the outdoors should be.
+        if (map != kOverworld && self == Terrain::kBuilding) return;
         const int mine = terrain_priority(self);
         const int mask = edge_mask([&](int dx, int dy) {
             return terrain_priority(terrain_at(gx + dx, gy + dy)) >= mine;
@@ -680,6 +699,7 @@ struct RaylibBridge::Impl {
     }
 
     void draw_ambience(std::uint16_t map, float cam_x, float cam_y, double t) const {
+        if (map != kOverworld) return;  // it does not snow indoors
         const Weather w = weather_of(ring_of(kWorldSeed, static_cast<int>(cam_x / kTilePx),
                                              static_cast<int>(cam_y / kTilePx)));
         if (w == Weather::kNone) return;
@@ -842,6 +862,9 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
     im.frame_sprites.clear();
     for (PlayerViewPtr& slot : im.frame_players) slot.reset();
     // One extra vertex past each edge: a tile at the view's right edge reads the corner beyond it.
+    im.active_room = (player.map == kOverworld)
+                         ? -1
+                         : room_index_at(static_cast<int>(player.x), static_cast<int>(player.y));
     im.build_terrain(player.map, min_tx, min_ty, max_tx, max_ty);
     for (int cy = min_cy; cy <= max_cy; ++cy) {
         for (int cx = min_cx; cx <= max_cx; ++cx) {
@@ -894,9 +917,35 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
         }
     }
 
+    // The room the player is in, and no other.
+    //
+    // Drawing every room in view was the first version and it is wrong in a way that is obvious the
+    // moment you see it: the rooms are a lattice, so standing in one you look out at the neighbours'
+    // living rooms laid out in a grid with black between them. A house has one room in it. What the
+    // camera should find outside these four walls is nothing at all — which is exactly what the
+    // pack's own Interior.tscn has around its room.
+    if (player.map != kOverworld) {
+        const int room = room_index_at(static_cast<int>(player.x), static_cast<int>(player.y));
+        if (room >= 0 && room < door_count()) {
+            const AtlasBig& rs = big_of(Big::kRoom);
+            const float bottom =
+                static_cast<float>(room_block_y(room) + kRoomY0 - 1 + rs.h) * kTilePx;
+            im.frame_sprites.push_back(
+                Sprite{bottom,
+                       (static_cast<float>(room_block_x(room) + kRoomX0 - 1) +
+                        static_cast<float>(rs.w) * 0.5f) * kTilePx,
+                       bottom, nullptr, static_cast<std::uint16_t>(Big::kRoom), 0,
+                       SpriteKind::kBig});
+        }
+    }
+
     // Structures. Gathered over the chunks that overlap the view, EXPANDED downward by one chunk
     // because a house anchored below the view still paints its roof into it.
-    if (im.layout != nullptr) {
+    //
+    // OVERWORLD ONLY. `structures_in_chunk` is indexed by chunk and knows nothing about maps, so
+    // without this every interior would have the village that happens to share its coordinates
+    // stamped through it.
+    if (im.layout != nullptr && player.map == kOverworld) {
         std::vector<std::uint32_t>& vis = im.frame_structures;
         vis.clear();
         for (int cy = min_cy; cy <= max_cy + 1; ++cy) {
@@ -929,6 +978,7 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
     // just outside the view still paints the part that reaches in.
     for (int gy = min_ty - 1; gy <= max_ty + 3; ++gy) {
         for (int gx = min_tx - 4; gx <= max_tx; ++gx) {
+            if (player.map != kOverworld) break;  // no woods indoors
             if (!tree_anchor(player.map, gx, gy)) continue;
             // Centred over the middle of the three tiles it claims, then jittered. Anchoring at
             // tx+0.5 was right for a 2-wide sprite and puts a 4-wide one a tile to the left.

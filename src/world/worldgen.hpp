@@ -96,6 +96,7 @@ public:
         build_villages();
         place_strongholds();
         index_structures();
+        index_doors();
         choose_spawn();
     }
 
@@ -103,6 +104,7 @@ public:
     [[nodiscard]] const std::vector<Village>& villages() const noexcept { return villages_; }
     [[nodiscard]] const std::vector<Stronghold>& strongholds() const noexcept { return holds_; }
     [[nodiscard]] const std::vector<Structure>& structures() const noexcept { return structures_; }
+    [[nodiscard]] const std::vector<Door>& doors() const noexcept { return doors_; }
 
     // Structures whose footprint touches this chunk. A 4x3 house straddling a border is listed in
     // both chunks, so a renderer iterating the chunks it is drawing never misses half a building.
@@ -537,6 +539,23 @@ private:
         }
     }
 
+    // One room per dwelling, and the room index IS the index into this array. That identity is why
+    // the array is sorted first and numbered second: `portal_at` searches it by tile going in, and
+    // indexes it directly by room going out, and both only work if the two orders are the same one.
+    //
+    // The rampart pieces are skipped — `is_dwelling` is the whole test. A log post has no door, and
+    // giving one a room would put four thousand empty interiors behind the walls.
+    void index_doors() {
+        doors_.reserve(structures_.size());
+        for (const Structure& s : structures_) {
+            if (!is_dwelling(s.kind)) continue;
+            doors_.push_back(Door{tile_key(door_tx(s), door_ty(s)), 0});
+        }
+        std::sort(doors_.begin(), doors_.end(),
+                  [](const Door& a, const Door& b) { return a.tile < b.tile; });
+        for (std::uint32_t i = 0; i < doors_.size(); ++i) doors_[i].room = i;
+    }
+
     // "You wake in open country and you have to find people." The spawn is deliberately 30-odd
     // tiles from the nearest village — far enough that the first thing the game asks you to do is
     // walk and look around, close enough that walking works.
@@ -571,6 +590,7 @@ private:
     std::vector<Village> villages_;
     std::vector<Stronghold> holds_;
     std::vector<Structure> structures_;
+    std::vector<Door> doors_;
     std::vector<std::vector<std::uint32_t>> by_chunk_;
     int spawn_tx_ = kHomeTx;
     int spawn_ty_ = kHomeTy;
@@ -589,6 +609,7 @@ private:
     static const WorldLayout* layout = [seed] {
         auto* l = new WorldLayout(seed);
         publish_overlay(l->overlay());
+        publish_doors(l->doors().data(), static_cast<int>(l->doors().size()));
         return l;
     }();
     return *layout;

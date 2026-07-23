@@ -28,12 +28,18 @@ inline constexpr int kMapChunks = 32;   // chunks per map edge
 inline constexpr int kMapTiles = kChunkTiles * kMapChunks;  // 1024 tiles per overworld edge
 inline constexpr int kChunksPerMap = kMapChunks * kMapChunks;  // 1024 chunk actors
 
-// ONE seamless overworld. Instanced realms behind gates get map ids allocated at runtime (ARCH §4);
-// they are not a fixed enum any more, which is why `kMapCount` is 1 rather than 3.
-inline constexpr int kMapCount = 1;
+// ONE seamless overworld, plus ONE map that holds every interior.
+//
+// The second map is not a second world. It is a grid of rooms, one per dwelling, and it exists
+// because a door has to lead somewhere: `kMapTiles / kRoomPitch` squared is 4096 rooms against 443
+// dwellings, so every house on the map gets its own and there is room for ten times as many. The
+// alternative — a map per building — would be 443 maps of a million tiles each to hold what is
+// really 443 rectangles of 70.
+inline constexpr int kMapCount = 2;
 inline constexpr int kChunkCount = kMapCount * kChunksPerMap;
 
 inline constexpr std::uint16_t kOverworld = 0;
+inline constexpr std::uint16_t kInterior = 1;
 
 // How many players can be logged in at once. This is a SESSION-SLOT count, not an account limit:
 // the account table is unbounded, and a slot is what an account is bound to when it logs in.
@@ -734,10 +740,53 @@ private:
     return Ring::kWasteland;
 }
 
+// --- Interiors -----------------------------------------------------------------------------------
+// A room on map `kInterior` is a rectangle of floor inside a one-tile wall, with a gap in the
+// bottom wall you walk out through. It is laid out by ARITHMETIC and nothing else — the geometry
+// below is the whole definition, there is no interior generator and no interior overlay — which is
+// what keeps the second map as cheap as the first is expensive: any node can evaluate any interior
+// tile from its coordinates, exactly like terrain.
+//
+// The room sprite is composed at pack time from the pack's own nine-slice (`compose_room` in
+// tools/build_atlas.py) and its interior is transparent, so what is drawn inside a room is the
+// ordinary terrain path over `kStone` — the interior masonry floor that reads as paving outdoors
+// and is exactly right in here.
+inline constexpr int kRoomPitch = 16;                          // one room per 16x16 tile block
+inline constexpr int kRoomsPerRow = kMapTiles / kRoomPitch;    // 64
+inline constexpr int kRoomX0 = 3;   // first FLOOR tile inside the block
+inline constexpr int kRoomY0 = 2;
+inline constexpr int kRoomW = 10;   // floor extent; the sprite is this + 2 in each axis
+inline constexpr int kRoomH = 7;
+inline constexpr int kRoomDoorX = kRoomX0 + kRoomW / 2 - 1;  // the gap in the bottom wall
+inline constexpr int kRoomDoorY = kRoomY0 + kRoomH;
+
+// Top-left tile of room `i`'s block.
+[[nodiscard]] inline constexpr int room_block_x(int i) noexcept { return (i % kRoomsPerRow) * kRoomPitch; }
+[[nodiscard]] inline constexpr int room_block_y(int i) noexcept { return (i / kRoomsPerRow) * kRoomPitch; }
+[[nodiscard]] inline constexpr int room_index_at(int gx, int gy) noexcept {
+    return (gy / kRoomPitch) * kRoomsPerRow + (gx / kRoomPitch);
+}
+
+// Where you stand when you come in: the floor tile directly above the doorway, so the first step
+// back down is the way out and nothing else is.
+[[nodiscard]] inline constexpr int room_entry_x(int i) noexcept { return room_block_x(i) + kRoomDoorX; }
+[[nodiscard]] inline constexpr int room_entry_y(int i) noexcept { return room_block_y(i) + kRoomDoorY - 1; }
+
+[[nodiscard]] inline constexpr Terrain interior_tile(int gx, int gy) noexcept {
+    const int lx = gx % kRoomPitch;
+    const int ly = gy % kRoomPitch;
+    if (lx == kRoomDoorX && ly == kRoomDoorY) return Terrain::kStone;  // the doorway
+    if (lx < kRoomX0 || lx >= kRoomX0 + kRoomW || ly < kRoomY0 || ly >= kRoomY0 + kRoomH) {
+        return Terrain::kBuilding;  // wall, and everything between one room and the next
+    }
+    return Terrain::kStone;
+}
+
 // The land itself, before anyone built on it. Pure noise, no neighbour lookups, no global state —
 // which is what lets world GENERATION call it while it is still deciding where the villages go.
 [[nodiscard]] inline Terrain terrain_base(std::uint64_t world_seed, std::uint16_t map, int gx,
                                           int gy) noexcept {
+    if (map == kInterior) return interior_tile(gx, gy);
     const std::uint64_t base = world_seed ^ (static_cast<std::uint64_t>(map) << 48);
     const auto x = static_cast<float>(gx);
     const auto y = static_cast<float>(gy);
@@ -830,11 +879,87 @@ inline void publish_overlay(const std::uint8_t* tiles) noexcept { detail::g_over
 // The world as it actually is: the land, plus whatever generation put on it.
 [[nodiscard]] inline Terrain terrain_of(std::uint64_t world_seed, std::uint16_t map, int gx,
                                         int gy) noexcept {
-    if (detail::g_overlay != nullptr && gx >= 0 && gy >= 0 && gx < kMapTiles && gy < kMapTiles) {
+    // The overlay is indexed by tile alone, so it belongs to ONE map. Interiors are pure arithmetic
+    // and have no overlay; without this guard every room would be stamped with whatever the
+    // overworld happens to have built at the same coordinates.
+    if (map == kOverworld && detail::g_overlay != nullptr && gx >= 0 && gy >= 0 && gx < kMapTiles &&
+        gy < kMapTiles) {
         const std::uint8_t o = detail::g_overlay[static_cast<std::size_t>(gy) * kMapTiles + gx];
         if (o != kNoOverlay) return static_cast<Terrain>(o);
     }
     return terrain_base(world_seed, map, gx, gy);
+}
+
+// --- Doors ---------------------------------------------------------------------------------------
+// A door is a pair of tiles on two different maps, and it is published exactly like the overlay is
+// and for the same three reasons: it is derived from the world seed alone so every node computes an
+// identical copy, it is written once before the engine starts and const afterwards, and `portal_at`
+// has to stay a free function callable for any tile — a player actor deciding whether the step it
+// just took was through a doorway cannot be made to hold a layout handle.
+//
+// It is a SORTED ARRAY, not a second million-tile map. There are ~440 doors; a binary search is
+// nine comparisons and the alternative is two megabytes to answer a question asked once per player
+// per movement message.
+struct Door {
+    std::uint32_t tile;   // (ty << 16) | tx, on the OVERWORLD — the doorway under the sprite
+    std::uint32_t room;   // room index on kInterior
+};
+
+[[nodiscard]] inline constexpr std::uint32_t tile_key(int tx, int ty) noexcept {
+    return (static_cast<std::uint32_t>(ty) << 16) | static_cast<std::uint32_t>(tx);
+}
+
+namespace detail {
+inline const Door* g_doors = nullptr;
+inline int g_door_count = 0;
+}  // namespace detail
+
+// Called once by worldgen, before the engine starts. `doors` must be sorted by `tile`.
+inline void publish_doors(const Door* doors, int count) noexcept {
+    detail::g_doors = doors;
+    detail::g_door_count = count;
+}
+
+[[nodiscard]] inline int door_count() noexcept { return detail::g_door_count; }
+
+// Where standing on (map, tx, ty) takes you, or `valid == false` for the overwhelming majority of
+// tiles that are not a doorway.
+struct Portal {
+    std::uint16_t map = 0;
+    std::uint16_t tx = 0;
+    std::uint16_t ty = 0;
+    bool valid = false;
+};
+
+[[nodiscard]] inline Portal portal_at(std::uint16_t map, int tx, int ty) noexcept {
+    if (detail::g_doors == nullptr) return {};
+    if (map == kOverworld) {
+        const std::uint32_t key = tile_key(tx, ty);
+        int lo = 0;
+        int hi = detail::g_door_count - 1;
+        while (lo <= hi) {
+            const int mid = (lo + hi) / 2;
+            const std::uint32_t k = detail::g_doors[mid].tile;
+            if (k == key) {
+                const auto r = static_cast<int>(detail::g_doors[mid].room);
+                return {kInterior, static_cast<std::uint16_t>(room_entry_x(r)),
+                        static_cast<std::uint16_t>(room_entry_y(r)), true};
+            }
+            if (k < key) lo = mid + 1;
+            else hi = mid - 1;
+        }
+        return {};
+    }
+    // Leaving. Only the doorway tile of a room that actually belongs to a door leads anywhere —
+    // the other 3600-odd rooms in the grid exist as arithmetic and have nothing on the other side.
+    if (tx % kRoomPitch != kRoomDoorX || ty % kRoomPitch != kRoomDoorY) return {};
+    const int r = room_index_at(tx, ty);
+    if (r < 0 || r >= detail::g_door_count) return {};
+    // Out onto the DOORSTEP, the paved tile below the door, not the doorway itself. Landing back on
+    // the door would put the player on a portal tile the instant they left through it.
+    const std::uint32_t t = detail::g_doors[r].tile;
+    return {kOverworld, static_cast<std::uint16_t>(t & 0xFFFFu),
+            static_cast<std::uint16_t>((t >> 16) + 1), true};
 }
 
 // Which of four mirror orientations to draw a base terrain tile in. A single 16x16 grass tile

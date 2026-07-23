@@ -255,6 +255,19 @@ struct SetMounted {
     bool mounted = false;
 };
 
+// Put the player somewhere, ignoring everything in the way.
+//
+// This is NOT a movement message and must not be reachable from input. `MoveIntent` is checked
+// against terrain a step at a time, which is exactly what stops a player walking through a
+// palisade — and exactly what stops a debug flag or a respawn from crossing the map in one hop,
+// since a single move of two hundred tiles is tested against the tile it lands on and nothing in
+// between. Two different verbs because they are two different things.
+struct Teleport {
+    std::uint16_t map = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
 // --- Director messages ---------------------------------------------------------------------------
 
 struct DirectorTick {

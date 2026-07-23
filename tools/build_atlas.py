@@ -42,6 +42,7 @@ SHEETS = {
     "NDesert": (SRC / "ninja/Backgrounds/Tilesets/TilesetDesert.png", 16),
     "NRelief": (SRC / "ninja/Backgrounds/Tilesets/TilesetRelief.png", 16),
     "NIntFloor": (SRC / "ninja/Backgrounds/Tilesets/Interior/TilesetInteriorFloor.png", 16),
+    "NIntWall": (SRC / "ninja/Backgrounds/Tilesets/Interior/TilesetInterior.png", 16),
     "NTree": (SRC / "ninja/Backgrounds/Tilesets/TilesetNature.png", 16),
     # Whole buildings. Every rectangle taken out of these was looked at first, magnified, with a
     # tile grid over it — see tools/verify_structures.py and the note above BIG_MANIFEST.
@@ -149,6 +150,49 @@ MANIFEST = [
     # NOTE: creatures and the player are NOT here — they are animation sheets, see ANIM_MANIFEST.
 ]
 
+# --- The interior room -------------------------------------------------------
+# `TilesetInteriorWall.tres` is `tile_mode = 2` — an ATLAS, not an autotile. The author places its
+# pieces by hand, so unlike the four floor sets there is no mask table to read out of the zip. What
+# there is, is his own `World/Maps/Interior.tscn`, and rebuilding it (tools/_study/godot/) shows
+# exactly which cell of the block he uses for each edge and corner. Those eight coordinates are
+# below; `(1,9)` as the bottom-left was the only one that had to be confirmed by eye.
+#
+# The room is composed as ONE sprite rather than laid tile by tile, because it is always the same
+# rectangle: there is nothing for an autotiler to decide. Its interior is left TRANSPARENT so the
+# floor underneath is drawn by the ordinary terrain path, variants, mirroring and all — a 10x7 field
+# of one repeated tile baked into a sprite is a visible lattice.
+ROOM_W, ROOM_H = 12, 9   # must match kRoomW/kRoomH + 2 in world/tiles.hpp
+ROOM_DOOR_X = 5          # the gap in the bottom wall, in sprite columns
+
+ROOM_NINE = {
+    "tl": (1, 0), "t": (5, 0), "tr": (6, 0),
+    "l":  (1, 3),               "r":  (6, 3),
+    "bl": (1, 9), "b": (5, 9), "br": (6, 9),
+}
+
+
+def compose_room(sheet):
+    room = Image.new("RGBA", (ROOM_W * TILE, ROOM_H * TILE), (0, 0, 0, 0))
+    for y in range(ROOM_H):
+        for x in range(ROOM_W):
+            if y == 0:
+                key = "tl" if x == 0 else ("tr" if x == ROOM_W - 1 else "t")
+            elif y == ROOM_H - 1:
+                key = "bl" if x == 0 else ("br" if x == ROOM_W - 1 else "b")
+            elif x == 0:
+                key = "l"
+            elif x == ROOM_W - 1:
+                key = "r"
+            else:
+                continue  # the floor shows through
+            if y == ROOM_H - 1 and x == ROOM_DOOR_X:
+                continue  # the doorway
+            c, r = ROOM_NINE[key]
+            room.paste(sheet.crop((c * TILE, r * TILE, (c + 1) * TILE, (r + 1) * TILE)),
+                       (x * TILE, y * TILE))
+    return room
+
+
 # --- Multi-tile sprites ------------------------------------------------------
 # Ninja Adventure's trees are 2 tiles WIDE and 3 TALL. Slicing a single 16x16 out of one is exactly
 # the "cut with the wrong margin" artefact it looks like: you get the left half of a canopy sitting
@@ -173,6 +217,11 @@ BIG_MANIFEST = [
     # NTree 4 2 4 3` reports 0% on all four borders; the old rectangle reports 58%.
     ("TreeBroad", "NTree", 4, 2, 4, 3),
     ("TreePine",  "NTree", 0, 2, 4, 3),
+    # The one entry here that is COMPOSED rather than cropped. It has to be: an interior room is a
+    # nine-slice, and this pack ships the nine slices without shipping a room. `compose_room` below
+    # assembles one. It sits before the structures because `StructureKind` order starts at
+    # `HouseOrange` and a static_assert in the renderer counts from there.
+    ("Room", None, 0, 0, ROOM_W, ROOM_H),
     # --- StructureKind order starts here ---
     ("HouseOrange", "NHouse",  0,  0, 4, 3),
     ("HouseCream",  "NHouse",  4,  0, 4, 3),
@@ -698,8 +747,12 @@ def main() -> int:
     # --- multi-tile sprites, stacked below the animations ------------------------------------
     bigs = []
     for name, key_sheet, col, row, wt, ht in BIG_MANIFEST:
-        sheet, stride = sheets[key_sheet]
-        region = sheet.crop((col * stride, row * stride, (col + wt) * stride, (row + ht) * stride))
+        if key_sheet is None:
+            region = compose_room(sheets["NIntWall"][0])
+        else:
+            sheet, stride = sheets[key_sheet]
+            region = sheet.crop((col * stride, row * stride,
+                                 (col + wt) * stride, (row + ht) * stride))
         bw, bh = wt * TILE, ht * TILE
         block = Image.new("RGBA", (bw + 2 * PAD, bh + 2 * PAD), (0, 0, 0, 0))
         block.paste(region, (PAD, PAD))

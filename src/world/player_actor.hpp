@@ -53,8 +53,8 @@ using Trusted = HasFlag<"trusted">;
 struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priority<0>,
                                   quark::Placement<quark::HashById, Require<Trusted>>> {
     using protocol =
-        Protocol<Tick, MoveIntent, GrantItems, HurtPlayer, GrantVitals, GrantXp, SetRespawn,
-                 BindAccount, SetMounted, Ask<SpendItems, bool>, Ask<GetPlayer, PlayerView>,
+        Protocol<Tick, MoveIntent, Teleport, GrantItems, HurtPlayer, GrantVitals, GrantXp,
+                 SetRespawn, BindAccount, SetMounted, Ask<SpendItems, bool>, Ask<GetPlayer, PlayerView>,
                  Ask<PlanAttack, AttackPlan>>;
 
     // Set once at bring-up, before the engine starts.
@@ -110,17 +110,43 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
     }
 
     void handle(const MoveIntent& m) noexcept {
-        // Movement is clamped to the map, not validated against terrain here: terrain is chunk-owned
-        // state and this actor deliberately holds none of it. A tier-A actor that had to read the
-        // world every step would be a bottleneck; instead the chunk rejects illegal *effects*
-        // (planting on water, building on water), which is the property that actually matters.
+        // This used to clamp to the map and nothing else, on the argument that terrain is
+        // chunk-owned state and a tier-A actor should hold none of it. The argument was about
+        // CHUNK state and it still holds — but `terrain_of` is not chunk state. It is a free
+        // function over the seed and the published overlay, the same one the flow field calls
+        // thousands of times per rebuild, and it costs a hash and a branch.
+        //
+        // What changed is that something now depends on the answer. A palisade the player walks
+        // straight through is a painting of a palisade, and a doorway is only a doorway if the wall
+        // beside it is not one. So the player is stopped here, where the authority is.
+        //
+        // The axes are resolved SEPARATELY, which is the difference between sliding along a wall
+        // and sticking to it. Testing the diagonal as one move means a player walking into a wall
+        // at any angle stops dead rather than sliding along it, and with a village made of
+        // rectangles that is most of the time.
         if (account_ == 0 || dead_ticks_ > 0) return;
-        x_ = std::clamp(x_ + m.dx, 0.0f, static_cast<float>(kMapTiles) - 1.0f);
-        y_ = std::clamp(y_ + m.dy, 0.0f, static_cast<float>(kMapTiles) - 1.0f);
+        const float nx = std::clamp(x_ + m.dx, 0.0f, static_cast<float>(kMapTiles) - 1.0f);
+        const float ny = std::clamp(y_ + m.dy, 0.0f, static_cast<float>(kMapTiles) - 1.0f);
+        if (passable(nx, y_)) x_ = nx;
+        if (passable(x_, ny)) y_ = ny;
         if (m.dx != 0.0f || m.dy != 0.0f) {
             facing_ = facing_of(m.dx, m.dy);
             ++steps_;  // drives the walk animation; the renderer never sees raw positions over time
         }
+        step_through_doors();
+        publish();
+    }
+
+    // Somewhere else, right now. The door check still runs — arriving on a doorway by teleport is
+    // the same arrival as walking onto one — but `last_tile_` is stamped first when the caller has
+    // already decided the destination map, so a teleport into a room does not bounce straight back
+    // out of it.
+    void handle(const Teleport& t) noexcept {
+        if (account_ == 0) return;
+        map = t.map;
+        x_ = std::clamp(t.x, 0.0f, static_cast<float>(kMapTiles) - 1.0f);
+        y_ = std::clamp(t.y, 0.0f, static_cast<float>(kMapTiles) - 1.0f);
+        step_through_doors();
         publish();
     }
 
@@ -271,6 +297,36 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
     void publish_now() noexcept { publish(); }
 
 private:
+    // May the player's CENTRE stand on this point? One tile, not a box: the sprite is a tile wide,
+    // and a box test with the same footprint cannot pass through a one-tile doorway without either
+    // a smaller box (which then clips walls) or a special case for doors (which is the same bug
+    // written twice).
+    [[nodiscard]] bool passable(float px, float py) const noexcept {
+        return is_walkable(terrain_of(kWorldSeed, map, static_cast<int>(px), static_cast<int>(py)));
+    }
+
+    // Doors. Fired on ARRIVAL — the tile has to change — for a reason that has nothing to do with
+    // efficiency: a portal that fires while you are standing on it sends you through, and the tile
+    // you land on is a portal back, so you flicker between two maps at ten hertz forever. Coming
+    // out onto the doorstep rather than onto the doorway already breaks that loop, and this is the
+    // belt to its braces.
+    void step_through_doors() noexcept {
+        const auto tx = static_cast<int>(x_);
+        const auto ty = static_cast<int>(y_);
+        const std::uint32_t here = tile_key(tx, ty);
+        if (here == last_tile_) return;
+        last_tile_ = here;
+        const Portal p = portal_at(map, tx, ty);
+        if (!p.valid) return;
+        map = p.map;
+        x_ = static_cast<float>(p.tx) + 0.5f;
+        y_ = static_cast<float>(p.ty) + 0.5f;
+        last_tile_ = tile_key(p.tx, p.ty);
+        // Facing is set deliberately rather than left alone: you walk INTO a door going up and out
+        // of one going down, so the sprite would otherwise arrive with its back to the room.
+        facing_ = (p.map == kInterior) ? Facing::kUp : Facing::kDown;
+    }
+
     [[nodiscard]] std::uint16_t total_levels() const noexcept {
         std::uint16_t n = 0;
         for (int i = 0; i < kSkillCount; ++i) n = static_cast<std::uint16_t>(n + level_[i]);
@@ -314,6 +370,7 @@ private:
     std::int16_t stamina_ = kPlayerMaxStamina;
     Facing facing_ = Facing::kDown;
     std::uint32_t steps_ = 0;
+    std::uint32_t last_tile_ = 0xFFFF'FFFFu;  // the tile a door was last tested against
     std::uint16_t dead_ticks_ = 0;
     std::uint32_t deaths_ = 0;
     bool mounted_ = false;
