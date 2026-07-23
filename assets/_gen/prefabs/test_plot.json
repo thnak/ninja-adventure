@@ -1,0 +1,92 @@
+{
+  "name": "test_plot",
+  "size": [
+    3,
+    2
+  ],
+  "layers": [
+    {
+      "name": "Ground",
+      "cells": [
+        {
+          "x": 0,
+          "y": 0,
+          "sheet": "GodotProject/World/Backgrounds/TilesetFloor.png",
+          "sx": 0,
+          "sy": 192,
+          "w": 16,
+          "h": 16,
+          "flip_h": false,
+          "flip_v": false,
+          "transpose": false,
+          "origin": 0
+        },
+        {
+          "x": 1,
+          "y": 0,
+          "sheet": "GodotProject/World/Backgrounds/TilesetFloor.png",
+          "sx": 0,
+          "sy": 192,
+          "w": 16,
+          "h": 16,
+          "flip_h": false,
+          "flip_v": false,
+          "transpose": false,
+          "origin": 0
+        },
+        {
+          "x": 2,
+          "y": 0,
+          "sheet": "GodotProject/World/Backgrounds/TilesetFloor.png",
+          "sx": 0,
+          "sy": 192,
+          "w": 16,
+          "h": 16,
+          "flip_h": false,
+          "flip_v": false,
+          "transpose": false,
+          "origin": 0
+        }
+      ]
+    }
+  ],
+  "tiles": [
+    {
+      "sheet": "GodotProject/World/Backgrounds/TilesetFloor.png",
+      "sx": 0,
+      "sy": 192,
+      "w": 16,
+      "h": 16
+    }
+  ],
+  "spawn_cells": [
+    [
+      0,
+      1
+    ]
+  ],
+  "motiles": [
+    {
+      "name": "smoke",
+      "kind": "anim",
+      "period_ms": 700,
+      "sheet": "FX/Smoke/Smoke/SpriteSheet.png",
+      "sx0": 0,
+      "sy0": 0,
+      "stride": 32,
+      "pw": 32,
+      "ph": 32,
+      "frames": 6,
+      "dx": 8,
+      "dy": -8
+    }
+  ],
+  "meta": {
+    "front": {
+      "Author": "author-kit test fixture",
+      "Ring": "any",
+      "Provenance": "hand-authored under tools/testdata/ to round-trip the --scene importer"
+    },
+    "prose": "This plot exists only to prove the author kit end to end: a drawable Ground layer on the pack's\nTilesetFloor, a `Mark:Spawn` semantic layer marking one cell as a spawn anchor, and an `Anim:smoke`\nmotile that the renderer animates closed-form from the world clock. If codegen ever stops emitting\n`spawn_cells` or the motile table for this prefab, the author kit has regressed."
+  }
+}

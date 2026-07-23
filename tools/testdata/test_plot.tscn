@@ -1,0 +1,36 @@
+[gd_scene load_steps=4 format=2]
+
+; A tiny hand-authored scene used to round-trip the author kit (see docs/AUTHORING.md and the
+; gate-6 check in the author-kit task). It is built on the pack's own TilesetFloor texture, paints a
+; Mark:Spawn semantic layer, and carries an Anim:smoke motile so the importer emits spawn_cells AND
+; a motile table. Kept in the tree on purpose: it is the regression fixture for `--scene`.
+
+[ext_resource path="res://World/Backgrounds/TilesetFloor.png" type="Texture" id=1]
+[ext_resource path="res://FX/Smoke/Smoke/SpriteSheet.png" type="Texture" id=2]
+
+[sub_resource type="TileSet" id=1]
+0/name = "grass"
+0/texture = ExtResource( 1 )
+0/tex_offset = Vector2( 0, 0 )
+0/region = Rect2( 0, 192, 16, 16 )
+0/tile_mode = 0
+
+[node name="TestPlot" type="Node2D"]
+
+[node name="Ground" type="TileMap" parent="."]
+tile_set = SubResource( 1 )
+cell_size = Vector2( 16, 16 )
+format = 1
+tile_data = PoolIntArray( 0, 0, 0, 1, 0, 0, 2, 0, 0 )
+
+[node name="Mark:Spawn" type="TileMap" parent="."]
+tile_set = SubResource( 1 )
+cell_size = Vector2( 16, 16 )
+format = 1
+tile_data = PoolIntArray( 65536, 0, 0 )
+
+[node name="Anim:smoke@700" type="Sprite" parent="."]
+position = Vector2( 24, 8 )
+texture = ExtResource( 2 )
+hframes = 6
+vframes = 1

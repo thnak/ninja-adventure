@@ -720,6 +720,41 @@ struct RaylibBridge::Impl {
         DrawTexturePro(atlas, src, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
     }
 
+    // One animated overlay of a placed prefab (chimney smoke, a windmill fan), drawn CLOSED-FORM from
+    // the world clock — the same discipline as the ability-zone particles below: no stored animation
+    // state, so two clients at the same world_ms draw the identical frame and a screenshot is
+    // reproducible. `anim` cycles frame = world_ms / period % frames; `spin` rotates frame 0 by the
+    // angle world_ms has swept through one period. The mirror is resolved into the position exactly
+    // as prefab_quad does for a cell, so a flipped parcel's chimney flips with it.
+    void motile(const PrefabDef& def, const PlacedPrefab& pp, const PrefabMotile& m, bool mir,
+                std::int64_t world_ms) const {
+        if (!atlas_ok) return;
+        const int scale = kTilePx / kAtlasTile;  // 2
+        const int local_x = mir ? (def.w * kAtlasTile - m.dx - m.pw) : m.dx;
+        const float wx = static_cast<float>(pp.tx * kTilePx + local_x * scale);
+        const float wy = static_cast<float>(pp.ty * kTilePx + m.dy * scale);
+        const float w = static_cast<float>(m.pw * scale);
+        const float h = static_cast<float>(m.ph * scale);
+        const float pw = static_cast<float>(m.pw);
+        if (m.kind == kMotileSpin) {
+            const float ang = m.period_ms > 0
+                                  ? 360.0f * (static_cast<float>(world_ms % m.period_ms) /
+                                              static_cast<float>(m.period_ms))
+                                  : 0.0f;
+            const Rectangle src{static_cast<float>(m.ax), static_cast<float>(m.ay),
+                                mir ? -pw : pw, static_cast<float>(m.ph)};
+            const Rectangle dst{wx + w * 0.5f, wy + h * 0.5f, w, h};
+            DrawTexturePro(atlas, src, dst, Vector2{w * 0.5f, h * 0.5f}, ang, WHITE);
+            return;
+        }
+        const int frame = (m.frames > 0 && m.period_ms > 0)
+                              ? static_cast<int>((world_ms / m.period_ms) % m.frames)
+                              : 0;
+        const Rectangle src{static_cast<float>(m.ax + frame * (m.pw + 2)), static_cast<float>(m.ay),
+                            mir ? -pw : pw, static_cast<float>(m.ph)};
+        DrawTexturePro(atlas, src, Rectangle{wx, wy, w, h}, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+    }
+
     // One ground tile: this tile's own terrain, blob-masked against its eight neighbours.
     //
     // The tile the simulation reports decides the common case — a tile of grass surrounded by grass
@@ -1479,6 +1514,25 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
     std::stable_sort(im.frame_sprites.begin(), im.frame_sprites.end(),
                      [](const Sprite& a, const Sprite& b) { return a.sort < b.sort; });
     for (const Sprite& sp : im.frame_sprites) im.draw_sprite(sp, local_slot);
+
+    // --- Prefab motiles: chimney smoke over the rooftops, a windmill fan turning ------------------
+    // Over the sorted pass because these ride ABOVE their prefab (smoke rises off a roof, a fan sits
+    // on a tower) — never something an actor walks in front of — and, like the ability-zone haze
+    // below, each is a closed-form function of the world clock, so nothing here touches the
+    // simulation. The visible-prefab set was gathered once above into im.frame_prefabs.
+    if (im.layout != nullptr && player.map == kOverworld && im.atlas_ok) {
+        const std::int64_t wms = status.world_ms.load(std::memory_order_relaxed);
+        const auto& all = im.layout->prefabs();
+        for (const std::uint32_t idx : im.frame_prefabs) {
+            const PlacedPrefab& pp = all[idx];
+            const PrefabDef& def = kPrefabs[static_cast<int>(pp.id)];
+            if (def.motile_count == 0) continue;
+            const bool mir = prefab_mirrored(def, pp.variant);
+            for (std::uint8_t mi = 0; mi < def.motile_count; ++mi) {
+                im.motile(def, pp, def.motiles[mi], mir, wms);
+            }
+        }
+    }
 
     // --- Cursor ---------------------------------------------------------------------------------
     // Over the sorted pass, not inside it. The ghost building and the aim ring are UI drawn in world

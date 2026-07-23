@@ -126,6 +126,11 @@ inline constexpr int kPrefabDoorDx = 1;
 [[nodiscard]] inline constexpr bool prefab_group_kept(const PrefabDef& def, std::uint32_t variant,
                                                       int group) noexcept {
     if (group <= 0 || group > static_cast<int>(def.group_count)) return true;
+    // A cluster a `Mark:KeepGroup` layer pinned never rolls the drop — its bit in keep_groups wins
+    // over the variant, for the same reason allow_group_drop=false does: some arrangements only read
+    // right whole (see prefab_force_groups). Pure function of (def, variant), so the sim's blocking
+    // and the renderer's picture still agree.
+    if ((def.keep_groups >> static_cast<unsigned>(group)) & 1u) return true;
     return ((variant >> (2 + group)) & 3u) != 0u;
 }
 

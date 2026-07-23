@@ -12,7 +12,7 @@
 
 namespace mmo {
 
-enum class PrefabId : std::uint8_t { kCampClearing, kForestCottage, kFortCourtyard, kFortGate, kLakeIslands, kMarketYard, kNorthTreelineWell, kSnowPond, kSouthOrchard, kStairsPlaza, kStreetHouses, kWaterfallBridge, kCount };
+enum class PrefabId : std::uint8_t { kCampClearing, kForestCottage, kFortCourtyard, kFortGate, kLakeIslands, kMarketYard, kNorthTreelineWell, kSnowPond, kSouthOrchard, kStairsPlaza, kStreetHouses, kTestPlot, kWaterfallBridge, kCount };
 
 // One drawn sprite inside a prefab. Layers: 0=floor overlay, 1=floor detail, 2=structure
 // (blocks, y-sorts with actors), 3=prop (does not block, y-sorts with actors).
@@ -49,6 +49,31 @@ struct PrefabSkin {
     std::uint16_t cell_count;
 };
 
+// --- The author kit (see docs/AUTHORING.md) ------------------------------------------
+// A MOTILE is an animated overlay the renderer draws CLOSED-FORM from the world clock, with no
+// stored state -- so every client sees the same frame at the same instant, exactly like the
+// ability-zone particles. `anim` cycles frame = world_ms / period_ms % frames; `spin` rotates
+// frame 0 by an angle world_ms sweeps through period_ms. dx/dy is the frame-0 top-left in the
+// prefab's own 16px pixel space; ax/ay is frame 0 in atlas.png and frame k sits at ax +
+// k*(pw+2). Chimney smoke on every dwelling is the shipped example.
+struct PrefabMotile {
+    std::int16_t dx, dy;        // frame-0 top-left, prefab pixels (atlas resolution)
+    std::int16_t ax, ay;        // frame 0 in atlas.png; frame k at ax + k*(pw+2)
+    std::uint8_t pw, ph;        // frame pixel size
+    std::uint8_t frames;        // frames in the strip
+    std::uint16_t period_ms;    // anim: one full cycle; spin: one full rotation
+    std::uint8_t kind;          // 0 = anim (frame cycle), 1 = spin (rotate frame 0)
+};
+
+enum : std::uint8_t { kMotileAnim = 0, kMotileSpin = 1 };
+
+// A semantic cell painted on a `Mark:Spawn` or `Mark:Boss` layer, in prefab-local tiles.
+struct PrefabPoint { std::uint8_t dx, dy; };
+
+// A named rectangle painted on a `Mark:Zone[:label]` layer (prefab-local tiles). Stored for
+// future gameplay use; the kit emits it so the data survives the import.
+struct PrefabZone { const char* name; std::uint8_t x, y, w, h; };
+
 struct PrefabDef {
     const char* name;
     std::uint8_t w, h;                  // footprint in tiles
@@ -59,6 +84,16 @@ struct PrefabDef {
     bool mirrorable;                    // safe to stamp flipped (no readable glyphs baked in)
     const PrefabSkin* skins;            // skin_count entries; skins[0].cells == cells
     std::uint8_t skin_count;            // 1 for an unskinned parcel; >1 = base + palette twins
+    // --- author-kit additions (all default-empty for the hand-cut parcels) ---
+    std::uint32_t keep_groups;          // bit g set = optional cluster g never drops (Mark:KeepGroup)
+    const PrefabMotile* motiles;        // animated overlays; motile_count entries
+    std::uint8_t motile_count;
+    const PrefabPoint* spawns;          // Mark:Spawn anchor cells; spawn_count entries
+    std::uint8_t spawn_count;
+    const PrefabPoint* bosses;          // Mark:Boss anchor cells; boss_count entries
+    std::uint8_t boss_count;
+    const PrefabZone* zones;            // Mark:Zone rects; zone_count entries
+    std::uint8_t zone_count;
 };
 
 inline constexpr PrefabCell kPrefabCells_CampClearing[] = {
@@ -1269,6 +1304,9 @@ inline constexpr PrefabCell kPrefabCells_ForestCottage_snow[] = {
 };
 inline constexpr PrefabSkin kPrefabSkins_ForestCottage[] = {{kPrefabCells_ForestCottage, 231}, {kPrefabCells_ForestCottage_autumn, 231}, {kPrefabCells_ForestCottage_snow, 227}};
 inline constexpr std::uint32_t kPrefabBlocks_ForestCottage[] = {0x00000000u, 0x0001e000u, 0x0001e000u, 0x0001e000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u};
+inline constexpr PrefabMotile kPrefabMotiles_ForestCottage[] = {
+    {232, 0, 1, 6796, 32, 32, 6, 900, 0},  // chimney
+};
 
 inline constexpr PrefabCell kPrefabCells_FortCourtyard[] = {
     {1, 0, 0, 0, 1, 3288, 16, 16, false, false, false},
@@ -2196,6 +2234,11 @@ inline constexpr PrefabCell kPrefabCells_MarketYard[] = {
 };
 inline constexpr PrefabSkin kPrefabSkins_MarketYard[] = {{kPrefabCells_MarketYard, 108}};
 inline constexpr std::uint32_t kPrefabBlocks_MarketYard[] = {0x00000000u, 0x0000ff3cu, 0x0000ff3cu, 0x0000ff3cu, 0x00000000u, 0x00000000u};
+inline constexpr PrefabMotile kPrefabMotiles_MarketYard[] = {
+    {56, 0, 1, 6796, 32, 32, 6, 900, 0},  // chimney
+    {152, 0, 1, 6796, 32, 32, 6, 900, 0},  // chimney
+    {216, 0, 1, 6796, 32, 32, 6, 900, 0},  // chimney
+};
 
 inline constexpr PrefabCell kPrefabCells_NorthTreelineWell[] = {
     {0, 4, 0, 0, 19, 3342, 16, 16, false, false, false},
@@ -3162,6 +3205,26 @@ inline constexpr PrefabCell kPrefabCells_StreetHouses[] = {
 };
 inline constexpr PrefabSkin kPrefabSkins_StreetHouses[] = {{kPrefabCells_StreetHouses, 209}};
 inline constexpr std::uint32_t kPrefabBlocks_StreetHouses[] = {0x00001ffeu, 0x00001ffeu, 0x00001ffeu, 0x00000000u, 0x0007879eu, 0x0007879eu, 0x0007879eu, 0x00000000u, 0x00000000u};
+inline constexpr PrefabMotile kPrefabMotiles_StreetHouses[] = {
+    {40, -16, 1, 6796, 32, 32, 6, 900, 0},  // chimney
+    {104, -16, 1, 6796, 32, 32, 6, 900, 0},  // chimney
+    {168, -16, 1, 6796, 32, 32, 6, 900, 0},  // chimney
+    {40, 48, 1, 6796, 32, 32, 6, 900, 0},  // chimney
+    {136, 48, 1, 6796, 32, 32, 6, 900, 0},  // chimney
+    {264, 48, 1, 6796, 32, 32, 6, 900, 0},  // chimney
+};
+
+inline constexpr PrefabCell kPrefabCells_TestPlot[] = {
+    {0, 0, 0, 0, 1, 3054, 16, 16, false, false, false},
+    {1, 0, 0, 0, 1, 3054, 16, 16, false, false, false},
+    {2, 0, 0, 0, 1, 3054, 16, 16, false, false, false},
+};
+inline constexpr PrefabSkin kPrefabSkins_TestPlot[] = {{kPrefabCells_TestPlot, 3}};
+inline constexpr std::uint32_t kPrefabBlocks_TestPlot[] = {0x00000000u, 0x00000000u};
+inline constexpr PrefabMotile kPrefabMotiles_TestPlot[] = {
+    {8, -8, 1, 6796, 32, 32, 6, 700, 0},  // smoke
+};
+inline constexpr PrefabPoint kPrefabSpawns_TestPlot[] = {{0, 1}};
 
 inline constexpr PrefabCell kPrefabCells_WaterfallBridge[] = {
     {0, 0, 0, 0, 55, 3342, 16, 16, false, false, false},
@@ -3269,18 +3332,27 @@ inline constexpr PrefabSkin kPrefabSkins_WaterfallBridge[] = {{kPrefabCells_Wate
 inline constexpr std::uint32_t kPrefabBlocks_WaterfallBridge[] = {0x00000000u, 0x00000030u, 0x00000030u, 0x00000010u, 0x00000010u, 0x00000010u, 0x00000010u, 0x00000010u, 0x00000010u, 0x00000010u, 0x00000010u, 0x00000010u, 0x00000010u, 0x00000038u, 0x0000003fu};
 
 inline constexpr PrefabDef kPrefabs[static_cast<int>(PrefabId::kCount)] = {
-    {"camp_clearing", 16, 10, kPrefabCells_CampClearing, 169, kPrefabBlocks_CampClearing, 0, true, kPrefabSkins_CampClearing, 3},
-    {"forest_cottage", 22, 10, kPrefabCells_ForestCottage, 231, kPrefabBlocks_ForestCottage, 4, true, kPrefabSkins_ForestCottage, 3},
-    {"fort_courtyard", 20, 16, kPrefabCells_FortCourtyard, 314, kPrefabBlocks_FortCourtyard, 9, true, kPrefabSkins_FortCourtyard, 1},
-    {"fort_gate", 17, 12, kPrefabCells_FortGate, 225, kPrefabBlocks_FortGate, 4, true, kPrefabSkins_FortGate, 1},
-    {"lake_islands", 22, 12, kPrefabCells_LakeIslands, 260, kPrefabBlocks_LakeIslands, 3, true, kPrefabSkins_LakeIslands, 1},
-    {"market_yard", 16, 6, kPrefabCells_MarketYard, 108, kPrefabBlocks_MarketYard, 2, true, kPrefabSkins_MarketYard, 1},
-    {"north_treeline_well", 17, 6, kPrefabCells_NorthTreelineWell, 44, kPrefabBlocks_NorthTreelineWell, 2, true, kPrefabSkins_NorthTreelineWell, 1},
-    {"snow_pond", 22, 12, kPrefabCells_SnowPond, 369, kPrefabBlocks_SnowPond, 2, true, kPrefabSkins_SnowPond, 1},
-    {"south_orchard", 18, 6, kPrefabCells_SouthOrchard, 107, kPrefabBlocks_SouthOrchard, 1, true, kPrefabSkins_SouthOrchard, 1},
-    {"stairs_plaza", 17, 9, kPrefabCells_StairsPlaza, 212, kPrefabBlocks_StairsPlaza, 1, true, kPrefabSkins_StairsPlaza, 1},
-    {"street_houses", 19, 9, kPrefabCells_StreetHouses, 209, kPrefabBlocks_StreetHouses, 4, false, kPrefabSkins_StreetHouses, 1},
-    {"waterfall_bridge", 6, 15, kPrefabCells_WaterfallBridge, 100, kPrefabBlocks_WaterfallBridge, 2, true, kPrefabSkins_WaterfallBridge, 1},
+    {"camp_clearing", 16, 10, kPrefabCells_CampClearing, 169, kPrefabBlocks_CampClearing, 0, true, kPrefabSkins_CampClearing, 3, 0x0u, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0},
+    {"forest_cottage", 22, 10, kPrefabCells_ForestCottage, 231, kPrefabBlocks_ForestCottage, 4, true, kPrefabSkins_ForestCottage, 3, 0x0u, kPrefabMotiles_ForestCottage, 1, nullptr, 0, nullptr, 0, nullptr, 0},
+    {"fort_courtyard", 20, 16, kPrefabCells_FortCourtyard, 314, kPrefabBlocks_FortCourtyard, 9, true, kPrefabSkins_FortCourtyard, 1, 0x0u, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0},
+    {"fort_gate", 17, 12, kPrefabCells_FortGate, 225, kPrefabBlocks_FortGate, 4, true, kPrefabSkins_FortGate, 1, 0x0u, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0},
+    {"lake_islands", 22, 12, kPrefabCells_LakeIslands, 260, kPrefabBlocks_LakeIslands, 3, true, kPrefabSkins_LakeIslands, 1, 0x0u, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0},
+    {"market_yard", 16, 6, kPrefabCells_MarketYard, 108, kPrefabBlocks_MarketYard, 2, true, kPrefabSkins_MarketYard, 1, 0x0u, kPrefabMotiles_MarketYard, 3, nullptr, 0, nullptr, 0, nullptr, 0},
+    {"north_treeline_well", 17, 6, kPrefabCells_NorthTreelineWell, 44, kPrefabBlocks_NorthTreelineWell, 2, true, kPrefabSkins_NorthTreelineWell, 1, 0x0u, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0},
+    {"snow_pond", 22, 12, kPrefabCells_SnowPond, 369, kPrefabBlocks_SnowPond, 2, true, kPrefabSkins_SnowPond, 1, 0x0u, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0},
+    {"south_orchard", 18, 6, kPrefabCells_SouthOrchard, 107, kPrefabBlocks_SouthOrchard, 1, true, kPrefabSkins_SouthOrchard, 1, 0x0u, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0},
+    {"stairs_plaza", 17, 9, kPrefabCells_StairsPlaza, 212, kPrefabBlocks_StairsPlaza, 1, true, kPrefabSkins_StairsPlaza, 1, 0x0u, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0},
+    {"street_houses", 19, 9, kPrefabCells_StreetHouses, 209, kPrefabBlocks_StreetHouses, 4, false, kPrefabSkins_StreetHouses, 1, 0x0u, kPrefabMotiles_StreetHouses, 6, nullptr, 0, nullptr, 0, nullptr, 0},
+    // --- test_plot ---
+    // Author: author-kit test fixture
+    // Ring: any
+    // Provenance: hand-authored under tools/testdata/ to round-trip the --scene importer
+    // This plot exists only to prove the author kit end to end: a drawable Ground layer on the pack's
+    // TilesetFloor, a `Mark:Spawn` semantic layer marking one cell as a spawn anchor, and an `Anim:smoke`
+    // motile that the renderer animates closed-form from the world clock. If codegen ever stops emitting
+    // `spawn_cells` or the motile table for this prefab, the author kit has regressed.
+    {"test_plot", 3, 2, kPrefabCells_TestPlot, 3, kPrefabBlocks_TestPlot, 0, true, kPrefabSkins_TestPlot, 1, 0x0u, kPrefabMotiles_TestPlot, 1, kPrefabSpawns_TestPlot, 1, nullptr, 0, nullptr, 0},
+    {"waterfall_bridge", 6, 15, kPrefabCells_WaterfallBridge, 100, kPrefabBlocks_WaterfallBridge, 2, true, kPrefabSkins_WaterfallBridge, 1, 0x0u, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0},
 };
 
 }  // namespace mmo

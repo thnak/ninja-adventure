@@ -847,6 +847,27 @@ def _prefab_camel(stem: str) -> str:
 PREFAB_LAYER = {"Floor": 0, "Snow": 1, "FloorDetail": 1, "House": 2, "Element": 3}
 
 
+def prefab_layer_index(name: str) -> int:
+    """Godot layer name -> prefabs.hpp layer index, tolerant of author-chosen names.
+
+    The pack's own six layers hit the exact table above. A user-authored scene may name its layers
+    anything, so an unknown name is classified by keyword (documented in docs/AUTHORING.md): a
+    structure that BLOCKS if it reads as a wall/house/build, a y-sorted prop for an element/tree, a
+    floor detail for detail/snow, and a plain floor overlay otherwise. Getting this wrong only changes
+    draw order and blocking, never whether a cell is drawn, so the safe default is the floor.
+    """
+    if name in PREFAB_LAYER:
+        return PREFAB_LAYER[name]
+    low = name.lower()
+    if any(k in low for k in ("house", "struct", "wall", "build", "block")):
+        return 2
+    if any(k in low for k in ("element", "prop", "object", "tree", "decor")):
+        return 3
+    if any(k in low for k in ("detail", "snow", "litter", "overlay")):
+        return 1
+    return 0
+
+
 def _prefab_has_door(li: int, c: dict) -> bool:
     """Is this cell a DWELLING -- a whole house sprite the player can walk into?
 
@@ -1043,6 +1064,122 @@ def _prefab_groups(cells: list) -> int:
             cells[i]["group"] = gnum
     return len(optional)
 
+# --- Motiles: the author kit's animated overlays ------------------------------------------------
+# An `Anim:`/`Spin:` node in an authored scene (or the chimney-smoke table below) becomes a MOTILE:
+# a small frame-strip the renderer animates CLOSED-FORM from the world clock (world_ms/period%frames
+# for anim, a world_ms-derived angle for spin) with no stored state, so every client sees the same
+# puff at the same instant. build_atlas.py packs its frames into the atlas exactly like an FX strip;
+# tools/import_prefabs.py wrote the geometry into the prefab JSON's `motiles` list. kind: 0=anim,
+# 1=spin.
+MOTILE_KIND = {"anim": 0, "spin": 1}
+
+# The proving case: chimney smoke on every dwelling. Editing the pack author's Village.tscn is not the
+# point of the kit, so the smoke is attached HERE, at codegen, to every house cell a prefab carries --
+# picked by the same rule that tags a dwelling (`_prefab_has_door`): a TilesetHouse sprite >= 48px in
+# the house band. The frames are the pack's own 6-frame 32x32 smoke sheet (already measured in
+# FX_MANIFEST). Placement is derived from the house crop: near the roof ridge, offset to one side, so
+# it reads as a chimney rather than a hat.
+CHIMNEY_SMOKE = {"sheet": "FX/Smoke/Smoke/SpriteSheet.png", "sx0": 0, "sy0": 0,
+                 "pw": 32, "ph": 32, "frames": 6, "stride": 32, "kind": "anim", "period_ms": 900}
+
+
+def _is_house_cell(c: dict) -> bool:
+    """A dwelling crop: a TilesetHouse sprite at least house-sized, from the sheet's house band.
+
+    Same predicate as `_prefab_has_door` but read off a raw JSON cell (tile x/y, source w/h/sy) so the
+    chimney table can run before the packed cells exist.
+    """
+    return (c["sheet"].endswith("TilesetHouse.png") and c["w"] >= 48 and c["h"] >= 48
+            and c["sy"] == 0)
+
+
+def chimney_motiles(doc: dict) -> list[dict]:
+    """One smoke motile per dwelling cell in a prefab, positioned at the roof-ridge chimney."""
+    out = []
+    for layer in doc["layers"]:
+        if prefab_layer_index(layer["name"]) != 2:
+            continue
+        for c in layer["cells"]:
+            if not _is_house_cell(c):
+                continue
+            m = dict(CHIMNEY_SMOKE, name="chimney")
+            # Prefab-local pixels (atlas resolution). Toward the right of the roof, one tile above the
+            # ridge so the 32px puff overlaps the roof top and rises a tile above it.
+            m["dx"] = c["x"] * TILE + round(c["w"] * 0.62) - m["pw"] // 2
+            m["dy"] = c["y"] * TILE - TILE
+            out.append(m)
+    return out
+
+
+def _motile_src_key(m: dict) -> tuple:
+    return (m["sheet"], m["sx0"], m["sy0"], m["pw"], m["ph"], m["frames"], m["stride"])
+
+
+def motile_sheet(sheet_id: str) -> Image.Image:
+    """Resolve a motile's `sheet` string to an RGBA image.
+
+    Mirrors import_prefabs.open_res_texture: the zip member first (pack tiles an Anim node might use),
+    then a loose file under assets/_src/ninja/<id> (the FX sheets live outside the tilesets dir), then
+    the tilesets dir by basename. Cached in the same map as prefab sheets.
+    """
+    if sheet_id in _PREFAB_SHEETS:
+        return _PREFAB_SHEETS[sheet_id]
+    img = None
+    with zipfile.ZipFile(GODOT_ZIP) as zf:
+        member = "GodotProject/" + sheet_id
+        if member in set(zf.namelist()):
+            img = Image.open(io.BytesIO(zf.read(member))).convert("RGBA")
+    if img is None:
+        loose = SRC / "ninja" / sheet_id
+        byname = SRC / "ninja" / "Backgrounds" / "Tilesets" / Path(sheet_id).name
+        if loose.exists():
+            img = Image.open(loose).convert("RGBA")
+        elif byname.exists():
+            img = Image.open(byname).convert("RGBA")
+        else:
+            raise FileNotFoundError(f"motile sheet {sheet_id} not found in the pack")
+    _PREFAB_SHEETS[sheet_id] = img
+    return img
+
+
+def pack_motiles(atlas: Image.Image, anim_y: int, prefabs: list) -> tuple:
+    """Pack every distinct motile frame-strip once and stamp (ax, ay) into each prefab's motiles.
+
+    Runs LAST (after the boss pass) so it only appends to the atlas -- every earlier slot keeps its
+    byte position, and the only new pixels are the motile strips. Frames pack like an FX strip: a 1px
+    transparent gutter, no extrusion (a motile is drawn at a fixed size / rotated in screen space, so
+    it has no seam to bleed).
+    """
+    order, pos = [], {}
+    for p in prefabs:
+        for m in p["motiles"]:
+            key = _motile_src_key(m)
+            if key not in pos:
+                pos[key] = None
+                order.append(key)
+    for key in order:
+        sheet, sx0, sy0, pw, ph, frames, stride = key
+        img = motile_sheet(sheet)
+        strip_w = frames * (pw + 2 * PAD)
+        new_h = anim_y + ph + 2 * PAD
+        if new_h > atlas.height or strip_w > atlas.width:
+            grown = Image.new("RGBA", (max(strip_w, atlas.width), max(new_h, atlas.height)),
+                              (0, 0, 0, 0))
+            grown.paste(atlas, (0, 0))
+            atlas = grown
+        for f in range(frames):
+            frame = img.crop((sx0 + f * stride, sy0, sx0 + f * stride + pw, sy0 + ph))
+            atlas.paste(frame, (f * (pw + 2 * PAD) + PAD, anim_y + PAD))
+        pos[key] = (PAD, anim_y + PAD)
+        anim_y += ph + 2 * PAD
+    for p in prefabs:
+        for m in p["motiles"]:
+            m["ax"], m["ay"] = pos[_motile_src_key(m)]
+    if order:
+        print(f"  packed {len(order)} motile strip(s)")
+    return atlas, anim_y
+
+
 _PREFAB_SHEETS: dict[str, Image.Image] = {}
 
 
@@ -1175,7 +1312,7 @@ def pack_prefabs(atlas: Image.Image, anim_y: int, cell_px: int):
         blocks = [0] * h
         cells = []
         for layer in doc["layers"]:
-            li = PREFAB_LAYER[layer["name"]]
+            li = prefab_layer_index(layer["name"])
             for c in layer["cells"]:
                 key = _cell_key(c)
                 ax, ay = pos[key]
@@ -1227,10 +1364,28 @@ def pack_prefabs(atlas: Image.Image, anim_y: int, cell_px: int):
                 sk.append(nc)
             skin_cells.append(sk)
 
+        # --- author-kit semantics (default-empty for every parcel; see docs/AUTHORING.md) ---------
+        # Motiles: any authored `Anim:`/`Spin:` node the scene carried, PLUS the chimney smoke this
+        # codegen attaches to every dwelling. (ax, ay) are filled in later by pack_motiles.
+        motiles = list(doc.get("motiles", [])) + chimney_motiles(doc)
+        spawn_cells = [tuple(p) for p in doc.get("spawn_cells", [])]
+        boss_cells = [tuple(p) for p in doc.get("boss_cells", [])]
+        zones = doc.get("zones", [])
+        # KeepGroup markers name cells whose optional cluster must never be dropped. Resolve each
+        # marked (dx,dy) to the group the clustering assigned it and OR its bit into keep_groups; the
+        # engine's prefab_group_kept honours that mask over the 75% roll. Group 0 is always kept, so a
+        # marker on a floor/centrepiece cell is a harmless no-op.
+        keep_mask = 0
+        for kx, ky in (tuple(p) for p in doc.get("keep_group_cells", [])):
+            for c in cells:
+                if c["dx"] == kx and c["dy"] == ky and c["group"] > 0:
+                    keep_mask |= 1 << c["group"]
         prefabs.append({"stem": stem, "cpp": cpp, "name": doc.get("name", stem),
                         "w": w, "h": h, "cells": cells, "blocks": blocks,
                         "group_count": group_count, "mirrorable": MIRRORABLE.get(stem, True),
-                        "skin_names": skin_names, "skin_cells": skin_cells})
+                        "skin_names": skin_names, "skin_cells": skin_cells,
+                        "motiles": motiles, "spawns": spawn_cells, "bosses": boss_cells,
+                        "zones": zones, "keep_groups": keep_mask, "meta": doc.get("meta")})
         skin_tag = "" if len(skin_names) == 1 else f"  skins={'/'.join(skin_names)}"
         print(f"  prefab {stem:<20} {w}x{h}  cells={len(cells)}  groups={group_count}  "
               f"mirror={'yes' if MIRRORABLE.get(stem, True) else 'NO'}{skin_tag}")
@@ -1297,6 +1452,31 @@ def write_prefabs_header(prefabs) -> None:
         "    std::uint16_t cell_count;",
         "};",
         "",
+        "// --- The author kit (see docs/AUTHORING.md) ------------------------------------------",
+        "// A MOTILE is an animated overlay the renderer draws CLOSED-FORM from the world clock, with no",
+        "// stored state -- so every client sees the same frame at the same instant, exactly like the",
+        "// ability-zone particles. `anim` cycles frame = world_ms / period_ms % frames; `spin` rotates",
+        "// frame 0 by an angle world_ms sweeps through period_ms. dx/dy is the frame-0 top-left in the",
+        "// prefab's own 16px pixel space; ax/ay is frame 0 in atlas.png and frame k sits at ax +",
+        "// k*(pw+2). Chimney smoke on every dwelling is the shipped example.",
+        "struct PrefabMotile {",
+        "    std::int16_t dx, dy;        // frame-0 top-left, prefab pixels (atlas resolution)",
+        "    std::int16_t ax, ay;        // frame 0 in atlas.png; frame k at ax + k*(pw+2)",
+        "    std::uint8_t pw, ph;        // frame pixel size",
+        "    std::uint8_t frames;        // frames in the strip",
+        "    std::uint16_t period_ms;    // anim: one full cycle; spin: one full rotation",
+        "    std::uint8_t kind;          // 0 = anim (frame cycle), 1 = spin (rotate frame 0)",
+        "};",
+        "",
+        "enum : std::uint8_t { kMotileAnim = 0, kMotileSpin = 1 };",
+        "",
+        "// A semantic cell painted on a `Mark:Spawn` or `Mark:Boss` layer, in prefab-local tiles.",
+        "struct PrefabPoint { std::uint8_t dx, dy; };",
+        "",
+        "// A named rectangle painted on a `Mark:Zone[:label]` layer (prefab-local tiles). Stored for",
+        "// future gameplay use; the kit emits it so the data survives the import.",
+        "struct PrefabZone { const char* name; std::uint8_t x, y, w, h; };",
+        "",
         "struct PrefabDef {",
         "    const char* name;",
         "    std::uint8_t w, h;                  // footprint in tiles",
@@ -1307,6 +1487,16 @@ def write_prefabs_header(prefabs) -> None:
         "    bool mirrorable;                    // safe to stamp flipped (no readable glyphs baked in)",
         "    const PrefabSkin* skins;            // skin_count entries; skins[0].cells == cells",
         "    std::uint8_t skin_count;            // 1 for an unskinned parcel; >1 = base + palette twins",
+        "    // --- author-kit additions (all default-empty for the hand-cut parcels) ---",
+        "    std::uint32_t keep_groups;          // bit g set = optional cluster g never drops (Mark:KeepGroup)",
+        "    const PrefabMotile* motiles;        // animated overlays; motile_count entries",
+        "    std::uint8_t motile_count;",
+        "    const PrefabPoint* spawns;          // Mark:Spawn anchor cells; spawn_count entries",
+        "    std::uint8_t spawn_count;",
+        "    const PrefabPoint* bosses;          // Mark:Boss anchor cells; boss_count entries",
+        "    std::uint8_t boss_count;",
+        "    const PrefabZone* zones;            // Mark:Zone rects; zone_count entries",
+        "    std::uint8_t zone_count;",
         "};",
         "",
     ]
@@ -1334,13 +1524,49 @@ def write_prefabs_header(prefabs) -> None:
                      + ", ".join(skin_entries) + "};")
         blk = ", ".join(f"0x{b:08x}u" for b in p["blocks"])
         lines.append(f"inline constexpr std::uint32_t kPrefabBlocks_{p['cpp']}[] = {{{blk}}};")
+
+        # --- author-kit tables: emitted only when the prefab actually carries them, so a plain parcel
+        # points at nullptr/0 and its output is unchanged bar the new trailing PrefabDef fields. ---
+        motiles, spawns, bosses, zones = p["motiles"], p["spawns"], p["bosses"], p["zones"]
+        p["_motiles"] = (f"kPrefabMotiles_{p['cpp']}", len(motiles)) if motiles else ("nullptr", 0)
+        if motiles:
+            lines.append(f"inline constexpr PrefabMotile kPrefabMotiles_{p['cpp']}[] = {{")
+            for m in motiles:
+                lines.append(f"    {{{m['dx']}, {m['dy']}, {m['ax']}, {m['ay']}, "
+                             f"{m['pw']}, {m['ph']}, {m['frames']}, {m['period_ms']}, "
+                             f"{MOTILE_KIND[m['kind']]}}},  // {m.get('name', m['kind'])}")
+            lines.append("};")
+        p["_spawns"] = (f"kPrefabSpawns_{p['cpp']}", len(spawns)) if spawns else ("nullptr", 0)
+        if spawns:
+            body = ", ".join(f"{{{dx}, {dy}}}" for dx, dy in spawns)
+            lines.append(f"inline constexpr PrefabPoint kPrefabSpawns_{p['cpp']}[] = {{{body}}};")
+        p["_bosses"] = (f"kPrefabBosses_{p['cpp']}", len(bosses)) if bosses else ("nullptr", 0)
+        if bosses:
+            body = ", ".join(f"{{{dx}, {dy}}}" for dx, dy in bosses)
+            lines.append(f"inline constexpr PrefabPoint kPrefabBosses_{p['cpp']}[] = {{{body}}};")
+        p["_zones"] = (f"kPrefabZones_{p['cpp']}", len(zones)) if zones else ("nullptr", 0)
+        if zones:
+            body = ", ".join(f"{{\"{z['name']}\", {z['x']}, {z['y']}, {z['w']}, {z['h']}}}"
+                             for z in zones)
+            lines.append(f"inline constexpr PrefabZone kPrefabZones_{p['cpp']}[] = {{{body}}};")
         lines.append("")
     lines.append("inline constexpr PrefabDef kPrefabs[static_cast<int>(PrefabId::kCount)] = {")
     for p in prefabs:
+        # Provenance: a scene's meta.md sidecar flows in as comments above its PrefabDef entry.
+        meta = p.get("meta")
+        if meta:
+            lines.append(f"    // --- {p['name']} ---")
+            for k, v in meta.get("front", {}).items():
+                lines.append(f"    // {k}: {v}")
+            for pl in (meta.get("prose") or "").splitlines():
+                lines.append(f"    // {pl}" if pl.strip() else "    //")
+        mo, sp, bo, zo = p["_motiles"], p["_spawns"], p["_bosses"], p["_zones"]
         lines.append(f"    {{\"{p['name']}\", {p['w']}, {p['h']}, kPrefabCells_{p['cpp']}, "
                      f"{len(p['cells'])}, kPrefabBlocks_{p['cpp']}, "
                      f"{p['group_count']}, {str(p['mirrorable']).lower()}, "
-                     f"kPrefabSkins_{p['cpp']}, {len(p['skin_names'])}}},")
+                     f"kPrefabSkins_{p['cpp']}, {len(p['skin_names'])}, "
+                     f"0x{p['keep_groups']:x}u, {mo[0]}, {mo[1]}, {sp[0]}, {sp[1]}, "
+                     f"{bo[0]}, {bo[1]}, {zo[0]}, {zo[1]}}},")
     lines += [
         "};",
         "",
@@ -1737,6 +1963,13 @@ def main() -> int:
             atlas.paste(frame, (f * (fw + 2 * PAD) + PAD, anim_y + PAD))
         bosses.append((name, PAD, anim_y + PAD, fw, fh, frames, foot))
         anim_y += fh + 2 * PAD
+
+    # --- motile frame-strips, appended LAST so no earlier slot moves ------------------------------
+    # The author kit's animated overlays (authored Anim:/Spin: nodes + the chimney smoke attached to
+    # every dwelling). Packed after everything else, so the whole atlas above this point is byte-for-
+    # byte what it was before the kit existed and only the motile strips are new.
+    if prefabs:
+        atlas, anim_y = pack_motiles(atlas, anim_y, prefabs)
 
     out_png = ROOT / "assets" / "atlas.png"
     atlas.save(out_png)

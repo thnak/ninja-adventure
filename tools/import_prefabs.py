@@ -166,16 +166,16 @@ def decode(body):
     return cells
 
 
-def load_layers(pack):
-    """Parse Village.tscn into draw-ordered layers plus the map's tile-coordinate bounds.
+def resolve_tilesets(scene, pack):
+    """A .tscn's TileSet resources: (sext, ts_ext, ts_sub).
 
-    Returns (layers, X0, Y0, X1, Y1) where each layer is
-    (name, tileset, cells, origin, z_index, ysort), sorted by z_index (stable, so scene order breaks
-    ties: Floor, Snow, Relief, FloorDetail, House, Element).
+    `sext` maps every ExtResource id to its res-path; `ts_ext` is the id->parsed-tileset map for the
+    `.tres` TileSets the scene references, and `ts_sub` the id->parsed-tileset map for any inline
+    SubResource TileSet (the House layer's, in Village.tscn). Textures resolve out of the pack the
+    same way whether the scene is Village.tscn or a user's own -- a user authors on the pack tilesets,
+    so their ExtResource paths point at the very `res://World/Backgrounds/...` files this reads.
     """
-    scene = pack.text(SCENE)
     sext = {i: p for p, i in re.findall(r'\[ext_resource path="res://(.+?)".*?id=(\d+)\]', scene)}
-
     ts_ext = {}   # scene ExtResource id -> parsed tileset (the .tres files)
     for i, p in sext.items():
         if not p.endswith(".tres"):
@@ -185,10 +185,21 @@ def load_layers(pack):
             continue
         e = {j: q for q, j in re.findall(r'\[ext_resource path="res://(.+?)".*?id=(\d+)\]', t)}
         ts_ext[i] = parse_tileset(t, e, pack)
-
-    ts_sub = {}   # SubResource id -> parsed tileset (the House layer's inline TileSet)
+    ts_sub = {}   # SubResource id -> parsed tileset (an inline TileSet)
     for m in re.finditer(r'\[sub_resource type="TileSet" id=(\d+)\]\n(.*?)(?=\n\[|\Z)', scene, re.S):
         ts_sub[m.group(1)] = parse_tileset(m.group(2), sext, pack)
+    return sext, ts_ext, ts_sub
+
+
+def load_layers(pack):
+    """Parse Village.tscn into draw-ordered layers plus the map's tile-coordinate bounds.
+
+    Returns (layers, X0, Y0, X1, Y1) where each layer is
+    (name, tileset, cells, origin, z_index, ysort), sorted by z_index (stable, so scene order breaks
+    ties: Floor, Snow, Relief, FloorDetail, House, Element).
+    """
+    scene = pack.text(SCENE)
+    _sext, ts_ext, ts_sub = resolve_tilesets(scene, pack)
 
     layers = []
     X0 = Y0 = 10 ** 9
@@ -351,6 +362,274 @@ def cut_parcel(name, rect, comp, layers, X0, Y0):
     return preview, len(tiles)
 
 
+# --- The author kit: import a standalone user-authored scene as ONE prefab ----------------------
+# Everything below is the `--scene` path. It reuses the exact decode + tileset machinery the parcel
+# path uses (so a user scene built on the pack tilesets reads identically), and adds the three
+# author-facing conventions documented in docs/AUTHORING.md:
+#
+#   * `Mark:<Kind>` TileMap layers are SEMANTIC, never drawn: any tile painted on them marks that
+#     cell. Spawn/Boss/KeepGroup/Zone are understood; an unknown kind is warned about and stored raw.
+#   * `Anim:<name>` / `Spin:<name>` Sprite nodes are MOTILES: a frame-cycling overlay or a continuous
+#     rotation the renderer animates closed-form from the world clock (chimney smoke, a windmill fan).
+#   * a `meta.md` sidecar carries provenance/prose that flows into prefabs.hpp as comments.
+
+# A Mark layer's name is `Mark:<Kind>` or `Mark:<Kind>:<label>` (the label names a Zone). These are
+# the kinds codegen understands; anything else is stored raw and skipped in codegen with a warning.
+MARK_KINDS = {"Spawn", "Boss", "KeepGroup", "Zone"}
+
+# Default animation period per motile kind, in ms, when the node name carries no `@<ms>` override.
+MOTILE_PERIOD_MS = {"anim": 700, "spin": 2000}
+
+_NODE_RE = re.compile(r'\[node name="([^"]+)" type="([^"]+)".*?\]\n(.*?)(?=\n\[node|\Z)', re.S)
+
+
+def open_res_texture(res_path, pack):
+    """A `res://...`-relative texture path (the `res://` already stripped) -> an RGBA PIL image.
+
+    Tries the zip member, then a loose file under assets/_src/ninja/<path> (this is how the FX sheets
+    an `Anim:` node points at are found -- they live outside the tilesets dir), then the tilesets dir
+    by basename. Only opened here to MEASURE the sheet; build_atlas.py re-resolves the same string.
+    """
+    member = ZIP_PREFIX + res_path
+    if member in pack.names:
+        return Image.open(io.BytesIO(pack.zf.read(member))).convert("RGBA")
+    loose = SRC / "ninja" / res_path
+    if loose.exists():
+        return Image.open(loose).convert("RGBA")
+    byname = PACK_TILESETS / Path(res_path).name
+    if byname.exists():
+        return Image.open(byname).convert("RGBA")
+    raise FileNotFoundError(f"motile texture {res_path} not found in the pack")
+
+
+def parse_marks(scene, X0, Y0):
+    """`Mark:` TileMap layers -> (spawn, boss, keep, zones, unknown), all in PREFAB-LOCAL tiles.
+
+    spawn/boss/keep are lists of [dx, dy]; zones is a list of {name, x, y, w, h} (the bounding box of
+    each `Mark:Zone[:label]` layer's painted cells); unknown maps an unrecognised kind to its raw
+    [dx, dy] cells. Marker tiles are never rendered or packed -- only their positions matter.
+    """
+    spawn, boss, keep, zones, unknown = [], [], [], [], {}
+    for m in _NODE_RE.finditer(scene):
+        name, ntype, body = m.group(1), m.group(2), m.group(3)
+        if ntype != "TileMap" or not name.startswith("Mark:"):
+            continue
+        kind, _, label = name[len("Mark:"):].partition(":")
+        cells = [[c["x"] - X0, c["y"] - Y0] for c in decode(body)]
+        if not cells:
+            continue
+        if kind == "Spawn":
+            spawn.extend(cells)
+        elif kind == "Boss":
+            boss.extend(cells)
+        elif kind == "KeepGroup":
+            keep.extend(cells)
+        elif kind == "Zone":
+            xs = [c[0] for c in cells]
+            ys = [c[1] for c in cells]
+            zones.append({"name": label or "zone", "x": min(xs), "y": min(ys),
+                          "w": max(xs) - min(xs) + 1, "h": max(ys) - min(ys) + 1})
+        else:
+            print(f"  WARNING: unknown marker layer 'Mark:{kind}' -- stored raw, skipped in codegen")
+            unknown.setdefault(kind, []).extend(cells)
+    return spawn, boss, keep, zones, unknown
+
+
+def parse_motiles(scene, sext, pack, X0, Y0):
+    """`Anim:`/`Spin:` Sprite nodes -> a list of motile dicts in PREFAB-LOCAL pixels.
+
+    A motile node's texture is a horizontal spritesheet strip; `hframes` is the frame count. The node
+    NAME carries the kind (Anim = frame cycle, Spin = continuous rotation) and, after an optional
+    `@<ms>`, the animation period. `position` is the sprite's CENTRE in scene pixels; it is converted
+    to the top-left pixel offset of frame 0 within the prefab. The frames themselves are packed into
+    the atlas by build_atlas.py, which re-resolves the `sheet` string written here.
+    """
+    out = []
+    for m in _NODE_RE.finditer(scene):
+        name, ntype, body = m.group(1), m.group(2), m.group(3)
+        if ntype not in ("Sprite", "AnimatedSprite"):
+            continue
+        if name.startswith("Anim:"):
+            kind, label = "anim", name[len("Anim:"):]
+        elif name.startswith("Spin:"):
+            kind, label = "spin", name[len("Spin:"):]
+        else:
+            continue
+        period = MOTILE_PERIOD_MS[kind]
+        if "@" in label:
+            label, _, per = label.partition("@")
+            period = int(re.search(r"\d+", per).group(0))
+        tex = re.search(r'texture = ExtResource\( ?(\d+) ?\)', body)
+        if not tex or tex.group(1) not in sext:
+            print(f"  WARNING: motile '{name}' has no resolvable texture -- skipped")
+            continue
+        res_path = sext[tex.group(1)]
+        img = open_res_texture(res_path, pack)
+        hframes = int((re.search(r'hframes = (\d+)', body) or [0, 1])[1])
+        vframes = int((re.search(r'vframes = (\d+)', body) or [0, 1])[1])
+        hframes = max(1, hframes)
+        pw = img.width // hframes
+        ph = img.height // max(1, vframes)
+        px, py = V2((re.search(r'position = (Vector2\([^)]*\))', body) or [0, "Vector2( 0, 0 )"])[1],
+                    (0, 0))
+        out.append({
+            "name": label or kind, "kind": kind, "period_ms": period,
+            "sheet": res_path, "sx0": 0, "sy0": 0, "stride": pw,
+            "pw": pw, "ph": ph, "frames": hframes,
+            # Frame 0's top-left, prefab-local pixels: sprite centre minus the parcel origin and half
+            # the frame. Godot draws a Sprite centred on its position.
+            "dx": int(round(px - X0 * TILE - pw / 2.0)),
+            "dy": int(round(py - Y0 * TILE - ph / 2.0)),
+        })
+        print(f"  motile {kind:<4} {label!r:<14} {pw}x{ph}x{hframes} @{period}ms  "
+              f"at ({out[-1]['dx']},{out[-1]['dy']})px  from {res_path}")
+    return out
+
+
+def parse_meta(scene_path):
+    """A scene's `meta.md` sidecar -> {"front": {k: v}, "prose": str} or None.
+
+    Looked for at `<scene>.meta.md` first, then `meta.md` beside the scene. Leading `key: value` lines
+    are the front matter; everything after the first blank line (or the first non-`key: value` line) is
+    free prose. Both flow into prefabs.hpp as comments above the generated PrefabDef.
+    """
+    p = Path(scene_path)
+    for cand in (p.with_suffix(p.suffix + ".meta.md"), p.parent / "meta.md"):
+        if cand.exists():
+            break
+    else:
+        return None
+    lines = cand.read_text().splitlines()
+    front, i = {}, 0
+    while i < len(lines):
+        m = re.match(r'^([A-Za-z][\w -]*):\s*(.*)$', lines[i])
+        if not m or (lines[i].strip() == ""):
+            break
+        front[m.group(1).strip()] = m.group(2).strip()
+        i += 1
+    prose = "\n".join(lines[i:]).strip()
+    print(f"  meta.md: {cand.name}  ({len(front)} front-matter keys, "
+          f"{len(prose.splitlines())} prose lines)")
+    return {"front": front, "prose": prose}
+
+
+def cut_scene(name, comp, layers, X0, Y0, X1, Y1, extra):
+    """Build the one prefab JSON that a whole authored scene becomes, plus a preview PNG.
+
+    Mirrors cut_parcel's per-layer cell schema exactly, but over the scene's FULL bounds (no rect) and
+    with the author-kit `extra` fields (spawn_cells, motiles, meta ...) folded in only when present, so
+    a scene with no markers is schema-compatible with a plain parcel.
+    """
+    rx, ry = X0, Y0
+    rw, rh = X1 - X0 + 1, Y1 - Y0 + 1
+    x0, y0 = map_px(rx, ry, X0, Y0)
+    crop = comp.crop((x0, y0, x0 + rw * TILE, y0 + rh * TILE))
+    crop.resize((rw * TILE * SCALE, rh * TILE * SCALE), Image.NEAREST).save(OUT / f"{name}.png")
+
+    data_layers, tiles, counts = [], {}, {}
+    for lname, ts, cells, origin, z, ysort in layers:
+        order = sorted(cells, key=lambda c: c["y"]) if ysort else cells
+        lcells = []
+        for c in order:
+            r = source_rect(ts, c)
+            if not r:
+                continue
+            t, sx, sy, tw, th = r
+            tiles.setdefault((t["sheet"], sx, sy, tw, th), len(tiles))
+            lcells.append({
+                "x": c["x"] - rx, "y": c["y"] - ry,
+                "sheet": t["sheet"], "sx": sx, "sy": sy, "w": tw, "h": th,
+                "flip_h": c["fh"], "flip_v": c["fv"], "transpose": c["tr"], "origin": origin,
+            })
+        if lcells:
+            data_layers.append({"name": lname, "cells": lcells})
+            counts[lname] = len(lcells)
+    doc = {
+        "name": name,
+        "size": [rw, rh],
+        "layers": data_layers,
+        "tiles": [{"sheet": s, "sx": sx, "sy": sy, "w": w, "h": h}
+                  for (s, sx, sy, w, h), _ in sorted(tiles.items(), key=lambda kv: kv[1])],
+    }
+    doc.update(extra)   # spawn_cells / boss_cells / keep_group_cells / zones / unknown_marks / motiles / meta
+    with open(OUT / f"{name}.json", "w") as f:
+        json.dump(doc, f, indent=2)
+    per = " ".join(f"{k}={v}" for k, v in counts.items())
+    print(f"  {name:<14} scene {rw}x{rh} cells={sum(counts.values())} tiles={len(tiles)} [{per}]")
+
+
+def import_scene(pack, scene_path, name, rect=None):
+    """Import one standalone user-authored .tscn as a single prefab JSON (the `--scene` path)."""
+    scene = Path(scene_path).read_text()
+    sext, ts_ext, ts_sub = resolve_tilesets(scene, pack)
+
+    layers = []
+    X0 = Y0 = 10 ** 9
+    X1 = Y1 = -10 ** 9
+    print("Visual layers:")
+    for m in re.finditer(r'\[node name="([^"]+)" type="TileMap".*?\]\n(.*?)(?=\n\[node|\Z)', scene, re.S):
+        lname, body = m.group(1), m.group(2)
+        if lname.startswith("Mark:"):
+            continue  # semantic, handled by parse_marks -- never drawn or packed
+        me = re.search(r'tile_set = ExtResource\( (\d+) \)', body)
+        ms = re.search(r'tile_set = SubResource\( (\d+) \)', body)
+        ts = ts_ext.get(me.group(1)) if me else ts_sub.get(ms.group(1)) if ms else None
+        cells = decode(body)
+        if not ts or not cells:
+            continue
+        o = re.search(r'cell_tile_origin = (\d+)', body)
+        origin = int(o.group(1)) if o else 0
+        z = int((re.search(r'z_index = (-?\d+)', body) or [0, 0])[1])
+        ysort = "cell_y_sort = true" in body
+        layers.append((lname, ts, cells, origin, z, ysort))
+        X0, X1 = min(X0, min(c["x"] for c in cells)), max(X1, max(c["x"] for c in cells))
+        Y0, Y1 = min(Y0, min(c["y"] for c in cells)), max(Y1, max(c["y"] for c in cells))
+        print(f"  {lname:<14} z={z:>2} {'ysort' if ysort else 'flat '} origin={origin} cells={len(cells)}")
+    if not layers:
+        raise SystemExit(f"{scene_path}: no drawable TileMap layers found")
+    layers.sort(key=lambda L: L[4])
+
+    # Marker cells can sit outside the drawn footprint (a spawn point on the border); grow bounds to
+    # include them so nothing is clipped, THEN convert everything to the final prefab-local origin.
+    for m in _NODE_RE.finditer(scene):
+        if m.group(2) == "TileMap" and m.group(1).startswith("Mark:"):
+            for c in decode(m.group(3)):
+                X0, X1, Y0, Y1 = min(X0, c["x"]), max(X1, c["x"]), min(Y0, c["y"]), max(Y1, c["y"])
+
+    if rect:  # optional crop: clamp the whole-scene bounds to the requested rect
+        cx, cy, cw, ch = rect
+        X0, Y0, X1, Y1 = cx, cy, cx + cw - 1, cy + ch - 1
+
+    comp = composite(layers, X0, Y0, X1, Y1)
+
+    print("Markers:")
+    spawn, boss, keep, zones, unknown = parse_marks(scene, X0, Y0)
+    print("Motiles:")
+    motiles = parse_motiles(scene, sext, pack, X0, Y0)
+    meta = parse_meta(scene_path)
+
+    extra = {}
+    if spawn:
+        extra["spawn_cells"] = spawn
+    if boss:
+        extra["boss_cells"] = boss
+    if keep:
+        extra["keep_group_cells"] = keep
+    if zones:
+        extra["zones"] = zones
+    if unknown:
+        extra["unknown_marks"] = unknown
+    if motiles:
+        extra["motiles"] = motiles
+    if meta:
+        extra["meta"] = meta
+
+    print("Scene prefab:")
+    cut_scene(name, comp, layers, X0, Y0, X1, Y1, extra)
+    print(f"  spawn={len(spawn)} boss={len(boss)} keep={len(keep)} zones={len(zones)} "
+          f"motiles={len(motiles)} unknown={sorted(unknown)}")
+
+
 def contact_print(previews, path):
     """All parcel previews in a row, each under its name, on a dark background."""
     gap, cap = 12, 16
@@ -372,11 +651,25 @@ def main():
     ap.add_argument("--map-only", action="store_true", help="only write _map.png, cut no parcels")
     ap.add_argument("--rect", nargs=4, type=int, metavar=("X", "Y", "W", "H"),
                     help="cut one ad-hoc parcel at these MAP tile coords instead of the dict")
-    ap.add_argument("--name", default="parcel", help="name for the --rect parcel")
+    ap.add_argument("--scene", metavar="FILE.tscn",
+                    help="import a standalone user-authored Godot 3 scene as ONE prefab (the author "
+                         "kit): the whole scene becomes the prefab, Mark:/Anim:/Spin: layers and a "
+                         "meta.md sidecar carry semantics -- see docs/AUTHORING.md")
+    ap.add_argument("--name", default=None,
+                    help="prefab name (default: 'parcel' for --rect, snake_case of the file for --scene)")
     args = ap.parse_args()
 
     OUT.mkdir(parents=True, exist_ok=True)
     pack = Pack()
+
+    if args.scene:
+        stem = Path(args.scene).stem
+        name = args.name or re.sub(r'[^a-z0-9]+', '_', stem.lower()).strip('_')
+        rect = tuple(args.rect) if args.rect else None
+        print(f"Importing scene {args.scene} as prefab '{name}':")
+        import_scene(pack, args.scene, name, rect)
+        return
+
     print("Layers (draw order after z-index sort):")
     layers, X0, Y0, X1, Y1 = load_layers(pack)
     print(f"Map extent: x[{X0}..{X1}] y[{Y0}..{Y1}]  size {X1 - X0 + 1}x{Y1 - Y0 + 1} tiles"
@@ -385,7 +678,7 @@ def main():
     comp = composite(layers, X0, Y0, X1, Y1)
 
     if args.rect:
-        parcels = {args.name: tuple(args.rect)}
+        parcels = {(args.name or "parcel"): tuple(args.rect)}
     else:
         parcels = PARCELS
 
