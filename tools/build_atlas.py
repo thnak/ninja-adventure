@@ -291,6 +291,32 @@ FX_MANIFEST = [
     ("Earth",    "FX/Elemental/Rock/SpriteSheet.png",       30, 30, 14),
     ("Shock",    "FX/Elemental/Thunder/SpriteSheet.png",    20, 28,  8),
     ("Blast",    "FX/Elemental/Explosion/SpriteSheet.png",  40, 40,  9),
+    # More combat FX for the fight system. Every frame width below was MEASURED off the sheet by
+    # finding the uniform cell pitch that divides the width exactly and lands each separator on a
+    # transparent column (the same "scan for empty columns" discipline the elemental strips above
+    # used) — never read off the filename. None of these are 16px multiples, which is the whole
+    # reason FX_MANIFEST exists apart from the tile grid. The frames are square only where the art
+    # is (Circle/Smoke/the two slashes/the small projectiles); the rest keep their true off-square
+    # cell (Aura 25x24, Boost 53x35, Spark 27x35, Kunai 65x59, Shuriken 69x54).
+    #
+    # Magic: a blue ward bubble, a channelled aura, a rising power-up, a spark burst, an orange rune
+    # ring. These SET-a-status telegraphs and buffs the fight system spends in later phases.
+    ("Shield",     "FX/Magic/Shield/SpriteSheetBlue.png",     24, 26,  6),
+    ("Aura",       "FX/Magic/Aura/SpriteSheet.png",           25, 24,  5),
+    ("Boost",      "FX/Magic/Boost/SpriteSheet.png",          53, 35,  8),
+    ("SparkFx",    "FX/Magic/Spark/SpriteSheet.png",          27, 35, 10),
+    ("Circle",     "FX/Magic/Circle/SpriteSheetOrange.png",   32, 32,  4),
+    # Melee accents: a heavy 360 swing for the charged blow, a curved combo accent for the light one.
+    ("SlashHeavy", "FX/Attack/CircularSlash/SpriteSheet.png", 32, 32,  4),
+    ("SlashCombo", "FX/Attack/SlashCurved/SpriteSheet.png",   32, 32,  4),
+    # Spinning projectiles, from FX/Projectile/. Kunai and Shuriken are the big multi-frame spin
+    # sheets; Fireball and EnergyBall are the compact 16px loops.
+    ("Kunai",      "FX/Projectile/Kunai/SpriteSheet.png",     65, 59, 10),
+    ("Shuriken",   "FX/Projectile/Shuriken/SpriteSheet.png",  69, 54, 10),
+    ("Fireball",   "FX/Projectile/Fireball.png",              16, 16,  4),
+    ("EnergyBall", "FX/Projectile/EnergyBall.png",            16, 16,  4),
+    # The telegraph puff a wind-up shows before a heavy attack lands (used in later phases).
+    ("Smoke",      "FX/Smoke/Smoke/SpriteSheet.png",          32, 32,  6),
     # The Character screen's portrait. Ninja Adventure ships a 38x38 `Faceset.png` beside every
     # actor — off the 16px grid, like every other entry here, which is exactly what this list is
     # for. One frame: it is a portrait, not an animation.
@@ -642,6 +668,10 @@ NINJA = SRC / "ninja/Actor"
 ANIM_MANIFEST = [
     # (name, path relative to NINJA, cols, rows)
     ("Player",     "Character/NinjaGreen/SeparateAnim/Walk.png", 4, 4),
+    # The player's swing pose: one frame per facing, so cols=4 rows=1. It is packed as a 4x1 sheet
+    # and drawn through `anim_frame` with the FACING as the column (not through `anim`, whose rows==1
+    # rule reads columns as frames — that is right for a two-frame animal, wrong for four facings).
+    ("PlayerAttack", "Character/NinjaGreen/SeparateAnim/Attack.png", 4, 1),
     ("MobSlime",   "Monster/Slime/Slime.png",                    4, 4),
     ("MobSpider",  "Monster/SpiderRed/SpriteSheet.png",          4, 4),
     ("MobSpirit",  "Monster/Spirit/SpriteSheet.png",             4, 4),

@@ -389,6 +389,10 @@ struct RaylibBridge::Impl {
     Element element = Element::kFire;
     bool building = false;
     mutable float swing_cd = 0.0f;
+    // Seconds left to hold the local player's swing pose. Set when a swing is polled, counted down
+    // each drawn frame; while it is positive the local player is drawn mid-swing instead of walking.
+    // A render-only flourish — the simulation neither knows nor needs to.
+    mutable float attack_pose = 0.0f;
     int last_chunks = 0;
     int last_creatures = 0;
     const WorldLayout* layout = nullptr;
@@ -741,9 +745,25 @@ struct RaylibBridge::Impl {
                 // timer — so the walk cycle stays in step with the simulation rather than with this
                 // client's frame rate. It is also what makes a REMOTE player's animation correct
                 // for free.
-                anim(Anim::kPlayer, static_cast<int>(p.facing), static_cast<int>(p.steps / 4), sp.x,
-                     sp.y - (p.mounted ? 5.0f : 0.0f), kTilePx * 1.1f,
-                     dead ? Color{255, 255, 255, 90} : WHITE);
+                const float body_y = sp.y - (p.mounted ? 5.0f : 0.0f);
+                const Color body_tint = dead ? Color{255, 255, 255, 90} : WHITE;
+                if (static_cast<int>(sp.a) == local_slot && attack_pose > 0.0f && atlas_ok) {
+                    // Mid-swing: the attack pose, one frame per facing. Addressed by FACING as the
+                    // column via anim_frame directly — not through `anim`, whose rows==1 path reads a
+                    // one-row sheet's columns as animation frames (right for a two-frame animal,
+                    // wrong for four facings). Only the local player: a remote client cannot know
+                    // when someone else swung, and the effect the chunk publishes already shows it.
+                    const AtlasRect ar = anim_frame(Anim::kPlayerAttack, static_cast<int>(p.facing), 0);
+                    const float t = static_cast<float>(kAtlasTile);
+                    const float size = kTilePx * 1.1f;
+                    DrawTexturePro(
+                        atlas, Rectangle{static_cast<float>(ar.x), static_cast<float>(ar.y), t, t},
+                        Rectangle{sp.x, body_y, size, size}, Vector2{size * 0.5f, size * 0.5f}, 0.0f,
+                        body_tint);
+                } else {
+                    anim(Anim::kPlayer, static_cast<int>(p.facing), static_cast<int>(p.steps / 4),
+                         sp.x, body_y, kTilePx * 1.1f, body_tint);
+                }
                 if (static_cast<int>(sp.a) != local_slot) {
                     // Somebody else's health bar, always shown — you cannot help a stranger you
                     // cannot read.
@@ -878,6 +898,7 @@ float RaylibBridge::frame_time() const { return GetFrameTime(); }
 void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                         const PlayerBus& players, int local_slot) {
     Impl& im = *impl_;
+    im.attack_pose = std::max(0.0f, im.attack_pose - GetFrameTime());
     PlayerViewPtr me = players.load(local_slot);
     static const PlayerView kNobody{};
     const PlayerView& player = me ? *me : kNobody;
@@ -1168,8 +1189,9 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                 // stepped proportionally. The effect therefore plays at the same rate on every
                 // machine no matter what frame rate it is running at.
                 const int frames = fx_of(fx_of_effect(e.kind)).frames;
-                const int f = std::min<int>(frames - 1, (e.age * frames) / kEffectLife);
-                const float fade = 1.0f - static_cast<float>(e.age) / static_cast<float>(kEffectLife);
+                const int life = effect_life_of(e.kind);
+                const int f = std::min<int>(frames - 1, (e.age * frames) / life);
+                const float fade = 1.0f - static_cast<float>(e.age) / static_cast<float>(life);
                 // 0.6x. The pack's elemental strips are drawn for a 1:1 pixel game, so at this
                 // game's 2x tile scale an explosion came out two and a half tiles across and buried
                 // the creature it went off on — the whole point of the flash is to show you what
@@ -1292,6 +1314,9 @@ InputFrame RaylibBridge::poll_input(const PlayerView& player) const {
             if (in.swing) {
                 im.swing_cd = static_cast<float>(heavy ? kHeavyCooldown : kSwingCooldown) /
                               static_cast<float>(kTicksPerSecond);
+                // Hold the swing pose briefly. Heavy uses the same pose — the pack ships one attack
+                // frame per facing and no separate charged one.
+                im.attack_pose = 0.18f;
             }
             in.heavy = in.swing && heavy;
             in.cast = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);

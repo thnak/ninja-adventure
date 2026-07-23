@@ -242,6 +242,14 @@ int main(int argc, char** argv) {
     }
     int frames = 0;
 
+    // Audio bookkeeping for the sim-driven cues below. `effect_tick` remembers, per chunk, the last
+    // published tick whose effects were already sounded, so a combo/hit cue fires once per event and
+    // not once per render frame. `last_skill` mirrors the local player's levels so a level-up can be
+    // heard the frame it happens. Both are fixed-size and allocated once — no per-frame allocation.
+    std::vector<std::uint64_t> effect_tick(static_cast<std::size_t>(kChunkCount), ~0ull);
+    std::uint8_t last_skill[kSkillCount] = {};
+    bool have_skills = false;
+
     while (bridge.begin_frame()) {
         const float dt = std::min(bridge.frame_time(), 0.25f);
         const PlayerView player = view();
@@ -265,10 +273,19 @@ int main(int argc, char** argv) {
         if (can_act && in.mount) world.set_mounted(me, !player.mounted);
 
         if (can_act && in.swing) {
-            if (world.swing(me, in.heavy)) audio.play(ui::Sfx::kHarvest);
+            // The swing's own whoosh, light or heavy — no longer the harvest jingle standing in for
+            // it. (Harvest keeps harvest.wav, below.) The hit that lands is a separate cue, played
+            // off the effect the chunk publishes rather than guessed here, because a swing that
+            // connects is decided by the simulation and not by this client.
+            if (world.swing(me, in.heavy))
+                audio.play(in.heavy ? ui::Sfx::kSwingHeavy : ui::Sfx::kSwing);
         }
-        if (can_act && in.cast) world.cast(me, in.element, in.aim_x, in.aim_y);
-        if (can_act && in.shoot) world.shoot(me, in.aim_x, in.aim_y);
+        if (can_act && in.cast) {
+            if (world.cast(me, in.element, in.aim_x, in.aim_y)) audio.play(ui::Sfx::kCast);
+        }
+        if (can_act && in.shoot) {
+            if (world.shoot(me, in.aim_x, in.aim_y)) audio.play(ui::Sfx::kShoot);
+        }
 
         if (can_act && in.build) {
             if (world.build_at(me, player.map, in.cursor_tx, in.cursor_ty, in.build_kind)) {
@@ -318,6 +335,50 @@ int main(int argc, char** argv) {
             ++steps;
         }
         if (steps == kMaxStepsPerFrame) accumulator = 0.0f;  // drop the debt rather than chase it
+
+        // --- combat audio, driven by what the simulation published ---------------------------------
+        // The renderer already reads effects out of the visible chunks; audio does the same, but a
+        // cue must fire ONCE per event, not once per render frame. Effects carry no id, so the robust
+        // key is the immutable (chunk, tick) pair: a watched chunk republishes a fresh view every
+        // tick, and within one view the just-born effects are exactly those at age 1 — one
+        // step_effects has run since the verb that made them (the swing/cast is told before the tick,
+        // the effect ages by one, then the chunk publishes). Recording the last tick reacted to per
+        // chunk means each simulation frame is handled exactly once whatever the frame rate, and a
+        // plain `!=` is immune to the (never-reached) wrap of a uint64 tick. Only the player's own
+        // chunk neighbourhood is scanned — every effect a player causes lands within a chunk or two.
+        if (slot >= 0) {
+            const int pcx = static_cast<int>(player.x) / kChunkTiles;
+            const int pcy = static_cast<int>(player.y) / kChunkTiles;
+            for (int cy = std::max(0, pcy - 2); cy <= std::min(kMapChunks - 1, pcy + 2); ++cy) {
+                for (int cx = std::max(0, pcx - 2); cx <= std::min(kMapChunks - 1, pcx + 2); ++cx) {
+                    const ChunkCoord cc{player.map, static_cast<std::uint16_t>(cx),
+                                        static_cast<std::uint16_t>(cy)};
+                    ChunkViewPtr v = world.bus().load(cc);
+                    if (!v) continue;
+                    std::uint64_t& seen = effect_tick[static_cast<std::size_t>(chunk_index(cc))];
+                    if (v->tick == seen) continue;  // this simulation frame is already sounded
+                    seen = v->tick;
+                    for (const Effect& e : v->effects) {
+                        if (e.age != 1) continue;  // only on the tick it was born
+                        // A combo detonation is its own cue; every other flash is a blow landing —
+                        // the kHit sound (hit.wav) that until now was loaded and never played.
+                        audio.play(e.kind == EffectKind::kBlast ? ui::Sfx::kCombo : ui::Sfx::kHit);
+                    }
+                }
+            }
+
+            // A skill going up a level is worth a fanfare. The first sighting only seeds the baseline
+            // so signing in does not itself sound like a level-up.
+            if (!have_skills) {
+                for (int i = 0; i < kSkillCount; ++i) last_skill[i] = player.skill_level[i];
+                have_skills = player.live();
+            } else {
+                for (int i = 0; i < kSkillCount; ++i) {
+                    if (player.skill_level[i] > last_skill[i]) audio.play(ui::Sfx::kLevelUp);
+                    last_skill[i] = player.skill_level[i];
+                }
+            }
+        }
 
         // --- draw -----------------------------------------------------------------------------------
         // No `ask` anywhere in this loop any more. The player's position used to be fetched ~20x a

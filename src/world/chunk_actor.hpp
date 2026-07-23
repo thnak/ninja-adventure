@@ -844,7 +844,7 @@ private:
 
     void step_effects() noexcept {
         for (std::size_t i = effects_.size(); i-- > 0;) {
-            if (++effects_[i].age < kEffectLife) continue;
+            if (++effects_[i].age < effect_life_of(effects_[i].kind)) continue;
             effects_.erase(effects_.begin() + static_cast<std::ptrdiff_t>(i));
         }
     }

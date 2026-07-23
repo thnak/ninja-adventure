@@ -246,8 +246,8 @@ nothing to install, no version to match, and no step a contributor on Windows ca
 
 ## Audio
 
-`assets/audio/` holds the four sound effects and one music track the game actually uses, copied out
-of the Ninja Adventure pack by hand. They are committed (2.1 MB) because `_src/` is not, and the
+`assets/audio/` holds the ten sound effects and one music track the game actually uses, copied out
+of the Ninja Adventure pack by hand. They are committed (2.5 MB) because `_src/` is not, and the
 game has to run from a clean checkout.
 
 | File | Source |
@@ -256,6 +256,12 @@ game has to run from a clean checkout.
 | `build.wav` | `Audio/Sounds/Menu/Accept2.wav` |
 | `harvest.wav` | `Audio/Sounds/Bonus/Bonus.wav` |
 | `hit.wav` | `Audio/Sounds/Hit & Impact/Hit1.wav` |
+| `swing.wav` | `Audio/Sounds/Whoosh & Slash/Slash.wav` |
+| `swing_heavy.wav` | `Audio/Sounds/Whoosh & Slash/Sword2.wav` |
+| `shoot.wav` | `Audio/Sounds/Whoosh & Slash/Launch.wav` |
+| `cast.wav` | `Audio/Sounds/Magic & Skill/Magic1.wav` |
+| `combo.wav` | `Audio/Sounds/Elemental/Explosion.wav` |
+| `levelup.wav` | `Audio/Sounds/Bonus/PowerUp1.wav` |
 | `theme_day.ogg` | `Audio/Musics/11 - Clearing.ogg` |
 
 ## What is committed

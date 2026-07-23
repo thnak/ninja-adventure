@@ -548,13 +548,39 @@ enum class EffectKind : std::uint8_t {
     return EffectKind::kSlash;
 }
 
-inline constexpr std::uint8_t kEffectLife = 6;  // ticks; the art has 4-14 frames to spend
+// How many ticks an effect lives, PER KIND. A single constant (kEffectLife=6) truncated the long
+// strips: the renderer maps age onto frame as `(age * frames) / life`, so six ticks played every
+// effect in six steps — fine for a 4-frame slash, but Earth is 14 frames and got barely a third of
+// them, and Ice ten. The frame counts here mirror the FX strips in tools/build_atlas.py (Slash 4,
+// Fire 8, Ice 10, Earth 14, Shock 8, Blast 9). They live here as plain DATA rather than being read
+// from the generated atlas, because tiles.hpp is the sim/renderer common ground and must not depend
+// on the renderer-only header — the sim ages and evicts effects, the renderer picks the frame, and
+// both read this one table.
+//
+// The lifetime is `frames * ticks_per_frame` with ticks_per_frame == 1, so at the 10 Hz tick rate
+// every strip plays back at ~10 fps — one frame per tick — which is the rate the pixel-art was
+// authored for, and it is exactly the mapping the renderer already used, only no longer clipped.
+[[nodiscard]] inline constexpr std::uint8_t effect_life_of(EffectKind k) noexcept {
+    switch (k) {
+        case EffectKind::kSlash: return 4;
+        case EffectKind::kFire: return 8;
+        case EffectKind::kIce: return 10;
+        case EffectKind::kEarth: return 14;
+        case EffectKind::kShock: return 8;
+        case EffectKind::kBlast: return 9;
+        case EffectKind::kCount: break;
+    }
+    return 6;
+}
+
+// The longest any effect lives, so a caller sizing a buffer or a fade has one bound to reach for.
+inline constexpr std::uint8_t kMaxEffectLife = 14;
 
 struct Effect {
     float x = 0.0f;
     float y = 0.0f;
     EffectKind kind = EffectKind::kSlash;
-    std::uint8_t age = 0;  // counts up; dropped at kEffectLife
+    std::uint8_t age = 0;  // counts up; dropped at effect_life_of(kind)
 };
 
 struct Crop {

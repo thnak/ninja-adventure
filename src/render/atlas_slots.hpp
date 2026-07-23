@@ -118,6 +118,7 @@ struct AtlasAnim {
 
 enum class Anim : std::uint8_t {
     kPlayer,
+    kPlayerAttack,
     kMobSlime,
     kMobSpider,
     kMobSpirit,
@@ -134,17 +135,18 @@ enum class Anim : std::uint8_t {
 
 inline constexpr AtlasAnim kAtlasAnims[static_cast<int>(Anim::kCount)] = {
     {1, 91, 4, 4},  // kPlayer
-    {1, 163, 4, 4},  // kMobSlime
-    {1, 235, 4, 4},  // kMobSpider
-    {1, 307, 4, 4},  // kMobSpirit
-    {1, 379, 4, 4},  // kMobSkull
-    {1, 451, 2, 1},  // kBoar
-    {1, 469, 2, 1},  // kWolf
-    {1, 487, 4, 4},  // kBear
-    {1, 559, 4, 4},  // kRacoon
-    {1, 631, 2, 1},  // kChicken
-    {1, 649, 2, 1},  // kCow
-    {1, 667, 2, 1},  // kHorse
+    {1, 163, 4, 1},  // kPlayerAttack
+    {1, 181, 4, 4},  // kMobSlime
+    {1, 253, 4, 4},  // kMobSpider
+    {1, 325, 4, 4},  // kMobSpirit
+    {1, 397, 4, 4},  // kMobSkull
+    {1, 469, 2, 1},  // kBoar
+    {1, 487, 2, 1},  // kWolf
+    {1, 505, 4, 4},  // kBear
+    {1, 577, 4, 4},  // kRacoon
+    {1, 649, 2, 1},  // kChicken
+    {1, 667, 2, 1},  // kCow
+    {1, 685, 2, 1},  // kHorse
 };
 
 [[nodiscard]] inline constexpr const AtlasAnim& anim_of(Anim a) noexcept {
@@ -200,30 +202,30 @@ enum class Big : std::uint8_t {
 };
 
 inline constexpr AtlasBig kAtlasBigs[static_cast<int>(Big::kCount)] = {
-    {1, 685, 4, 3},  // kTreeBroad
-    {1, 735, 4, 3},  // kTreePine
-    {1, 785, 12, 9},  // kRoom
-    {1, 931, 4, 3},  // kHouseOrange
-    {1, 981, 4, 3},  // kHouseCream
-    {1, 1031, 4, 3},  // kHouseAmber
-    {1, 1081, 4, 3},  // kHouseRed
-    {1, 1131, 3, 3},  // kHouseBlue
-    {1, 1181, 3, 3},  // kHouseTan
-    {1, 1231, 3, 3},  // kHouseWood
-    {1, 1281, 3, 3},  // kHutSnowA
-    {1, 1331, 3, 3},  // kHutSnowB
-    {1, 1381, 3, 3},  // kHutSnowC
-    {1, 1431, 3, 3},  // kRuinA
-    {1, 1481, 3, 3},  // kRuinB
-    {1, 1531, 3, 3},  // kTentA
-    {1, 1581, 3, 3},  // kTentB
-    {1, 1631, 3, 3},  // kTentC
-    {1, 1681, 3, 5},  // kLogPost
-    {1, 1763, 3, 3},  // kRampart
-    {1, 1813, 3, 3},  // kGate
-    {1, 1863, 1, 2},  // kStakeA
-    {1, 1897, 1, 2},  // kStakeB
-    {1, 1931, 1, 2},  // kStakeC
+    {1, 703, 4, 3},  // kTreeBroad
+    {1, 753, 4, 3},  // kTreePine
+    {1, 803, 12, 9},  // kRoom
+    {1, 949, 4, 3},  // kHouseOrange
+    {1, 999, 4, 3},  // kHouseCream
+    {1, 1049, 4, 3},  // kHouseAmber
+    {1, 1099, 4, 3},  // kHouseRed
+    {1, 1149, 3, 3},  // kHouseBlue
+    {1, 1199, 3, 3},  // kHouseTan
+    {1, 1249, 3, 3},  // kHouseWood
+    {1, 1299, 3, 3},  // kHutSnowA
+    {1, 1349, 3, 3},  // kHutSnowB
+    {1, 1399, 3, 3},  // kHutSnowC
+    {1, 1449, 3, 3},  // kRuinA
+    {1, 1499, 3, 3},  // kRuinB
+    {1, 1549, 3, 3},  // kTentA
+    {1, 1599, 3, 3},  // kTentB
+    {1, 1649, 3, 3},  // kTentC
+    {1, 1699, 3, 5},  // kLogPost
+    {1, 1781, 3, 3},  // kRampart
+    {1, 1831, 3, 3},  // kGate
+    {1, 1881, 1, 2},  // kStakeA
+    {1, 1915, 1, 2},  // kStakeB
+    {1, 1949, 1, 2},  // kStakeC
 };
 
 [[nodiscard]] inline constexpr const AtlasBig& big_of(Big b) noexcept {
@@ -253,23 +255,47 @@ enum class Fx : std::uint8_t {
     kEarth,
     kShock,
     kBlast,
+    kShield,
+    kAura,
+    kBoost,
+    kSparkFx,
+    kCircle,
+    kSlashHeavy,
+    kSlashCombo,
+    kKunai,
+    kShuriken,
+    kFireball,
+    kEnergyBall,
+    kSmoke,
     kFacePlayer,
     kCount,
 };
 
 inline constexpr AtlasFx kAtlasFx[static_cast<int>(Fx::kCount)] = {
-    {1, 1965, 12, 7, 6},  // kLeaf
-    {1, 1974, 12, 7, 6},  // kLeafPink
-    {1, 1983, 8, 8, 3},  // kRain
-    {1, 1993, 8, 8, 7},  // kSnow
-    {1, 2003, 16, 16, 1},  // kArrow
-    {1, 2021, 32, 32, 4},  // kSlash
-    {1, 2055, 25, 30, 8},  // kFire
-    {1, 2087, 32, 32, 10},  // kIce
-    {1, 2121, 30, 30, 14},  // kEarth
-    {1, 2153, 20, 28, 8},  // kShock
-    {1, 2183, 40, 40, 9},  // kBlast
-    {1, 2225, 38, 38, 1},  // kFacePlayer
+    {1, 1983, 12, 7, 6},  // kLeaf
+    {1, 1992, 12, 7, 6},  // kLeafPink
+    {1, 2001, 8, 8, 3},  // kRain
+    {1, 2011, 8, 8, 7},  // kSnow
+    {1, 2021, 16, 16, 1},  // kArrow
+    {1, 2039, 32, 32, 4},  // kSlash
+    {1, 2073, 25, 30, 8},  // kFire
+    {1, 2105, 32, 32, 10},  // kIce
+    {1, 2139, 30, 30, 14},  // kEarth
+    {1, 2171, 20, 28, 8},  // kShock
+    {1, 2201, 40, 40, 9},  // kBlast
+    {1, 2243, 24, 26, 6},  // kShield
+    {1, 2271, 25, 24, 5},  // kAura
+    {1, 2297, 53, 35, 8},  // kBoost
+    {1, 2334, 27, 35, 10},  // kSparkFx
+    {1, 2371, 32, 32, 4},  // kCircle
+    {1, 2405, 32, 32, 4},  // kSlashHeavy
+    {1, 2439, 32, 32, 4},  // kSlashCombo
+    {1, 2473, 65, 59, 10},  // kKunai
+    {1, 2534, 69, 54, 10},  // kShuriken
+    {1, 2590, 16, 16, 4},  // kFireball
+    {1, 2608, 16, 16, 4},  // kEnergyBall
+    {1, 2626, 32, 32, 6},  // kSmoke
+    {1, 2660, 38, 38, 1},  // kFacePlayer
 };
 
 [[nodiscard]] inline constexpr const AtlasFx& fx_of(Fx f) noexcept {
@@ -305,17 +331,17 @@ inline constexpr int kEdgeBL = 64, kEdgeB = 128, kEdgeBR = 256;
 inline constexpr int kEdgeFull = 511;
 
 inline constexpr AtlasRect kAtlasTrans[kTransTerrains] = {
-    {1, 2265},  // Grass — generated
-    {1, 2283},  // Dirt — TilesetFloor.png#2
-    {1, 2301},  // Water — TilesetWater.png#18
-    {1, 2319},  // Stone — generated
-    {1, 2337},  // Sand — generated
-    {1, 2355},  // Tree — generated
-    {1, 2373},  // Snow — TilesetSnow.png#17
-    {1, 2391},  // Marsh — generated
-    {1, 2409},  // Ash — generated
-    {1, 2427},  // Path — generated
-    {1, 2445},  // Building — generated
+    {1, 2700},  // Grass — generated
+    {1, 2718},  // Dirt — TilesetFloor.png#2
+    {1, 2736},  // Water — TilesetWater.png#18
+    {1, 2754},  // Stone — generated
+    {1, 2772},  // Sand — generated
+    {1, 2790},  // Tree — generated
+    {1, 2808},  // Snow — TilesetSnow.png#17
+    {1, 2826},  // Marsh — generated
+    {1, 2844},  // Ash — generated
+    {1, 2862},  // Path — generated
+    {1, 2880},  // Building — generated
 };
 
 // Whether this terrain's variant 0 is a genuinely PLAIN fill, derived from the manifest by

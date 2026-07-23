@@ -18,7 +18,13 @@ enum class Sfx : std::uint8_t {
     kUiClick,
     kBuild,
     kHarvest,
-    kHit,
+    kHit,       // a blow landing — finally played, off the effects a fight publishes
+    kSwing,     // a light melee swing
+    kSwingHeavy,// a charged melee swing
+    kCast,      // a spell going out
+    kShoot,     // an arrow loosed
+    kCombo,     // a combo detonating (the kBlast flash)
+    kLevelUp,   // a skill went up a level
     kCount,
 };
 

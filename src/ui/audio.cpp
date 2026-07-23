@@ -22,6 +22,12 @@ constexpr const char* kSfxFiles[static_cast<int>(Sfx::kCount)] = {
     "build.wav",
     "harvest.wav",
     "hit.wav",
+    "swing.wav",
+    "swing_heavy.wav",
+    "cast.wav",
+    "shoot.wav",
+    "combo.wav",
+    "levelup.wav",
 };
 
 }  // namespace
