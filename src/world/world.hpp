@@ -352,7 +352,10 @@ public:
                 z.radius = def.radius;
                 z.ticks = def.zone_ticks;
                 z.player = player;
-                chunk_ref_at(p.map, p.x, p.y).tell(z);
+                // Fanned to the 3x3 neighbourhood, the same as a swing (F2): a zone centred near a
+                // border reaches into its neighbours, and each recipient keeps the part that overlaps
+                // it. Under F1a this was a single tell to the centre chunk and the seam under-covered.
+                fan_to_neighbours(p.map, p.x, p.y, z);
                 break;
             }
         }
@@ -423,6 +426,38 @@ public:
         w.ty = ty;
         w.radius = 2;
         chunk_ref(map, tx, ty).tell(w);
+    }
+
+    // Debug/tools: one creature on an EXACT tile (radius 0), for a staged scenario that needs a
+    // single attacker at a known distance rather than a scattered wave — the F2 telegraph checks.
+    void spawn_one_at(std::uint16_t tx, std::uint16_t ty, CreatureKind kind,
+                      std::uint16_t map = kOverworld) {
+        if (!in_map(tx, ty)) return;
+        SpawnWave w{};
+        w.count = 1;
+        w.seed = 1;
+        w.kind = static_cast<std::uint8_t>(kind);
+        w.tx = tx;
+        w.ty = ty;
+        w.radius = 0;
+        chunk_ref(map, tx, ty).tell(w);
+    }
+
+    // Debug/tools: drop a lingering zone directly, bypassing the ability gate the same way
+    // `spawn_wave_at` bypasses the director. Fanned to the neighbourhood exactly as the ability path
+    // does, so a staged scenario can prove the F2 seam fix — a zone on a chunk border reaching both
+    // sides — without first levelling a caster into RainCall.
+    void spawn_zone_at(ZoneKind kind, float x, float y, float radius, std::uint16_t ticks,
+                       std::uint16_t map = kOverworld) {
+        if (!in_map(x, y)) return;
+        SpawnZone z{};
+        z.kind = kind;
+        z.x = x;
+        z.y = y;
+        z.radius = radius;
+        z.ticks = ticks;
+        z.player = 0;
+        fan_to_neighbours(map, x, y, z);
     }
 
     // Debug/tools: hand a player experience directly, so a staged scenario can reach the school

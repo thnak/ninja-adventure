@@ -404,6 +404,150 @@ int main(int argc, char** argv) {
     chk.expect(have_m1 && have_m2 && (m1x != m2x || m1y != m2y),
                "there are two distinct walkable meadow tiles to stage the ability fights on");
 
+    // --- The telegraphed attack (F2) --------------------------------------------------------------
+    // Monster combat is no longer invisible contact damage: a creature in reach COMMITS to a swing,
+    // freezes for its wind-up, and only THEN does the blow land — or whiff, if the player used those
+    // ticks to leave. This section proves the three halves that make it a real dodge window: (a) no
+    // damage lands until the wind-up elapses and then it does; (b) a player who leaves mid-wind-up
+    // takes nothing and still sees the miss; and it is staged on a clean meadow tile of its own so a
+    // single slime is the only attacker.
+    int f2x = -1, f2y = -1;
+    const bool have_f2 = find_meadow_tile(kHomeTx, kHomeTy - 90, f2x, f2y);
+    chk.expect(have_f2, "a third clean meadow tile to stage the telegraph on");
+    if (have_f2) {
+        const ChunkCoord f2_chunk = chunk_of(home, static_cast<float>(f2x), static_cast<float>(f2y));
+        // The slime's published wind-up counter, and whether a slime is present at all. Reads the
+        // same view the renderer draws — the whole point of F2 is that the telegraph is published
+        // state, not a client-side guess.
+        const auto slime_windup = [&](bool& present) -> std::uint8_t {
+            present = false;
+            ChunkViewPtr v = world.bus().load(f2_chunk);
+            if (!v) return 0;
+            for (const Creature& c : v->creatures) {
+                if (c.kind == CreatureKind::kSlime) {
+                    present = true;
+                    return c.windup;
+                }
+            }
+            return 0;
+        };
+        const auto whiff_slash_present = [&]() -> bool {
+            ChunkViewPtr v = world.bus().load(f2_chunk);
+            if (!v) return false;
+            for (const Effect& e : v->effects)
+                if (e.kind == EffectKind::kSlash) return true;
+            return false;
+        };
+        const auto step_to_fresh_commit = [&](int budget) -> bool {
+            for (int i = 0; i < budget; ++i) {
+                advance(world, 1);
+                bool present = false;
+                const std::uint8_t w = slime_windup(present);
+                // A FRESH commit — the counter at its species maximum — so the whole wind-up is still
+                // ahead of us and the beacon has time to refresh during it.
+                if (present && w == stats_of(CreatureKind::kSlime).windup) return true;
+            }
+            return false;
+        };
+
+        // (a) In reach: the blow is deferred to the end of the wind-up, then it lands.
+        world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+        world.teleport_player(me, home, static_cast<float>(f2x) + 0.5f,
+                              static_cast<float>(f2y) + 0.5f);
+        world.spawn_one_at(static_cast<std::uint16_t>(f2x), static_cast<std::uint16_t>(f2y),
+                           CreatureKind::kSlime, home);
+        const bool committed_a = step_to_fresh_commit(30);
+        const PlayerView at_commit = world.player_view(slot);
+        chk.expect(committed_a, "the slime committed to a telegraphed swing (its wind-up is published)");
+        chk.expect(at_commit.hp == kPlayerMaxHp, "no damage had landed at the moment of commit");
+        // Hold through the wind-up: every tick it is still winding up, the player is untouched.
+        bool damage_during_windup = false;
+        int windup_ticks_seen = 0;
+        for (int i = 0; i < 12; ++i) {
+            bool present = false;
+            const std::uint8_t w = slime_windup(present);
+            if (!present || w == 0) break;  // wind-up finished — the strike resolves this tick
+            ++windup_ticks_seen;
+            if (world.player_view(slot).hp < kPlayerMaxHp) damage_during_windup = true;
+            advance(world, 1);
+        }
+        const PlayerView after_windup = world.player_view(slot);
+        const std::int16_t slime_dmg = stats_of(CreatureKind::kSlime).damage;  // meadow: unscaled
+        std::printf("\ntelegraph: wind-up held %d ticks (species %u), hp %d -> %d (slime hits %d)\n",
+                    windup_ticks_seen, stats_of(CreatureKind::kSlime).windup, at_commit.hp,
+                    after_windup.hp, slime_dmg);
+        chk.expect(windup_ticks_seen > 0, "the slime stood still telegraphing, not hitting on contact");
+        chk.expect(!damage_during_windup, "no HurtPlayer landed before the wind-up elapsed");
+        chk.expect(after_windup.hp == kPlayerMaxHp - slime_dmg,
+                   "the blow landed for exactly the species damage once the wind-up elapsed");
+
+        // (b) The dodge: refill, wait for a fresh commit, then leave mid-wind-up. The blow whiffs —
+        // no damage, and a slash the player can SEE lands on the empty spot it was aiming at. The
+        // player stays in the SAME chunk (a few tiles out of reach), because that is what a real
+        // dodge is: the beacon keeps refreshing with the receding position, and the chunk learns the
+        // player left the reach in time to miss.
+        world.grant_vitals(me, kPlayerMaxHp, 0, 0);
+        const bool committed_b = step_to_fresh_commit(30);
+        chk.expect(committed_b, "the slime committed to a second swing");
+        world.teleport_player(me, home, static_cast<float>(f2x) + 6.5f,
+                              static_cast<float>(f2y) + 0.5f);  // out of reach, same chunk
+        // Let the wind-up run out and the whiff resolve.
+        advance(world, static_cast<int>(stats_of(CreatureKind::kSlime).windup) + 2);
+        const PlayerView dodged = world.player_view(slot);
+        const bool saw_whiff = whiff_slash_present();
+        std::printf("dodge: teleported out mid-wind-up, hp %d (unchanged), whiff slash %s\n",
+                    dodged.hp, saw_whiff ? "published" : "MISSING");
+        chk.expect(dodged.hp == kPlayerMaxHp, "leaving reach mid-wind-up took no damage (the dodge)");
+        chk.expect(saw_whiff, "the whiffed swing still slashed the spot it aimed at — the miss is visible");
+
+        // Park `me` back on the spawn tile so the sections below read a normal, isolated player.
+        world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+        world.teleport_player(me, home, spawn.x, spawn.y);
+    }
+
+    // --- Zone seams (F2) --------------------------------------------------------------------------
+    // A lingering zone centred on a chunk border must affect creatures on BOTH sides. Under F1a only
+    // the chunk owning the centre adopted it, so a creature one tile across the seam stayed dry. The
+    // fix fans the zone to the neighbourhood and each chunk keeps the part that overlaps it. Proof: a
+    // wet zone straddling a border wets a creature on each side.
+    {
+        // A walkable meadow border: an x on a chunk boundary with walkable tiles either side of it.
+        int bx = -1, by = -1;
+        for (int cxb = kHomeTx / kChunkTiles - 3; cxb <= kHomeTx / kChunkTiles + 3 && bx < 0; ++cxb) {
+            const int ex = cxb * kChunkTiles;  // the seam: chunk cxb-1 owns ex-1, chunk cxb owns ex
+            if (ex <= 0 || ex >= kMapTiles) continue;
+            for (int ty = kHomeTy - 40; ty <= kHomeTy + 40; ++ty) {
+                if (ring_of(kWorldSeed, ex, ty) != Ring::kMeadow) continue;
+                if (!is_walkable(terrain_of(kWorldSeed, home, ex, ty))) continue;
+                if (!is_walkable(terrain_of(kWorldSeed, home, ex - 1, ty))) continue;
+                bx = ex;
+                by = ty;
+                break;
+            }
+        }
+        chk.expect(bx > 0, "found a walkable meadow tile pair straddling a chunk border");
+        if (bx > 0) {
+            const ChunkCoord left = chunk_of(home, static_cast<float>(bx - 1), static_cast<float>(by));
+            const ChunkCoord right = chunk_of(home, static_cast<float>(bx), static_cast<float>(by));
+            chk.expect(left != right, "the two tiles really are in different chunks");
+            world.spawn_one_at(static_cast<std::uint16_t>(bx - 1), static_cast<std::uint16_t>(by),
+                               CreatureKind::kSlime, home);
+            world.spawn_one_at(static_cast<std::uint16_t>(bx), static_cast<std::uint16_t>(by),
+                               CreatureKind::kSlime, home);
+            advance(world, 1);
+            // A wet zone centred exactly on the seam, radius 3 — reaches a tile into each chunk.
+            world.spawn_zone_at(ZoneKind::kWet, static_cast<float>(bx), static_cast<float>(by) + 0.5f,
+                                3.0f, 30, home);
+            advance(world, 2);  // step_zones wets what it owns inside the circle, on both sides
+            const ChunkStats ls = world.chunk_stats(left);
+            const ChunkStats rs = world.chunk_stats(right);
+            std::printf("\nzone seam: border tile x=%d; afflicted left=%u right=%u\n", bx,
+                        ls.afflicted, rs.afflicted);
+            chk.expect(ls.afflicted > 0, "the border zone wet the creature on the LEFT chunk");
+            chk.expect(rs.afflicted > 0, "the border zone wet the creature on the RIGHT chunk");
+        }
+    }
+
     const std::uint64_t guest = world.key_of(slot2);
 
     // The lock: a fresh account has no fighting levels, so slot A resolves to a Melee ability it is

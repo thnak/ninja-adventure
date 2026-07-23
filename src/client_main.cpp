@@ -75,6 +75,8 @@ int main(int argc, char** argv) {
     int look_ring = -1;                 // --ring N: park the camera in biome ring N
     int stage_fight = 0;                // --fight N: drop N creatures on the player before the shot
     bool stage_ability = false;         // --ability: level into Magic and fire Nova + RainCall
+    bool stage_telegraph = false;       // --telegraph: one slime frozen mid-wind-up, for the F2 read
+    bool stage_flash = false;           // --flash: one slime, struck between frames, for the F2 flash
     bool stage_walk = false;            // --walk: keep the player moving so a shot catches mid-stride
     int look_door = -1;                 // --door N: step onto door N, which takes you inside it
     int look_at_tx = -1;                // --at TX TY: park the camera on an arbitrary tile
@@ -98,6 +100,10 @@ int main(int argc, char** argv) {
             stage_fight = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--ability") == 0) {
             stage_ability = true;  // level into Magic, then fire Nova + RainCall for the shot
+        } else if (std::strcmp(argv[i], "--telegraph") == 0) {
+            stage_telegraph = true;  // one slime, stepped to its wind-up and left frozen there
+        } else if (std::strcmp(argv[i], "--flash") == 0) {
+            stage_flash = true;  // one slime, struck inside the render loop so its hit flash shows
         } else if (std::strcmp(argv[i], "--walk") == 0) {
             stage_walk = true;
         } else if (std::strcmp(argv[i], "--at") == 0 && i + 2 < argc) {
@@ -233,21 +239,35 @@ int main(int argc, char** argv) {
             world.spawn_wave_at(static_cast<std::uint16_t>(player.x),
                                 static_cast<std::uint16_t>(player.y), CreatureKind::kSlime,
                                 static_cast<std::uint16_t>(stage_fight));
-            // Only long enough for the beacon to reach the chunk and the slimes to close. Any
-            // longer and they simply kill the photographer — the first attempt ran 30 ticks with
-            // ten slimes and produced a screenshot of the respawn timer.
-            for (int i = 0; i < 5; ++i) world.step(kTickMs);
-            world.sync_world();
+            // Step only until a slime has COMMITTED to a telegraphed swing (F2): the shot then catches
+            // it frozen mid-wind-up — warm-tinted, micro-shaking, with the smoke puff at its feet —
+            // which is the whole point the walk-only art cannot show on its own. Bounded so a chunk
+            // that never produced a commit (all slimes died) still ends. A slime's wind-up is on the
+            // published creature, read from the same bus the renderer draws.
+            const auto any_winding_up = [&]() -> bool {
+                const int pcx = static_cast<int>(player.x) / kChunkTiles;
+                const int pcy = static_cast<int>(player.y) / kChunkTiles;
+                for (int cy = std::max(0, pcy - 1); cy <= std::min(kMapChunks - 1, pcy + 1); ++cy) {
+                    for (int cx = std::max(0, pcx - 1); cx <= std::min(kMapChunks - 1, pcx + 1); ++cx) {
+                        ChunkViewPtr v = world.bus().load(
+                            ChunkCoord{player.map, static_cast<std::uint16_t>(cx),
+                                       static_cast<std::uint16_t>(cy)});
+                        if (!v) continue;
+                        for (const Creature& c : v->creatures)
+                            if (c.windup > 0) return true;
+                    }
+                }
+                return false;
+            };
+            for (int i = 0; i < 16; ++i) {
+                world.step(kTickMs);
+                world.sync_world();
+                if (any_winding_up()) break;
+            }
             player = view();
-            world.cast(me, Element::kIce, player.x + 2.0f, player.y - 1.0f);
+            // No elemental cast here on purpose: an ice/fire status recolours the sprite and would
+            // mask the warm wind-up tint the shot is meant to show. An arrow in flight is neutral.
             world.shoot(me, player.x + 8.0f, player.y + 1.0f);
-            world.swing(me, /*heavy*/ true);
-            // Two ticks, not one: the renderer plays the swing one frame per tick, and its second
-            // frame is the wind-up where the blade is hidden behind the body (that overlay cell is
-            // empty by design). Landing the shot on the third frame — the downward swing — is what
-            // puts the katana and its baked swoosh in the picture.
-            world.step(kTickMs);
-            world.step(kTickMs);
             world.sync_world();
         }
 
@@ -277,6 +297,82 @@ int main(int argc, char** argv) {
             world.step(kTickMs);
             world.sync_world();
         }
+
+        // Telegraph read (F2): a single slime placed just in reach and stepped ONLY until it commits
+        // to a swing, then left there. The world is not advanced again before the shot (no per-frame
+        // swinging as --fight does), so the slime stays frozen mid-wind-up — warm-glowing,
+        // micro-shaking, its commit smoke puff still at its feet — which is exactly the telegraph the
+        // walk-only art cannot show on its own. One creature, so nothing occludes the read.
+        if ((stage_telegraph || stage_flash) && slot >= 0) {
+            world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+            world.sync_world();
+            player = view();
+            // Find OPEN grass: a 3x3 of plain grass, so no tree canopy draws over the read and the
+            // white puff has a green backdrop rather than a stone floor or snow to vanish into.
+            const auto all_grass = [&](int tx, int ty) {
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx)
+                        if (terrain_of(kWorldSeed, player.map, tx + dx, ty + dy) != Terrain::kGrass)
+                            return false;
+                return true;
+            };
+            int ptx = static_cast<int>(player.x), pty = static_cast<int>(player.y);
+            for (int r = 0; r < 60; ++r) {
+                bool found = false;
+                for (int dy = -r; dy <= r && !found; ++dy)
+                    for (int dx = -r; dx <= r && !found; ++dx) {
+                        if (std::abs(dx) != r && std::abs(dy) != r) continue;
+                        const int tx = static_cast<int>(player.x) + dx;
+                        const int ty = static_cast<int>(player.y) + dy;
+                        if (tx > 1 && ty > 1 && tx < kMapTiles - 1 && ty < kMapTiles - 1 &&
+                            all_grass(tx, ty)) {
+                            ptx = tx;
+                            pty = ty;
+                            found = true;
+                        }
+                    }
+                if (found) break;
+            }
+            world.teleport_player(me, player.map, static_cast<float>(ptx) + 0.5f,
+                                  static_cast<float>(pty) + 0.5f);
+            world.sync_world();
+            // Telegraph: adjacent (distance 1.0), inside the slime's reach so it commits and puffs.
+            // Flash: diagonal (distance ~1.41), OUTSIDE the slime's 1.0 reach so it never winds up and
+            // never puffs — but inside the player's 1.9 swing reach, so the strike lands on a clean
+            // sprite and its white flash is not buried under its own attack smoke.
+            const auto stx = static_cast<std::uint16_t>(ptx + 1);
+            const auto sty = static_cast<std::uint16_t>(stage_flash ? pty + 1 : pty);
+            world.spawn_one_at(stx, sty, CreatureKind::kSlime, player.map);
+            const ChunkCoord sc =
+                chunk_of(player.map, static_cast<float>(stx), static_cast<float>(sty));
+            if (stage_telegraph) {
+                bool committed = false;
+                for (int i = 0; i < 24 && !committed; ++i) {
+                    world.step(kTickMs);
+                    world.sync_world();
+                    if (ChunkViewPtr v = world.bus().load(sc))
+                        for (const Creature& c : v->creatures)
+                            if (c.windup == stats_of(CreatureKind::kSlime).windup) committed = true;
+                }
+                // A few ticks past the commit: the wind-up counter is still above zero (the slime is
+                // 4 ticks, so three steps leaves it at 1 and still red-glowing), while the commit puff
+                // has begun to disperse so it frames the slime rather than burying it. This is the
+                // frame that reads as "a slime rearing back to hit" — smoke AND a warm charge, both.
+                if (committed) {
+                    for (int i = 0; i < 2; ++i) world.step(kTickMs);
+                    world.sync_world();
+                }
+            } else {
+                // Flash mode: step twice so the slime is PUBLISHED at full HP before the render loop
+                // begins — a creature does not appear in a view until a tick has published it, and the
+                // flash needs a full-HP baseline frame to measure the drop against. The slime is out
+                // of its own reach so it never attacks; the only thing that touches it is the player's
+                // strike, landed inside the render loop (below) so the HP drop falls BETWEEN two drawn
+                // frames, which is the one thing the client turns into a hit flash.
+                for (int i = 0; i < 2; ++i) world.step(kTickMs);
+                world.sync_world();
+            }
+        }
     }
     int frames = 0;
 
@@ -298,6 +394,28 @@ int main(int argc, char** argv) {
         // draws and the shot catches the walk cycle. Shot-only staging; a live client never sets it.
         if (stage_walk && shot_path != nullptr && slot >= 0) {
             world.move_player(me, kPlayerSpeed * 0.08f, 0.0f);
+            world.step(kTickMs);
+            world.sync_world();
+        }
+
+        // --fight shot: swing and step ONCE PER RENDERED FRAME so a slime's HP drops BETWEEN two
+        // draws — that frame-to-frame drop is exactly what the client turns into a hit flash (F2), and
+        // it can only be photographed if the hit lands inside the render loop, not before it. The
+        // fixed accumulator otherwise advances the world zero ticks across the three settle frames.
+        if (stage_fight > 0 && shot_path != nullptr && slot >= 0) {
+            // Skip the swing on the FIRST rendered frame so that frame establishes the creatures'
+            // baseline HP, then land it on the next — the HP drop now falls BETWEEN two draws, which
+            // is the only thing the client turns into a hit flash. Swinging on frame zero would bake
+            // the drop into the baseline and no flash would ever show.
+            if (frames >= 1) world.swing(me, /*heavy*/ true);
+            world.step(kTickMs);
+            world.sync_world();
+        }
+        // --flash shot: the single-slime version of the same idea — one clean creature struck EXACTLY
+        // ONCE after the baseline frame, so it survives to keep flashing (a second heavy swing would
+        // kill it and the shot would catch a death puff instead of the flash).
+        if (stage_flash && shot_path != nullptr && slot >= 0 && frames == 1) {
+            world.swing(me, /*heavy*/ false);  // LIGHT: a heavy blow can one-shot a meadow slime
             world.step(kTickMs);
             world.sync_world();
         }
@@ -381,8 +499,14 @@ int main(int argc, char** argv) {
         // Note the world advances in EVERY screen except the main menu and the sign-in box. Pausing
         // the menu but not the world is deliberate: the world is shared, and it cannot stop because
         // one player opened their journal.
+        // The single-creature F2 shots (--telegraph / --flash) freeze the accumulator so ONLY their
+        // own explicit per-frame steps advance the world. The accumulator is driven by real frame
+        // time, which on a headless render varies run to run — left running it would step the world a
+        // different number of ticks each time and the slime would sometimes die instead of flash, or
+        // drift out of its wind-up. Freezing it makes these staged shots deterministic.
         const bool world_frozen =
-            shell.screen == ui::Screen::kMainMenu || shell.screen == ui::Screen::kLogin;
+            shell.screen == ui::Screen::kMainMenu || shell.screen == ui::Screen::kLogin ||
+            ((stage_flash || stage_telegraph) && shot_path != nullptr);
         if (world_frozen) accumulator = 0.0f;
         accumulator += dt;
         int steps = 0;
@@ -497,6 +621,8 @@ int main(int argc, char** argv) {
         }
         if (act == ui::Action::kQuit) break;
 
+        // The flash shot fires the moment AFTER the hit (frame 3 == one draw past the strike landed on
+        // frame 2), catching the flash at its freshest; other shots take the usual three-frame settle.
         if (shot_path != nullptr && ++frames >= 3) {  // let the swap chain settle
             bridge.screenshot(shot_path);
             std::printf("wrote %s at world t=%.1fs\n", shot_path,

@@ -285,16 +285,37 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         }
     }
 
-    // Adopt a lingering zone. Exactly one chunk — the one that owns the centre — keeps it, so the
-    // renderer draws it once and its per-tick effect is applied once. A radius that reaches into a
-    // neighbour therefore under-covers at the seam; that fan-out is F2's, and this is the deliberately
-    // minimal F1a shape (see `Zone`).
+    // Adopt a lingering zone (F2 seam fix). The message is now fanned to the 3x3 neighbourhood like a
+    // swing, and EVERY chunk whose area the circle touches keeps a copy — so a zone centred on a
+    // border wets (or blinds) creatures on BOTH sides, not just the owning chunk's. Each copy is
+    // clipped to its own chunk for free: step_zones only ever touches creatures THIS chunk owns, so
+    // the shared circle applies to each creature exactly once, by exactly the chunk that owns it. The
+    // F1a version adopted only at the centre and under-covered the seam.
     void handle(const SpawnZone& z) noexcept {
-        if (!owns_point(z.x, z.y)) return;
+        if (!zone_intersects_chunk(z.x, z.y, z.radius)) return;
         if (zones_.size() >= kMaxZones) return;
         zones_.push_back(Zone{z.kind, z.x, z.y, z.radius, z.ticks});
-        // The throw is a one-shot puff; the lingering haze is the zone loop the renderer runs.
-        if (z.kind == ZoneKind::kSmokeSuppress) add_effect(z.x, z.y, EffectKind::kSmoke);
+        // The throw is a one-shot puff; the lingering haze is the zone loop the renderer runs. Only
+        // the chunk that owns the CENTRE throws it, or a border zone would puff up to nine times.
+        if (owns_point(z.x, z.y) && z.kind == ZoneKind::kSmokeSuppress) {
+            add_effect(z.x, z.y, EffectKind::kSmoke);
+        }
+    }
+
+    // Does a circle (a zone) overlap this chunk's tile rectangle? Standard circle-vs-AABB: the
+    // closest point of the rectangle to the centre is the clamped centre, and the circle reaches the
+    // rectangle iff that point is within the radius. This is the whole of the F2 seam fix on the sim
+    // side — a chunk simply ignores a zone that does not reach into it.
+    [[nodiscard]] bool zone_intersects_chunk(float zx, float zy, float r) const noexcept {
+        const float x0 = static_cast<float>(coord.cx * kChunkTiles);
+        const float y0 = static_cast<float>(coord.cy * kChunkTiles);
+        const float x1 = x0 + static_cast<float>(kChunkTiles);
+        const float y1 = y0 + static_cast<float>(kChunkTiles);
+        const float nx = std::clamp(zx, x0, x1);
+        const float ny = std::clamp(zy, y0, y1);
+        const float dx = zx - nx;
+        const float dy = zy - ny;
+        return dx * dx + dy * dy <= r * r;
     }
 
     // --- the farming verbs ------------------------------------------------------------------------
@@ -631,7 +652,17 @@ private:
             if (c.anger_ticks > 0 && --c.anger_ticks == 0) c.target = 0;
             if (c.stun_ticks > 0) {
                 --c.stun_ticks;
-                continue;  // a stunned creature does not move, turn or strike
+                c.windup = 0;  // a stun interrupts a committed swing — the telegraph is cancelled (F2)
+                continue;      // a stunned creature does not move, turn or strike
+            }
+
+            // A creature that has committed to a swing is frozen mid-telegraph (F2): it does not
+            // steer, flee or re-acquire — it counts its wind-up down and the blow lands the tick the
+            // counter reaches zero. This freeze IS the dodge window, so everything below (targeting,
+            // movement, mauling) is skipped for a committed creature.
+            if (c.windup > 0) {
+                if (--c.windup == 0) resolve_windup(c);
+                continue;
             }
 
             // Inside a smoke zone a creature is blinded: it drops what it was chasing and cannot pick
@@ -667,9 +698,8 @@ private:
                 dy = prey->y - c.y;
                 const float dist = std::sqrt(dx * dx + dy * dy);
                 if (dist <= st.reach && c.attack_cd == 0 && c.damage > 0) {
-                    c.facing = facing_of(dx, dy);
-                    strike_player(c, prey->player);
-                    continue;  // it planted its feet to swing
+                    commit_windup(c, *prey);
+                    continue;  // it planted its feet — the wind-up begins, the blow lands a beat later
                 }
             } else if (threat != nullptr) {
                 dx = c.x - threat->x;  // straight away, and fast
@@ -777,10 +807,53 @@ private:
         dy = static_cast<float>(c.wander_dy);
     }
 
-    void strike_player(Creature& c, std::uint64_t player) noexcept {
+    // Commit to a swing (F2). Freeze mid-telegraph, remember WHO it swung at and WHERE they stood,
+    // and throw the puff the renderer reads as "about to hit". No damage lands here — `resolve_windup`
+    // lands it `windup` ticks later, and the player has those ticks to step out of reach. This is a
+    // straight buff to player agency: the per-species damage is unchanged, only the timing is.
+    void commit_windup(Creature& c, const PlayerBeacon& prey) noexcept {
+        c.facing = facing_of(prey.x - c.x, prey.y - c.y);
+        c.windup = stats_of(c.kind).windup;
+        c.windup_target = prey.player;
+        c.windup_x = prey.x;
+        c.windup_y = prey.y;
+        add_effect(c.x, c.y, EffectKind::kSmoke);  // the tell: a puff at its feet as it plants them
+    }
+
+    // The committed blow resolves (F2). Look the target up again by key — a swing is aimed at the
+    // player it was committed against, not at whoever is now closest. Still within a hair over reach
+    // (reach*1.15 — a grace so a real dodge earns the miss but pixel-perfect edging does not) and it
+    // connects: HurtPlayer plus a slash ON the player. Slipped out of the window and it whiffs: a
+    // slash on the empty spot it aimed at, because a miss the player SEES is the reward for dodging.
+    // Either way the recover cooldown starts, so a dodged swing still costs the creature its beat.
+    void resolve_windup(Creature& c) noexcept {
         c.attack_cd = kStrikeCooldown;
-        if (router == nullptr || player == 0) return;
-        router->get<PlayerActor>(player).tell(HurtPlayer{c.damage, c.id});
+        const std::uint64_t target = c.windup_target;
+        c.windup_target = 0;
+        const float grace = stats_of(c.kind).reach * 1.15f;
+        if (const PlayerBeacon* p = beacon_of(target)) {
+            const float dx = p->x - c.x;
+            const float dy = p->y - c.y;
+            if (dx * dx + dy * dy <= grace * grace) {
+                if (router != nullptr) {
+                    router->get<PlayerActor>(target).tell(HurtPlayer{c.damage, c.id});
+                }
+                add_effect(p->x, p->y, EffectKind::kSlash);  // the blow, on the player
+                return;
+            }
+        }
+        add_effect(c.windup_x, c.windup_y, EffectKind::kSlash);  // a whiff, where the player was
+    }
+
+    // The beacon for one SPECIFIC player, or null. `nearest_player` settles for whoever is closest;
+    // resolving a committed swing must re-check the exact target it was aimed at, even if another
+    // player has since stepped nearer.
+    [[nodiscard]] const PlayerBeacon* beacon_of(std::uint64_t player) const noexcept {
+        if (player == 0) return nullptr;
+        for (const PlayerBeacon& p : players_) {
+            if (p.player == player && p.hp > 0) return &p;
+        }
+        return nullptr;
     }
 
     // A monster hits whatever wildlife it is standing next to. Deliberately not a targeting system:

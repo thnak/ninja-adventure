@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <unordered_map>
 #include <vector>
 
 #include "raylib.h"
@@ -415,6 +416,33 @@ struct RaylibBridge::Impl {
     mutable std::uint32_t player_prev_steps[kMaxPlayers] = {};
     mutable double player_walk_until[kMaxPlayers] = {};
 
+    // --- Hit feedback, which is CLIENT-SIDE and holds no simulation state (F2) -------------------
+    // The pack author's damage_fx is flash + shake + debris. We reproduce the first two per creature
+    // by watching its published HP frame-to-frame (creatures carry a stable id), and the debris by a
+    // smoke puff when a creature vanishes. None of this is in a snapshot: a hit flash is a fact about
+    // what THIS viewer just saw change, not about the world, so it lives here and costs no bandwidth.
+    struct CreatureTrack {
+        std::int16_t hp = 0;
+        float x = 0.0f;  // last-seen position, in TILES — where a death puff goes
+        float y = 0.0f;
+        float flash = 0.0f;  // seconds of hit-flash + shake remaining
+        bool seen = false;   // touched this frame; an untouched track means the creature is gone
+    };
+    // Keyed by creature id. Only creatures in view are ever inserted (the gather loop is the only
+    // writer), so this stays the size of what is on screen, not of the world.
+    mutable std::unordered_map<std::uint32_t, CreatureTrack> creature_tracks;
+    // A client-side smoke burst where a creature died. The sim reaps a dead creature the same tick it
+    // hits 0 HP — recon confirmed — so a client NEVER sees hp==0 in a view: a kill reads as "the id
+    // was here last frame and is gone now". That last-seen vanish is the only honest death signal,
+    // and this is where it is drawn.
+    struct DeathPuff {
+        float x = 0.0f;  // tiles
+        float y = 0.0f;
+        float age = 0.0f;  // seconds; drawn until kDeathPuffLife
+    };
+    static constexpr float kDeathPuffLife = 0.55f;
+    mutable std::vector<DeathPuff> death_puffs;
+
     // Per-frame scratch, kept as members so a frame costs no allocations once the vectors have
     // reached their working size. `frame_views` and `frame_players` exist to keep the shared_ptrs
     // alive: `frame_sprites` holds RAW pointers into the creature and building vectors they own,
@@ -741,11 +769,55 @@ struct RaylibBridge::Impl {
             case SpriteKind::kCreature: {
                 const auto& m = *static_cast<const Creature*>(sp.p);
                 // A flat ellipse under each creature: with no height in the art, this is what stops
-                // the sprites reading as decals lying on the ground.
+                // the sprites reading as decals lying on the ground. The shadow stays PUT while the
+                // body shakes, so a hit/telegraph reads as the creature flinching, not sliding.
                 DrawEllipse(static_cast<int>(sp.x), static_cast<int>(sp.y + 6), kTilePx * 0.28f,
                             kTilePx * 0.14f, Color{0, 0, 0, 70});
-                anim(anim_of(m.kind), static_cast<int>(m.facing), sp.frame, sp.x, sp.y,
-                     kTilePx * 1.0f, tint_of(m.status));
+                // --- Hit + telegraph feedback (F2), entirely client-side ---------------------------
+                // Both reads are ADDITIVE overlays, not tints: a multiplicative tint can only darken,
+                // so it cannot redden an already-blue slime — but adding colour onto the lit pixels
+                // shows on any sprite. A creature winding up to a swing has no attack frame in this
+                // walk-only pack, so its whole "incoming" read is a pulsing warm glow plus a 1px
+                // micro-shake; together with the smoke puff thrown at commit, that IS the tell. A
+                // creature struck this instant flashes bright white and jitters 2px — the pack
+                // author's own damage_fx of flash + shake.
+                const auto tk = creature_tracks.find(m.id);
+                const float flash = (tk != creature_tracks.end()) ? tk->second.flash : 0.0f;
+                const float fi = std::clamp(flash / 0.15f, 0.0f, 1.0f);  // flash intensity, 0..1
+                float shake = 0.0f;
+                const float wobble = (static_cast<int>(GetTime() * 40.0) & 1) ? 1.0f : -1.0f;
+                if (m.windup > 0) shake = wobble;
+                if (flash > 0.05f) shake = wobble * 2.0f;  // a struck flinch overrides the wind-up wobble
+                const float bx = sp.x + shake;
+                // A struck creature POPS bigger for the length of the flash. Additive white can only
+                // brighten a coloured sprite toward a lighter version of itself, never to true white,
+                // so the size pop is what makes the hit unmistakable on any base colour — brighten AND
+                // swell, the way the pack's own damage_fx sells a blow.
+                const float size = kTilePx * (1.0f + 0.18f * fi);
+                anim(anim_of(m.kind), static_cast<int>(m.facing), sp.frame, bx, sp.y, size,
+                     tint_of(m.status));
+                if (m.windup > 0 && flash <= 0.05f) {
+                    // A red charge that pulses so it reads as "winding up" and not merely "on fire".
+                    // Kept off its trough (0.7..1.0) so the glow is unmistakable at game scale on any
+                    // sprite colour, not merely present.
+                    const float pulse = 0.85f + 0.15f * std::sin(static_cast<float>(GetTime()) * 12.0f);
+                    const auto a = static_cast<unsigned char>(pulse * 235.0f);
+                    BeginBlendMode(BLEND_ADDITIVE);
+                    anim(anim_of(m.kind), static_cast<int>(m.facing), sp.frame, bx, sp.y,
+                         kTilePx * 1.0f, Color{255, 40, 30, a});
+                    EndBlendMode();
+                }
+                if (flash > 0.05f) {
+                    BeginBlendMode(BLEND_ADDITIVE);  // adds toward white without touching transparent px
+                    const auto a = static_cast<unsigned char>(fi * 255.0f);
+                    // Two passes: additive saturates faster, so a light slime actually reaches a white
+                    // pop rather than a slightly brighter blue.
+                    anim(anim_of(m.kind), static_cast<int>(m.facing), sp.frame, bx, sp.y, size,
+                         Color{255, 255, 255, a});
+                    anim(anim_of(m.kind), static_cast<int>(m.facing), sp.frame, bx, sp.y, size,
+                         Color{255, 255, 255, a});
+                    EndBlendMode();
+                }
                 // A health bar only once it has been hurt: an untouched field of animals with bars
                 // over every one of them reads as a bestiary rather than as a meadow.
                 if (m.hp < m.max_hp && m.max_hp > 0) {
@@ -965,7 +1037,23 @@ float RaylibBridge::frame_time() const { return GetFrameTime(); }
 void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                         const PlayerBus& players, int local_slot) {
     Impl& im = *impl_;
+    const float dt = GetFrameTime();
     im.attack_pose = std::max(0.0f, im.attack_pose - GetFrameTime());
+    // Age the client-side hit feedback (F2): fade each creature's flash/shake, march each death puff
+    // toward its end, and mark every track unseen — the gather loop below re-marks the ones still on
+    // screen, and whatever is left unseen afterwards is a creature that has left the view or died.
+    // The aging step is clamped: a single slow or hitched frame must not swallow a whole 0.15s flash,
+    // and on a headless screenshot the frame time is long enough that it otherwise would.
+    const float fb_dt = std::min(dt, 0.033f);
+    for (auto& kv : im.creature_tracks) {
+        kv.second.flash = std::max(0.0f, kv.second.flash - fb_dt);
+        kv.second.seen = false;
+    }
+    for (std::size_t i = im.death_puffs.size(); i-- > 0;) {
+        im.death_puffs[i].age += fb_dt;
+        if (im.death_puffs[i].age >= Impl::kDeathPuffLife)
+            im.death_puffs.erase(im.death_puffs.begin() + static_cast<std::ptrdiff_t>(i));
+    }
     PlayerViewPtr me = players.load(local_slot);
     static const PlayerView kNobody{};
     const PlayerView& player = me ? *me : kNobody;
@@ -1059,6 +1147,19 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                                                   m.y * kTilePx, &m, 0, frame,
                                                   SpriteKind::kCreature});
                 ++drawn_creatures;
+                // Hit feedback (F2): a drop in published HP since last frame flashes the sprite. New
+                // creatures just start a track; the position is kept for a death puff if it vanishes.
+                Impl::CreatureTrack& tr = im.creature_tracks[m.id];
+                if (tr.seen) {
+                    // Already touched this frame (a creature at a chunk seam is listed by both) — do
+                    // not double-read its HP.
+                } else if (tr.hp != 0 && m.hp < tr.hp) {
+                    tr.flash = 0.15f;  // the pack's damage_fx: a bright frame and a shake
+                }
+                tr.hp = m.hp;
+                tr.x = m.x;
+                tr.y = m.y;
+                tr.seen = true;
             }
             for (const Projectile& shot : v->shots) {
                 im.frame_sprites.push_back(Sprite{shot.y * kTilePx + kTilePx * 0.5f,
@@ -1066,6 +1167,23 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                                                   SpriteKind::kShot});
             }
         }
+    }
+
+    // Death puffs (F2): every track the gather loop did NOT re-mark is a creature that is no longer
+    // in view. If its last position is still inside the chunk rectangle we just swept, it did not
+    // scroll off — it died where it stood (the sim reaps on death, so a kill IS a vanish), and it
+    // earns a smoke burst. A track whose creature merely left the view is dropped without one.
+    for (auto it = im.creature_tracks.begin(); it != im.creature_tracks.end();) {
+        if (it->second.seen) {
+            ++it;
+            continue;
+        }
+        const int lcx = static_cast<int>(it->second.x) / kChunkTiles;
+        const int lcy = static_cast<int>(it->second.y) / kChunkTiles;
+        if (lcx >= min_cx && lcx <= max_cx && lcy >= min_cy && lcy <= max_cy) {
+            im.death_puffs.push_back(Impl::DeathPuff{it->second.x, it->second.y, 0.0f});
+        }
+        it = im.creature_tracks.erase(it);
     }
 
     // The room the player is in, and no other.
@@ -1402,13 +1520,29 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                 const int life = effect_life_of(e.kind);
                 const int f = std::min<int>(frames - 1, (e.age * frames) / life);
                 const float fade = 1.0f - static_cast<float>(e.age) / static_cast<float>(life);
-                // 0.6x. The pack's elemental strips are drawn for a 1:1 pixel game, so at this
+                // 0.6x for the elemental strips: the pack draws them for a 1:1 pixel game, so at this
                 // game's 2x tile scale an explosion came out two and a half tiles across and buried
-                // the creature it went off on — the whole point of the flash is to show you what
-                // happened to something, so it must not hide it.
-                im.fx(fx_of_effect(e.kind), f, e.x * kTilePx, e.y * kTilePx, 0.55f + 0.45f * fade,
-                      0.0f, 0.6f);
+                // the creature it went off on — the whole point of a flash is to show you what
+                // happened to something, so it must not hide it. Smoke is the EXCEPTION and draws big
+                // (1.6x): it is a monster's attack telegraph (F2), the puff thrown at a wind-up's
+                // commit, and it has to read as "incoming" against grass at game scale — a half-tile
+                // wisp did not. It sits over the creature on purpose; that IS the tell.
+                const bool is_smoke = e.kind == EffectKind::kSmoke;
+                im.fx(fx_of_effect(e.kind), f, e.x * kTilePx, e.y * kTilePx,
+                      (is_smoke ? 0.7f : 0.55f) + 0.45f * fade, 0.0f, is_smoke ? 1.6f : 0.6f);
             }
+        }
+    }
+
+    // Death puffs (F2): the client-side smoke burst where a creature vanished, in the same sweep so
+    // it sits over the fighters. Drawn a touch larger (2x) than a combat flash — with no corpse and
+    // no death animation in the pack, this puff is the entire "it died" read and has to carry it.
+    {
+        const AtlasFx& smoke = fx_of(Fx::kSmoke);
+        for (const Impl::DeathPuff& d : im.death_puffs) {
+            const float t = std::clamp(d.age / Impl::kDeathPuffLife, 0.0f, 1.0f);
+            const int f = std::min(smoke.frames - 1, static_cast<int>(t * smoke.frames));
+            im.fx(Fx::kSmoke, f, d.x * kTilePx, d.y * kTilePx, 0.85f * (1.0f - t), 0.0f, 2.0f);
         }
     }
 

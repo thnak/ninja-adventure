@@ -360,27 +360,34 @@ struct CreatureStats {
     float reach;              // tiles: how close it must be to land a blow
     std::uint16_t xp;         // awarded to whoever kills it
     float territory;          // tiles wandered from home; 0 = uses the flow field instead
+    // Ticks a creature freezes, telegraphing, before a blow lands (F2). There is no attack frame
+    // in this walk-only art, so the wind-up IS the attack read: the creature plants its feet, a
+    // puff goes up, and the player has this long to leave. Bigger and heavier reads slower — the
+    // three buckets are small/timid = 4, mid = 6, big = 8, so the thing that can kill you also
+    // gives you the most warning. Cadence (kStrikeCooldown) is untouched; this is the beat BEFORE
+    // the hit, not a change to how often one comes.
+    std::uint8_t windup;
 };
 
 [[nodiscard]] inline constexpr CreatureStats stats_of(CreatureKind k) noexcept {
     using F = Faction;
     using D = Disposition;
     switch (k) {
-        //                 hp  speed  dmg  faction      disposition  aggro reach  xp  territory
-        case CreatureKind::kSlime:   return {30, 1.2f,  4, F::kMonster, D::kHostile,  7.0f, 1.0f,  4, 0.0f};
-        case CreatureKind::kSpider:  return {45, 2.6f,  7, F::kMonster, D::kHostile,  9.0f, 1.0f,  7, 0.0f};
-        case CreatureKind::kGhost:   return {80, 1.8f, 12, F::kMonster, D::kHostile, 10.0f, 1.2f, 12, 0.0f};
-        case CreatureKind::kSkull:   return {140, 1.1f, 22, F::kMonster, D::kHostile, 8.0f, 1.2f, 22, 0.0f};
+        //                 hp  speed  dmg  faction      disposition  aggro reach  xp  territory windup
+        case CreatureKind::kSlime:   return {30, 1.2f,  4, F::kMonster, D::kHostile,  7.0f, 1.0f,  4, 0.0f, 4};
+        case CreatureKind::kSpider:  return {45, 2.6f,  7, F::kMonster, D::kHostile,  9.0f, 1.0f,  7, 0.0f, 4};
+        case CreatureKind::kGhost:   return {80, 1.8f, 12, F::kMonster, D::kHostile, 10.0f, 1.2f, 12, 0.0f, 6};
+        case CreatureKind::kSkull:   return {140, 1.1f, 22, F::kMonster, D::kHostile, 8.0f, 1.2f, 22, 0.0f, 8};
         // Wildlife. The neutral ones hit hard on purpose: a boar you chose to fight should be a
         // real decision, and a bear should be a mistake you only make once.
-        case CreatureKind::kBoar:    return {70, 2.2f, 14, F::kWild, D::kNeutral, 3.5f, 1.0f,  9, 14.0f};
-        case CreatureKind::kWolf:    return {60, 3.0f, 11, F::kWild, D::kNeutral, 5.0f, 1.0f, 10, 20.0f};
-        case CreatureKind::kBear:    return {180, 1.9f, 28, F::kWild, D::kNeutral, 4.0f, 1.3f, 26, 16.0f};
-        case CreatureKind::kHare:    return {14, 3.4f,  0, F::kWild, D::kTimid,   6.0f, 0.0f,  2, 10.0f};
-        case CreatureKind::kChicken: return {10, 2.4f,  0, F::kWild, D::kTimid,   5.0f, 0.0f,  1,  8.0f};
+        case CreatureKind::kBoar:    return {70, 2.2f, 14, F::kWild, D::kNeutral, 3.5f, 1.0f,  9, 14.0f, 6};
+        case CreatureKind::kWolf:    return {60, 3.0f, 11, F::kWild, D::kNeutral, 5.0f, 1.0f, 10, 20.0f, 6};
+        case CreatureKind::kBear:    return {180, 1.9f, 28, F::kWild, D::kNeutral, 4.0f, 1.3f, 26, 16.0f, 8};
+        case CreatureKind::kHare:    return {14, 3.4f,  0, F::kWild, D::kTimid,   6.0f, 0.0f,  2, 10.0f, 4};
+        case CreatureKind::kChicken: return {10, 2.4f,  0, F::kWild, D::kTimid,   5.0f, 0.0f,  1,  8.0f, 4};
         case CreatureKind::kCount: break;
     }
-    return {30, 1.2f, 4, F::kMonster, D::kHostile, 7.0f, 1.0f, 4, 0.0f};
+    return {30, 1.2f, 4, F::kMonster, D::kHostile, 7.0f, 1.0f, 4, 0.0f, 4};
 }
 
 // Difficulty by RING, applied when a creature is created rather than when it is hit — so a slime
@@ -484,6 +491,17 @@ struct Creature {
     Status status = Status::kNone;
     std::uint8_t status_ticks = 0;
     std::uint8_t stun_ticks = 0;
+
+    // --- the telegraphed attack, which is STATE the renderer reads (F2) -------------------------
+    // A creature in reach COMMITS to a swing instead of hitting instantly: it freezes here for its
+    // species' wind-up (counting DOWN), and only when this hits zero does the blow resolve — landing
+    // if the player is still in reach, whiffing at the aimed-at spot if they left. The freeze is the
+    // dodge window. `windup > 0` is published so the sprite can shake and tint through the telegraph
+    // — a walk-only pack has no attack frame, so this counter is the ONLY thing that says "incoming".
+    std::uint8_t windup = 0;
+    std::uint64_t windup_target = 0;  // the player key it committed to swing at
+    float windup_x = 0.0f;            // where that player stood at commit — the spot a whiff slashes
+    float windup_y = 0.0f;
 
     // --- wildlife wandering ---------------------------------------------------------------------
     // Home is where an animal was born; it strays no further than its species' territory. Monsters
