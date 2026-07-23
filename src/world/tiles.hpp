@@ -374,17 +374,17 @@ struct CreatureStats {
     using D = Disposition;
     switch (k) {
         //                 hp  speed  dmg  faction      disposition  aggro reach  xp  territory windup
-        case CreatureKind::kSlime:   return {30, 1.2f,  4, F::kMonster, D::kHostile,  7.0f, 1.0f,  4, 0.0f, 4};
-        case CreatureKind::kSpider:  return {45, 2.6f,  7, F::kMonster, D::kHostile,  9.0f, 1.0f,  7, 0.0f, 4};
-        case CreatureKind::kGhost:   return {80, 1.8f, 12, F::kMonster, D::kHostile, 10.0f, 1.2f, 12, 0.0f, 6};
-        case CreatureKind::kSkull:   return {140, 1.1f, 22, F::kMonster, D::kHostile, 8.0f, 1.2f, 22, 0.0f, 8};
+        case CreatureKind::kSlime:   return {30, 1.2f,  4, F::kMonster, D::kHostile,  7.0f, 1.0f, 12, 0.0f, 4};
+        case CreatureKind::kSpider:  return {45, 2.6f,  7, F::kMonster, D::kHostile,  9.0f, 1.0f, 21, 0.0f, 4};
+        case CreatureKind::kGhost:   return {80, 1.8f, 12, F::kMonster, D::kHostile, 10.0f, 1.2f, 36, 0.0f, 6};
+        case CreatureKind::kSkull:   return {140, 1.1f, 22, F::kMonster, D::kHostile, 8.0f, 1.2f, 66, 0.0f, 8};
         // Wildlife. The neutral ones hit hard on purpose: a boar you chose to fight should be a
         // real decision, and a bear should be a mistake you only make once.
-        case CreatureKind::kBoar:    return {70, 2.2f, 14, F::kWild, D::kNeutral, 3.5f, 1.0f,  9, 14.0f, 6};
-        case CreatureKind::kWolf:    return {60, 3.0f, 11, F::kWild, D::kNeutral, 5.0f, 1.0f, 10, 20.0f, 6};
-        case CreatureKind::kBear:    return {180, 1.9f, 28, F::kWild, D::kNeutral, 4.0f, 1.3f, 26, 16.0f, 8};
-        case CreatureKind::kHare:    return {14, 3.4f,  0, F::kWild, D::kTimid,   6.0f, 0.0f,  2, 10.0f, 4};
-        case CreatureKind::kChicken: return {10, 2.4f,  0, F::kWild, D::kTimid,   5.0f, 0.0f,  1,  8.0f, 4};
+        case CreatureKind::kBoar:    return {70, 2.2f, 14, F::kWild, D::kNeutral, 3.5f, 1.0f, 27, 14.0f, 6};
+        case CreatureKind::kWolf:    return {60, 3.0f, 11, F::kWild, D::kNeutral, 5.0f, 1.0f, 30, 20.0f, 6};
+        case CreatureKind::kBear:    return {180, 1.9f, 28, F::kWild, D::kNeutral, 4.0f, 1.3f, 78, 16.0f, 8};
+        case CreatureKind::kHare:    return {14, 3.4f,  0, F::kWild, D::kTimid,   6.0f, 0.0f,  6, 10.0f, 4};
+        case CreatureKind::kChicken: return {10, 2.4f,  0, F::kWild, D::kTimid,   5.0f, 0.0f,  3,  8.0f, 4};
         case CreatureKind::kCount: break;
     }
     return {30, 1.2f, 4, F::kMonster, D::kHostile, 7.0f, 1.0f, 4, 0.0f, 4};

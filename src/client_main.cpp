@@ -78,6 +78,7 @@ int main(int argc, char** argv) {
     bool stage_telegraph = false;       // --telegraph: one slime frozen mid-wind-up, for the F2 read
     bool stage_flash = false;           // --flash: one slime, struck between frames, for the F2 flash
     bool stage_walk = false;            // --walk: keep the player moving so a shot catches mid-stride
+    int dev_level = -1;                 // --dev [N]: every school to level N at sign-in (default 8)
     int look_door = -1;                 // --door N: step onto door N, which takes you inside it
     int look_at_tx = -1;                // --at TX TY: park the camera on an arbitrary tile
     int look_at_ty = -1;
@@ -106,6 +107,11 @@ int main(int argc, char** argv) {
             stage_flash = true;  // one slime, struck inside the render loop so its hit flash shows
         } else if (std::strcmp(argv[i], "--walk") == 0) {
             stage_walk = true;
+        } else if (std::strcmp(argv[i], "--dev") == 0) {
+            // A test harness, not a cheat that ships: the grind is for players, and a developer
+            // checking whether Whirl Cleave feels right should not pay a hundred boars to find
+            // out. Default 8 per school keeps all four under the 34-point cap (4x8 = 32).
+            dev_level = (i + 1 < argc && argv[i + 1][0] != '-') ? std::atoi(argv[++i]) : 8;
         } else if (std::strcmp(argv[i], "--at") == 0 && i + 2 < argc) {
             look_at_tx = std::atoi(argv[i + 1]);
             look_at_ty = std::atoi(argv[i + 2]);
@@ -610,6 +616,18 @@ int main(int argc, char** argv) {
                     world.save_accounts(kAccountsPath);
                     std::printf("signed in as '%s' (%s) -> slot %d\n", shell.name, describe(out),
                                 slot);
+                    if (dev_level > 0) {
+                        // Cumulative XP for N levels is 40 * sum of k^2, k = 1..N. Rides the
+                        // same GrantXp a kill uses and the level cap still applies — this
+                        // bypasses nothing but the grind (see World::grant_xp).
+                        const std::uint32_t n = static_cast<std::uint32_t>(dev_level);
+                        const std::uint32_t xp = 40u * n * (n + 1u) * (2u * n + 1u) / 6u;
+                        for (int sk = 0; sk < kSkillCount; ++sk) {
+                            world.grant_xp(me, static_cast<Skill>(sk), xp);
+                        }
+                        world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+                        std::printf("--dev: all schools granted XP for level %d\n", dev_level);
+                    }
                 } else {
                     shell.login_message = describe(out);
                 }

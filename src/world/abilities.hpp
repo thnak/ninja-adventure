@@ -2,7 +2,7 @@
 //
 // An ability is a school's signature move: it costs a vital, it has a cooldown the basic verbs do
 // not, and it unlocks at a school level rather than being available from the first swing. There are
-// two per school (Melee, Ranged, Magic), gated at level 5 and level 10, and Craft has none — you do
+// two per school (Melee, Ranged, Magic), gated at school level 2 and level 6 (retuned from 5/10 the day a playtest met the 123-boar wall in front of the first one), and Craft has none — you do
 // not fight with a hoe.
 //
 // WHY A CONSTEXPR TABLE AND NOT DATA READ AT RUNTIME. The trusted PlayerActor reads it to check-and-
@@ -81,27 +81,27 @@ struct AbilityDef {
 [[nodiscard]] inline constexpr AbilityDef ability_def(AbilityId a) noexcept {
     switch (a) {
         case AbilityId::kWhirlCleave:
-            return AbilityDef{Skill::kMelee, 5, AbilityCost::kStamina, 30, 60, AbilityKind::kStrike,
+            return AbilityDef{Skill::kMelee, 2, AbilityCost::kStamina, 30, 60, AbilityKind::kStrike,
                               2.2f, 1.4f, AbilityShape::kRing,
                               0, false, ZoneKind::kWet, 0, 0, 0, EffectKind::kSlashHeavy};
         case AbilityId::kCrushBlow:
-            return AbilityDef{Skill::kMelee, 10, AbilityCost::kStamina, 35, 100, AbilityKind::kStrike,
+            return AbilityDef{Skill::kMelee, 6, AbilityCost::kStamina, 35, 100, AbilityKind::kStrike,
                               2.0f, 1.8f, AbilityShape::kFront,
                               20, false, ZoneKind::kWet, 0, 0, 0, EffectKind::kSlashCombo};
         case AbilityId::kFanVolley:
-            return AbilityDef{Skill::kRanged, 5, AbilityCost::kStamina, 30, 80, AbilityKind::kVolley,
+            return AbilityDef{Skill::kRanged, 2, AbilityCost::kStamina, 30, 80, AbilityKind::kVolley,
                               0.0f, 1.0f, AbilityShape::kRing,
                               0, false, ZoneKind::kWet, 0, 3, 30, EffectKind::kSlash};
         case AbilityId::kSmokeBomb:
-            return AbilityDef{Skill::kRanged, 10, AbilityCost::kStamina, 25, 150, AbilityKind::kZone,
+            return AbilityDef{Skill::kRanged, 6, AbilityCost::kStamina, 25, 150, AbilityKind::kZone,
                               3.0f, 0.0f, AbilityShape::kRing,
                               0, false, ZoneKind::kSmokeSuppress, 50, 0, 0, EffectKind::kSmoke};
         case AbilityId::kElementalNova:
-            return AbilityDef{Skill::kMagic, 5, AbilityCost::kMana, 30, 90, AbilityKind::kStrike,
+            return AbilityDef{Skill::kMagic, 2, AbilityCost::kMana, 30, 90, AbilityKind::kStrike,
                               2.8f, 1.3f, AbilityShape::kRing,
                               0, true, ZoneKind::kWet, 0, 0, 0, EffectKind::kBlast};
         case AbilityId::kRainCall:
-            return AbilityDef{Skill::kMagic, 10, AbilityCost::kMana, 35, 200, AbilityKind::kZone,
+            return AbilityDef{Skill::kMagic, 6, AbilityCost::kMana, 35, 200, AbilityKind::kZone,
                               4.0f, 0.0f, AbilityShape::kRing,
                               0, false, ZoneKind::kWet, 100, 0, 0, EffectKind::kSlash};
         case AbilityId::kCount: break;
@@ -112,7 +112,7 @@ struct AbilityDef {
 // The FIXED F1a loadout, as a pure function of the player's levels. Slot 0 (A) is the level-5
 // ability of the strongest fighting school; slot 1 (B) is that school's level-10 ability. Ties go to
 // the lower enum (Melee before Ranged before Magic), so the answer is deterministic. Returns
-// AbilityId::kCount for a slot whose school has not yet reached even level 5 — the HUD greys those,
+// AbilityId::kCount for a slot whose school has not yet reached even the first unlock — the HUD greys those,
 // but they still report their intended ability so the greyed icon is the right one.
 //
 // It always returns the SAME school's pair so the two slots read as one kit. `levels` is indexed by
