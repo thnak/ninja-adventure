@@ -42,6 +42,13 @@ public:
     void start_music() const;
     void update() const;  // must be called once a frame to keep the music stream fed
 
+    // Options-screen controls. `set_master_volume` scales EVERYTHING (raylib's SetMasterVolume), and
+    // `set_music_enabled` mutes just the looping track by dropping its own volume to zero — so the
+    // two are independent: silencing the music leaves the click and combat cues at the master level.
+    // `v01` is clamped to 0..1. Both no-op without a device, like the rest of this class.
+    void set_master_volume(float v01) const;
+    void set_music_enabled(bool on) const;
+
     [[nodiscard]] bool ready() const;
 
 private:

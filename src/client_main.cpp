@@ -48,6 +48,10 @@ void load_client_cfg(const char* path, ui::ShellState& shell) {
             char* v = line + 10;
             v[std::strcspn(v, "\r\n")] = '\0';  // strip the newline fgets leaves on
             std::snprintf(shell.join_addr, sizeof shell.join_addr, "%s", v);
+        } else if (std::strncmp(line, "volume=", 7) == 0) {
+            shell.master_volume = std::clamp(std::atoi(line + 7), 0, 100);
+        } else if (std::strncmp(line, "music=", 6) == 0) {
+            shell.music_on = std::atoi(line + 6) != 0;
         }
         // Unknown keys are ignored — a newer build's cfg must not trip an older one.
     }
@@ -57,7 +61,8 @@ void load_client_cfg(const char* path, ui::ShellState& shell) {
 void save_client_cfg(const char* path, const ui::ShellState& shell) {
     std::FILE* f = std::fopen(path, "wb");
     if (f == nullptr) return;  // best-effort; a write failure here is never worth aborting a login
-    std::fprintf(f, "join=%d\njoin_addr=%s\n", shell.join_mode ? 1 : 0, shell.join_addr);
+    std::fprintf(f, "join=%d\njoin_addr=%s\nvolume=%d\nmusic=%d\n", shell.join_mode ? 1 : 0,
+                 shell.join_addr, shell.master_volume, shell.music_on ? 1 : 0);
     std::fclose(f);
 }
 
@@ -78,6 +83,7 @@ int main(int argc, char** argv) {
     bool stage_telegraph = false;       // --telegraph: one slime frozen mid-wind-up, for the F2 read
     bool stage_flash = false;           // --flash: one slime, struck between frames, for the F2 flash
     bool stage_walk = false;            // --walk: keep the player moving so a shot catches mid-stride
+    bool stage_levelup = false;         // --levelup: cross a skill level inside the loop to catch the banner
     int dev_level = -1;                 // --dev [N]: every school to level N at sign-in (default 8)
     int look_door = -1;                 // --door N: step onto door N, which takes you inside it
     const char* dojo_mode = nullptr;    // --dojo [idle|windup|attack]: enter a dojo boss room (F3)
@@ -111,6 +117,8 @@ int main(int argc, char** argv) {
             stage_flash = true;  // one slime, struck inside the render loop so its hit flash shows
         } else if (std::strcmp(argv[i], "--walk") == 0) {
             stage_walk = true;
+        } else if (std::strcmp(argv[i], "--levelup") == 0) {
+            stage_levelup = true;  // pre-level Melee to 5, then cross into 6 inside the render loop
         } else if (std::strcmp(argv[i], "--dev") == 0) {
             // A test harness, not a cheat that ships: the grind is for players, and a developer
             // checking whether Whirl Cleave feels right should not pay a hundred boars to find
@@ -154,6 +162,14 @@ int main(int argc, char** argv) {
         std::snprintf(shell.join_addr, sizeof shell.join_addr, "%s", connect_addr);
     }
 
+    // Push the restored audio options into the device once, then remember what was applied so the
+    // Options screen's live edits (below) are pushed only when they actually change — the shell owns
+    // the numbers, this loop owns the device the shell must not see.
+    audio.set_master_volume(static_cast<float>(shell.master_volume) / 100.0f);
+    audio.set_music_enabled(shell.music_on);
+    int applied_volume = shell.master_volume;
+    bool applied_music = shell.music_on;
+
     // Unattended mode signs itself in, so a screenshot is of the game rather than of a login box.
     if (shot_path != nullptr) {
         LoginOutcome out{};
@@ -165,6 +181,7 @@ int main(int argc, char** argv) {
             else if (std::strcmp(shot_screen, "journal") == 0) shell.screen = ui::Screen::kJournal;
             else if (std::strcmp(shot_screen, "character") == 0) shell.screen = ui::Screen::kCharacter;
             else if (std::strcmp(shot_screen, "paused") == 0) shell.screen = ui::Screen::kPaused;
+            else if (std::strcmp(shot_screen, "options") == 0) shell.screen = ui::Screen::kOptions;
             else if (std::strcmp(shot_screen, "login") == 0) shell.screen = ui::Screen::kLogin;
         }
     }
@@ -451,6 +468,18 @@ int main(int argc, char** argv) {
             }
             player = view();
         }
+
+        // --levelup: the level-up banner is spawned by the SAME snapshot the level-up sound rides —
+        // it needs a school level to rise BETWEEN two drawn frames, and `--dev` only fires at the
+        // interactive sign-in this shot skips. So bring Melee to exactly level 5 here (cumulative XP
+        // for N levels is 40*sum k^2 = 40*N(N+1)(2N+1)/6; N=5 is 2200), leaving the single-level
+        // crossing into 6 to the render loop below. Level 6 is the second Melee unlock, so the banner
+        // also shows its "New ability: Crush Blow [G]" line.
+        if (stage_levelup && slot >= 0) {
+            world.grant_xp(me, Skill::kMelee, 2200);  // -> exactly Melee 5, 0 into the next
+            world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+            world.sync_world();
+        }
     }
     int frames = 0;
 
@@ -460,6 +489,7 @@ int main(int argc, char** argv) {
     // heard the frame it happens. Both are fixed-size and allocated once — no per-frame allocation.
     std::vector<std::uint64_t> effect_tick(static_cast<std::size_t>(kChunkCount), ~0ull);
     std::uint8_t last_skill[kSkillCount] = {};
+    std::uint32_t last_xp[kSkillCount] = {};  // rides the same snapshot to drift the "+N" XP motes
     bool have_skills = false;
 
     while (bridge.begin_frame()) {
@@ -494,6 +524,15 @@ int main(int argc, char** argv) {
         // kill it and the shot would catch a death puff instead of the flash).
         if (stage_flash && shot_path != nullptr && slot >= 0 && frames == 1) {
             world.swing(me, /*heavy*/ false);  // LIGHT: a heavy blow can one-shot a meadow slime
+            world.step(kTickMs);
+            world.sync_world();
+        }
+        // --levelup shot: with Melee parked at 5 above, grant exactly one level's XP on frame 1
+        // (xp_for_level(5) = 40*6*6 = 1440), so the NEXT frame's snapshot reads Melee 6 against the
+        // baseline seeded on frame 0 — the same rise the banner (and the fanfare) fire on. Frame 3
+        // then screenshots while the two-second banner is still up.
+        if (stage_levelup && shot_path != nullptr && slot >= 0 && frames == 1) {
+            world.grant_xp(me, Skill::kMelee, 1440);  // Melee 5 -> 6
             world.step(kTickMs);
             world.sync_world();
         }
@@ -626,15 +665,28 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // A skill going up a level is worth a fanfare. The first sighting only seeds the baseline
-            // so signing in does not itself sound like a level-up.
+            // A skill going up a level is worth a fanfare AND the centred banner; XP that rises
+            // without a level gets a drifting "+N" mote over the player. Both ride this one snapshot
+            // rather than a second comparison — the first sighting only seeds the baseline so signing
+            // in neither sounds nor looks like a level-up.
             if (!have_skills) {
-                for (int i = 0; i < kSkillCount; ++i) last_skill[i] = player.skill_level[i];
+                for (int i = 0; i < kSkillCount; ++i) {
+                    last_skill[i] = player.skill_level[i];
+                    last_xp[i] = player.skill_xp[i];
+                }
                 have_skills = player.live();
             } else {
                 for (int i = 0; i < kSkillCount; ++i) {
-                    if (player.skill_level[i] > last_skill[i]) audio.play(ui::Sfx::kLevelUp);
+                    if (player.skill_level[i] > last_skill[i]) {
+                        audio.play(ui::Sfx::kLevelUp);
+                        ui::hud_spawn_level_up(shell.hud, i, player.skill_level[i]);
+                    } else if (player.skill_xp[i] > last_xp[i]) {
+                        // A plain gain within a level. On a level-up the counter wraps down instead,
+                        // which this branch skips — the banner is that event's feedback, not a mote.
+                        ui::hud_spawn_xp_mote(shell.hud, i, player.skill_xp[i] - last_xp[i]);
+                    }
                     last_skill[i] = player.skill_level[i];
+                    last_xp[i] = player.skill_xp[i];
                 }
             }
         }
@@ -657,6 +709,22 @@ int main(int argc, char** argv) {
                                              : static_cast<int>(bridge.selected_element()) - 1;
         const ui::Action act =
             ui::draw(shell, world.status(), player, build_mode, selected_slot);
+
+        // The Options screen edits `master_volume`/`music_on` in place; push a change into the device
+        // the moment it happens (live), and persist it so it survives the next launch the same way
+        // the connection choice does. Guarded on a real change so the music is not restarted and the
+        // cfg not rewritten every frame the screen is merely open.
+        if (shell.master_volume != applied_volume) {
+            audio.set_master_volume(static_cast<float>(shell.master_volume) / 100.0f);
+            applied_volume = shell.master_volume;
+            save_client_cfg(kClientCfgPath, shell);
+        }
+        if (shell.music_on != applied_music) {
+            audio.set_music_enabled(shell.music_on);
+            applied_music = shell.music_on;
+            save_client_cfg(kClientCfgPath, shell);
+        }
+
         if (shell.debug_overlay) {
             ui::draw_debug_overlay(world.status(), player, bridge.drawn_chunks(),
                                    bridge.drawn_creatures());

@@ -4,6 +4,7 @@
 #include "render/ui_sprites.hpp"
 #include "world/player_actor.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -19,6 +20,55 @@ namespace {
 constexpr int kPanelW = 340;
 constexpr int kBtnH = 42;
 constexpr int kGap = 10;
+
+// The four schools, shared by the character sheet, the HUD chips, the XP motes and the level-up
+// banner so a school reads the SAME colour everywhere it appears — the one place progression is
+// shown twice (glanceable on the HUD, in full on the sheet) it must not be two different reds. The
+// families echo the vitals: melee warm like health, ranged green like stamina, magic blue like mana,
+// craft the gold the sheet already trims its panels with. Order is `Skill` (Melee, Ranged, Magic,
+// Craft). The letters avoid Magic colliding with Melee on M — G, as maGic, is the readout's own word.
+static const Color kSchoolColor[kSkillCount] = {
+    Color{226, 130, 120, 255}, Color{150, 210, 140, 255},
+    Color{150, 170, 230, 255}, Color{214, 176, 106, 255}};
+static const char* const kSchoolLetter[kSkillCount] = {"M", "R", "G", "C"};
+static const char* const kSchoolUpper[kSkillCount] = {"MELEE", "RANGED", "MAGIC", "CRAFT"};
+
+// The abilities' display names, indexed by `AbilityId`. The table in abilities.hpp carries every
+// number the three tiers agree on but no name — a name is a UI concern, so it lives here, the one
+// place that shows it. Kept in enum order so `ability_def`'s index addresses it directly.
+static const char* const kAbilityName[kAbilityCount] = {
+    "Whirl Cleave", "Crush Blow", "Fan Volley", "Smoke Bomb", "Elemental Nova", "Rain Call"};
+
+// A shade dimmer, for the inactive chips: the same colour, pulled toward the background so the
+// active school is the only one at full strength.
+[[nodiscard]] Color dim(Color c, float k) {
+    return Color{static_cast<unsigned char>(static_cast<float>(c.r) * k),
+                 static_cast<unsigned char>(static_cast<float>(c.g) * k),
+                 static_cast<unsigned char>(static_cast<float>(c.b) * k), c.a};
+}
+
+// The index of the highest school — the ACTIVE one, the school `equipped_ability` draws the loadout
+// from. Ties break low (Melee first), matching that function so the chip lit here is the school whose
+// abilities are in the two slots.
+[[nodiscard]] int active_school(const PlayerView& player) {
+    int best = 0;
+    for (int i = 1; i < kSkillCount; ++i)
+        if (player.skill_level[i] > player.skill_level[best]) best = i;
+    return best;
+}
+
+// The next ability unlock for a school at its current level, read from the ability table so the
+// hint tracks a retune of the unlock levels rather than a hardcoded 2/6. Returns the level, or 0 if
+// the school has nothing left to unlock (both taken, or Craft, which has no abilities).
+[[nodiscard]] int next_unlock_level(int school, std::uint8_t level) {
+    int best = 0;
+    for (int a = 0; a < kAbilityCount; ++a) {
+        const AbilityDef d = ability_def(static_cast<AbilityId>(a));
+        if (static_cast<int>(d.school) != school || d.unlock_level <= level) continue;
+        if (best == 0 || d.unlock_level < best) best = d.unlock_level;
+    }
+    return best;
+}
 
 // Centred column of buttons; returns the index clicked, or -1.
 int button_column(const char* const* labels, int count, int top) {
@@ -54,6 +104,27 @@ int segment_pair(int x, int y, const char* a, const char* b, bool second_selecte
                  selected ? Color{240, 226, 190, 255} : Color{150, 158, 168, 255});
     }
     return clicked;
+}
+
+// A flat slider in the same idiom as `button_column` and `segment_pair`: a dark track, a lit fill up
+// to the value, a gold knob. Click or drag anywhere on the track to set it; the caller adds arrow
+// keys. `value` is 0..100 and is written in place. Deliberately not a raygui `GuiSlider` for the same
+// reason `text_field` is hand-rolled — one widget vocabulary, not half of two.
+void slider(int x, int y, int w, int& value) {
+    constexpr int h = 22;
+    const Rectangle track{static_cast<float>(x), static_cast<float>(y), static_cast<float>(w),
+                          static_cast<float>(h)};
+    const Vector2 m = GetMousePosition();
+    if (CheckCollisionPointRec(m, track) && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        const int v = static_cast<int>(std::lround((m.x - static_cast<float>(x)) /
+                                                   static_cast<float>(w) * 100.0f));
+        value = std::clamp(v, 0, 100);
+    }
+    const int fill = w * value / 100;
+    DrawRectangleRec(track, Color{26, 29, 38, 255});
+    DrawRectangle(x, y, fill, h, Color{51, 56, 74, 255});
+    DrawRectangleLinesEx(track, 2.0f, Color{92, 96, 108, 255});
+    DrawRectangle(x + fill - 3, y - 2, 6, h + 4, Color{214, 176, 106, 255});
 }
 
 void dim_background() {
@@ -174,8 +245,78 @@ void draw_ability_slots(const PlayerView& player, int x0, int y, int slot_px) {
     }
 }
 
+// The four school levels as one compact row above the vitals — the playtest's "progression is
+// invisible in play" answered where the player already looks. A chip is a letter and a number in the
+// school's colour; the active school (the one whose abilities are equipped) reads at full strength
+// while the rest sit dimmed. Glanceable state, not a panel: the full breakdown is still C.
+void draw_skill_chips(const PlayerView& player, int x, int y) {
+    const int active = active_school(player);
+    constexpr int kChipW = 40;
+    constexpr int kChipH = 20;
+    constexpr int kChipGap = 4;
+    for (int i = 0; i < kSkillCount; ++i) {
+        const int cx = x + i * (kChipW + kChipGap);
+        const bool on = i == active;
+        const Color tint = on ? kSchoolColor[i] : dim(kSchoolColor[i], 0.55f);
+        DrawRectangle(cx, y, kChipW, kChipH, Color{0, 0, 0, static_cast<unsigned char>(on ? 175 : 120)});
+        DrawRectangleLines(cx, y, kChipW, kChipH, tint);
+        DrawText(kSchoolLetter[i], cx + 5, y + 4, 14, tint);
+        const char* lv = TextFormat("%u", player.skill_level[i]);
+        DrawText(lv, cx + kChipW - MeasureText(lv, 14) - 5, y + 4, 14,
+                 on ? Color{240, 240, 244, 255} : Color{158, 162, 170, 255});
+    }
+}
+
+// The XP motes and the level-up banner, both driven off the fixed pool the shell carries. Drawn last
+// in the HUD so they sit over the world. The local player is the camera's target, so "above the
+// player" is a fixed point above screen centre whatever the zoom — no world-to-screen projection to
+// thread through, and no reason for the shell to learn the camera.
+void draw_hud_feedback(HudFeedback& fx, int w, int h) {
+    constexpr float kBannerSecs = 2.0f;
+    const float dt = GetFrameTime();
+
+    const int px = w / 2;
+    const int py = h / 2 - 44;
+    for (HudFeedback::XpMote& t : fx.motes) {
+        if (!t.live) continue;
+        t.age += dt;
+        if (t.age >= 1.0f) {
+            t.live = false;
+            continue;
+        }
+        const float a = 1.0f - t.age;  // linear fade
+        const int ty = py - static_cast<int>(t.age * 34.0f);  // drifts up ~34px over its life
+        const int tx = px + static_cast<int>(t.dx);
+        const char* s = TextFormat("+%u", t.amount);
+        DrawText(s, tx + 1, ty + 1, 18, Color{0, 0, 0, static_cast<unsigned char>(a * 150.0f)});
+        Color c = kSchoolColor[t.school];
+        c.a = static_cast<unsigned char>(a * 255.0f);
+        DrawText(s, tx, ty, 18, c);
+    }
+
+    if (fx.banner_age < kBannerSecs) {
+        fx.banner_age += dt;
+        // Hold, then fade the last third so it leaves rather than blinks out.
+        const float a = fx.banner_age > kBannerSecs * 0.66f
+                            ? (kBannerSecs - fx.banner_age) / (kBannerSecs * 0.34f)
+                            : 1.0f;
+        const auto alpha = static_cast<unsigned char>(std::clamp(a, 0.0f, 1.0f) * 255.0f);
+        const int by = h / 2 - 120;
+        Color tint = kSchoolColor[fx.banner_school];
+        tint.a = alpha;
+        const int tw = MeasureText(fx.banner_top, 48);
+        DrawText(fx.banner_top, (w - tw) / 2 + 2, by + 2, 48,
+                 Color{0, 0, 0, static_cast<unsigned char>(a * 150.0f)});
+        DrawText(fx.banner_top, (w - tw) / 2, by, 48, tint);
+        if (fx.banner_bottom[0] != '\0') {
+            const int bw = MeasureText(fx.banner_bottom, 22);
+            DrawText(fx.banner_bottom, (w - bw) / 2, by + 56, 22, Color{240, 226, 190, alpha});
+        }
+    }
+}
+
 void draw_hud(const WorldStatus& status, const PlayerView& player, bool build_mode,
-              int selected_slot) {
+              int selected_slot, HudFeedback& fx) {
     const int w = GetScreenWidth();
     const int h = GetScreenHeight();
 
@@ -189,6 +330,10 @@ void draw_hud(const WorldStatus& status, const PlayerView& player, bool build_mo
     bar(18, h - 48, 140, 12, frac(player.stamina, kPlayerMaxStamina), Color{120, 190, 96, 255},
         nullptr);
     bar(18, h - 30, 140, 12, frac(player.mana, kPlayerMaxMana), Color{96, 140, 220, 255}, nullptr);
+
+    // The skill chips ride just above the health bar — near the vitals, in the corner the eye already
+    // returns to for its bars, so a school ticking up is seen without opening a screen.
+    draw_skill_chips(player, 18, h - 98);
 
     // Day clock, top-right. `world_ms` is the world's own clock, not this client's.
     const std::int64_t ms = status.world_ms.load(std::memory_order_relaxed);
@@ -252,6 +397,10 @@ void draw_hud(const WorldStatus& status, const PlayerView& player, bool build_mo
                        static_cast<double>(player.dead_ticks) / kTicksPerSecond + 0.9);
         DrawText(back, (w - MeasureText(back, 20)) / 2, h / 2, 20, Color{210, 180, 175, 255});
     }
+
+    // The client-side feedback (XP motes, level-up banner) draws last so it lands over everything the
+    // HUD put down.
+    draw_hud_feedback(fx, w, h);
 }
 
 // --- Character sheet -------------------------------------------------------------------------
@@ -297,16 +446,27 @@ void draw_character(const PlayerView& player) {
     y += 32;
 
     for (int i = 0; i < kSkillCount; ++i) {
-        DrawText(kSkillNames[i], x, y, 18, Color{212, 216, 222, 255});
+        // The school's own colour, the same one the HUD chips, motes and banner use, so the sheet is
+        // where a player first learns which red is Melee.
+        DrawText(kSkillNames[i], x, y, 18, kSchoolColor[i]);
         DrawText(TextFormat("%2u", player.skill_level[i]), x + 92, y, 18,
                  Color{240, 226, 190, 255});
         const float f = player.skill_next[i] == 0
                             ? 1.0f
                             : static_cast<float>(player.skill_xp[i]) /
                                   static_cast<float>(player.skill_next[i]);
-        bar(x + 128, y + 2, 300, 14, f, Color{150, 130, 200, 255}, nullptr);
-        DrawText(TextFormat("%u/%u", player.skill_xp[i], player.skill_next[i]), x + 440, y + 1, 15,
+        bar(x + 128, y + 2, 236, 14, f, dim(kSchoolColor[i], 0.72f), nullptr);
+        DrawText(TextFormat("%u/%u", player.skill_xp[i], player.skill_next[i]), x + 372, y + 1, 15,
                  Color{150, 158, 168, 255});
+        // The next unlock, right-aligned as its own column: leveling a school buys a specific
+        // ability, and this says which and when. Read from the ability table (via next_unlock_level)
+        // so a retune of the unlock levels moves the hint with it rather than lying.
+        const int nxt = next_unlock_level(i, player.skill_level[i]);
+        if (nxt > 0) {
+            const char* hint = TextFormat("ability at Lv%d", nxt);
+            DrawText(hint, x + panel_w - MeasureText(hint, 14), y + 2, 14,
+                     Color{150, 158, 168, 255});
+        }
         y += 30;
     }
     y += 18;
@@ -327,6 +487,57 @@ void draw_character(const PlayerView& player) {
 }
 
 }  // namespace
+
+void hud_spawn_xp_mote(HudFeedback& fx, int school, std::uint32_t amount) {
+    if (school < 0 || school >= kSkillCount || amount == 0) return;
+    // A fixed pool: take a free slot, or the oldest live one so a burst never allocates and never
+    // silently drops the newest tick in favour of a stale one.
+    int pick = 0;
+    float oldest = -1.0f;
+    for (int i = 0; i < HudFeedback::kMaxMotes; ++i) {
+        if (!fx.motes[i].live) {
+            pick = i;
+            break;
+        }
+        if (fx.motes[i].age > oldest) {
+            oldest = fx.motes[i].age;
+            pick = i;
+        }
+    }
+    HudFeedback::XpMote& m = fx.motes[pick];
+    m.live = true;
+    m.age = 0.0f;
+    m.school = school;
+    m.amount = amount;
+    // Scatter horizontally off the pool index so several motes in one frame fan out instead of
+    // stacking into one fat number over the player's head.
+    m.dx = static_cast<float>((pick % 5) - 2) * 12.0f;
+}
+
+void hud_spawn_level_up(HudFeedback& fx, int school, int level) {
+    if (school < 0 || school >= kSkillCount) return;
+    fx.banner_age = 0.0f;
+    fx.banner_school = school;
+    std::snprintf(fx.banner_top, sizeof fx.banner_top, "%s %d", kSchoolUpper[school], level);
+    fx.banner_bottom[0] = '\0';
+    // Did this level cross an ability's unlock? Read the unlock levels straight from the table — the
+    // banner must never carry its own copy of the 2/6 the design tunes there.
+    for (int a = 0; a < kAbilityCount; ++a) {
+        const AbilityDef d = ability_def(static_cast<AbilityId>(a));
+        if (static_cast<int>(d.school) != school || d.unlock_level != level) continue;
+        // Which equipped slot it lands on: the lower-unlock of a school's two is F, the higher G.
+        // Count same-school abilities gated below this one — 0 means F, 1 means G. This mirrors
+        // `equipped_ability` without hardcoding the slot, so it stays right if the table is retuned.
+        int slot = 0;
+        for (int b = 0; b < kAbilityCount; ++b) {
+            const AbilityDef e = ability_def(static_cast<AbilityId>(b));
+            if (static_cast<int>(e.school) == school && e.unlock_level < level) ++slot;
+        }
+        std::snprintf(fx.banner_bottom, sizeof fx.banner_bottom, "New ability: %s [%c]",
+                      kAbilityName[a], slot == 0 ? 'F' : 'G');
+        break;
+    }
+}
 
 bool handle_shell_keys(ShellState& st) {
     // The sign-in screen swallows everything: its text fields want the keyboard.
@@ -487,7 +698,7 @@ Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player,
         }
 
         case Screen::kPlaying:
-            draw_hud(status, player, build_mode, selected_slot);
+            draw_hud(status, player, build_mode, selected_slot, st.hud);
             return Action::kNone;
 
         case Screen::kMainMenu: {
@@ -507,7 +718,7 @@ Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player,
         }
 
         case Screen::kPaused: {
-            draw_hud(status, player, build_mode, selected_slot);
+            draw_hud(status, player, build_mode, selected_slot, st.hud);
             dim_background();
             title("Paused", GetScreenHeight() / 2 - 170);
             subtitle("The world keeps going while you are here.", GetScreenHeight() / 2 - 120);
@@ -580,13 +791,38 @@ Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player,
 
         case Screen::kOptions: {
             dim_background();
-            title("Options", GetScreenHeight() / 2 - 150);
-            subtitle("Volume and key rebinding land with the audio pass.",
-                     GetScreenHeight() / 2 - 100);
-            static const char* items[] = {"Back"};
-            if (button_column(items, 1, GetScreenHeight() / 2 - 40) == 0) {
-                st.screen = Screen::kPaused;
+            title("Options", GetScreenHeight() / 2 - 170);
+            const int x = (GetScreenWidth() - kPanelW) / 2;
+            static const Color kLabel{160, 170, 180, 255};
+            int y = GetScreenHeight() / 2 - 90;
+
+            // Master volume: click or drag the track, or nudge with Left/Right (the screen has no
+            // text field, so the arrows are free — the same trick the login screen's segments use).
+            // It applies live: `client_main` watches these two fields and calls into Audio, which the
+            // shell is not allowed to see.
+            DrawText("Master volume", x, y - 22, 16, kLabel);
+            slider(x, y, kPanelW - 64, st.master_volume);
+            if (IsKeyPressed(KEY_LEFT)) st.master_volume = std::max(0, st.master_volume - 5);
+            if (IsKeyPressed(KEY_RIGHT)) st.master_volume = std::min(100, st.master_volume + 5);
+            {
+                const char* pct = TextFormat("%d%%", st.master_volume);
+                DrawText(pct, x + kPanelW - MeasureText(pct, 18), y, 18, Color{240, 226, 190, 255});
             }
+            y += 58;
+
+            // Music on/off — the same two-segment choice the login screen hosts/joins with. `Off` is
+            // the second segment, so it lights when the music is off.
+            DrawText("Music", x, y - 22, 16, kLabel);
+            const int music_click = segment_pair(x, y, "On", "Off", !st.music_on);
+            if (music_click == 0) st.music_on = true;
+            if (music_click == 1) st.music_on = false;
+            y += 66;
+
+            subtitle("Key rebinding is still owed - it lands with the input pass.", y);
+            y += 30;
+
+            static const char* items[] = {"Back"};
+            if (button_column(items, 1, y) == 0) st.screen = Screen::kPaused;
             return Action::kNone;
         }
     }

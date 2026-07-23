@@ -30,6 +30,10 @@ constexpr const char* kSfxFiles[static_cast<int>(Sfx::kCount)] = {
     "levelup.wav",
 };
 
+// The looping track's own level when it is on. Kept as a named constant so the ctor and the music
+// toggle agree on what "on" sounds like.
+constexpr float kMusicVol = 0.35f;
+
 }  // namespace
 
 struct Audio::Impl {
@@ -63,7 +67,7 @@ Audio::Audio() : impl_(std::make_unique<Impl>()) {
         impl_->music = LoadMusicStream(theme.c_str());
         impl_->music.looping = true;
         impl_->music_loaded = true;
-        SetMusicVolume(impl_->music, 0.35f);
+        SetMusicVolume(impl_->music, kMusicVol);
     }
     TraceLog(LOG_INFO, "AUDIO: ready");
 }
@@ -95,6 +99,19 @@ void Audio::start_music() const {
 void Audio::update() const {
     if (!impl_->device || !impl_->music_loaded) return;
     UpdateMusicStream(impl_->music);
+}
+
+void Audio::set_master_volume(float v01) const {
+    if (!impl_->device) return;
+    const float v = v01 < 0.0f ? 0.0f : (v01 > 1.0f ? 1.0f : v01);
+    SetMasterVolume(v);
+}
+
+void Audio::set_music_enabled(bool on) const {
+    if (!impl_->device || !impl_->music_loaded) return;
+    // Muting by volume rather than pausing keeps the stream fed and running, so turning it back on is
+    // instant and in time with the world clock rather than restarting the track from its head.
+    SetMusicVolume(impl_->music, on ? kMusicVol : 0.0f);
 }
 
 }  // namespace mmo::ui

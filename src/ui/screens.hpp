@@ -46,6 +46,40 @@ inline constexpr int kNameMax = 24;
 inline constexpr int kPassMax = 40;
 inline constexpr int kJoinAddrMax = 64;  // "255.255.255.255:65535" and a hostname both fit
 
+// Client-side, glanceable progression feedback the HUD owns and draws: the drifting "+N" XP motes
+// and the centred level-up banner. Both are FIXED-SIZE pools filled by `client_main` (which already
+// keeps a per-frame snapshot of the local player's skills for the level-up fanfare — the spawn calls
+// below ride that same comparison rather than a second one) and animated inside `draw`. No raylib
+// types cross this header, the same rule the rest of the shell keeps, so the pool is plain numbers
+// and pre-formatted strings — the school name, level and any unlocked ability are resolved from the
+// ability table at spawn time and stored, so drawing a frame touches no game state.
+struct HudFeedback {
+    struct XpMote {
+        bool live = false;
+        float age = 0.0f;          // seconds since it spawned; it rises and fades over ~1s
+        int school = 0;            // which school gained the XP — tints the mote
+        std::uint32_t amount = 0;  // the "+N"
+        float dx = 0.0f;           // a little horizontal scatter so several do not stack
+    };
+    static constexpr int kMaxMotes = 24;
+    XpMote motes[kMaxMotes] = {};
+
+    // The banner. `age` starts past its lifetime so nothing draws until a level-up seeds it to 0.
+    float banner_age = 1e9f;
+    int banner_school = 0;
+    char banner_top[24] = {};     // e.g. "MELEE 6"
+    char banner_bottom[48] = {};  // e.g. "New ability: Crush Blow [G]", empty when none unlocked
+};
+
+// Called by `client_main` when the local player's `skill_xp` rose without a level (the level case is
+// the banner's, below). Parks a "+N" mote in the pool, reusing the oldest slot when full.
+void hud_spawn_xp_mote(HudFeedback& fx, int school, std::uint32_t amount);
+
+// Called by `client_main` on any `skill_level` increase — the same frame the kLevelUp fanfare plays.
+// Fills the banner and, if `level` is an ability's unlock level (read from the ability table, never
+// hardcoded), the "New ability" line naming it and the slot key it lands on.
+void hud_spawn_level_up(HudFeedback& fx, int school, int level);
+
 struct ShellState {
     Screen screen = Screen::kLogin;
     bool debug_overlay = false;  // F3
@@ -71,6 +105,16 @@ struct ShellState {
     bool join_mode = false;
     char join_addr[kJoinAddrMax] = {};
     bool editing_addr = false;
+
+    // Options that actually do something now. Both persist to client.cfg beside join/join_addr and
+    // are applied live by `client_main` (which owns the Audio device the shell must not see). The
+    // Options screen mutates them; the caller watches for the change and calls into Audio.
+    int master_volume = 100;  // 0..100, straight into raylib's SetMasterVolume as 0..1
+    bool music_on = true;
+
+    // Progression feedback drawn over the HUD. Lives here because, like the sign-in buffers, it must
+    // survive between immediate-mode frames.
+    HudFeedback hud;
 };
 
 // Handles the keys that belong to the shell rather than to gameplay: Esc pauses/backs out, J opens
