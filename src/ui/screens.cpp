@@ -32,6 +32,30 @@ int button_column(const char* const* labels, int count, int top) {
     return clicked;
 }
 
+// Two side-by-side segments filling the panel width; the selected one reads lit. Returns the index
+// clicked this frame, or -1. Deliberately the same flat-rectangle-plus-text idiom as `button_column`
+// and `text_field` — a segmented choice is a new job, not a reason to reach for a new widget
+// vocabulary. `second_selected` is which of the two is currently chosen.
+int segment_pair(int x, int y, const char* a, const char* b, bool second_selected) {
+    const int seg_w = (kPanelW - kGap) / 2;
+    const Vector2 m = GetMousePosition();
+    int clicked = -1;
+    for (int i = 0; i < 2; ++i) {
+        const Rectangle r{static_cast<float>(x + i * (seg_w + kGap)), static_cast<float>(y),
+                          static_cast<float>(seg_w), 40.0f};
+        const bool selected = (i == 1) == second_selected;
+        if (CheckCollisionPointRec(m, r) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) clicked = i;
+        DrawRectangleRec(r, selected ? Color{51, 56, 74, 255} : Color{26, 29, 38, 255});
+        DrawRectangleLinesEx(r, 2.0f,
+                             selected ? Color{214, 176, 106, 255} : Color{92, 96, 108, 255});
+        const char* label = i == 0 ? a : b;
+        const int tw = MeasureText(label, 18);
+        DrawText(label, static_cast<int>(r.x) + (seg_w - tw) / 2, static_cast<int>(r.y) + 11, 18,
+                 selected ? Color{240, 226, 190, 255} : Color{150, 158, 168, 255});
+    }
+    return clicked;
+}
+
 void dim_background() {
     DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{0, 0, 0, 170});
 }
@@ -314,18 +338,60 @@ Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player)
     switch (st.screen) {
         case Screen::kLogin: {
             DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{18, 20, 26, 255});
-            title("Ninja Adventure", GetScreenHeight() / 2 - 200);
+            title("Ninja Adventure", GetScreenHeight() / 2 - 260);
             subtitle("A name this world has not seen before becomes an account.",
-                     GetScreenHeight() / 2 - 148);
+                     GetScreenHeight() / 2 - 214);
 
             const int x = (GetScreenWidth() - kPanelW) / 2;
-            int y = GetScreenHeight() / 2 - 90;
-            DrawText("Name", x, y - 22, 16, Color{160, 170, 180, 255});
+            static const Color kLabel{160, 170, 180, 255};
+
+            // --- World: host vs join -----------------------------------------------------------
+            // The connection choice comes FIRST because it decides which world the name/password
+            // then sign into. Left/Right or a click picks a segment; see below for why join is
+            // gated in this build.
+            int y = GetScreenHeight() / 2 - 170;
+            DrawText("World", x, y - 22, 16, kLabel);
+            const int seg_clicked = segment_pair(x, y, "Host this world", "Join a world",
+                                                  st.join_mode);
+            if (seg_clicked == 0) st.join_mode = false;
+            if (seg_clicked == 1) st.join_mode = true;
+            // Arrow keys are free on this screen (the text fields have no cursor to move), so they
+            // drive the segment — the flat-choice equivalent of Tab between fields.
+            if (IsKeyPressed(KEY_LEFT)) st.join_mode = false;
+            if (IsKeyPressed(KEY_RIGHT)) st.join_mode = true;
+            y += 52;
+
+            // The block's own explanatory line, in the screen's existing voice. The join line is
+            // deliberately honest: the distributed router that JOIN needs is the P5 step (see
+            // world.hpp's LocalRouter note and ARCHITECTURE §2), so this build cannot actually
+            // reach a remote leader yet, and says so rather than pretending.
+            subtitle(st.join_mode
+                         ? "Joining over the network lands with the cluster router (P5). "
+                           "This build hosts."
+                         : "Your machine keeps this world. Friends join with your address.",
+                     y);
+            y += 34;
+
+            // The address field exists only when joining — there is nothing to type when you are
+            // the host. It leads the Tab cycle when present.
+            if (st.join_mode) {
+                DrawText("Address", x, y - 22, 16, kLabel);
+                text_field(Rectangle{static_cast<float>(x), static_cast<float>(y),
+                                     static_cast<float>(kPanelW), 40.0f},
+                           st.join_addr, kJoinAddrMax, st.editing_addr, false,
+                           "leader address - ip:port");
+                y += 62;
+            } else {
+                st.editing_addr = false;  // an unseen field must not keep the keyboard
+            }
+
+            // --- Name / Password ---------------------------------------------------------------
+            DrawText("Name", x, y - 22, 16, kLabel);
             text_field(Rectangle{static_cast<float>(x), static_cast<float>(y),
                                  static_cast<float>(kPanelW), 40.0f},
                        st.name, kNameMax, st.editing_name, false, "who are you?");
             y += 62;
-            DrawText("Password", x, y - 22, 16, Color{160, 170, 180, 255});
+            DrawText("Password", x, y - 22, 16, kLabel);
             text_field(Rectangle{static_cast<float>(x), static_cast<float>(y),
                                  static_cast<float>(kPanelW), 40.0f},
                        st.pass, kPassMax, st.editing_pass, true, "");
@@ -338,11 +404,23 @@ Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player)
             }
             y += 26;
 
-            // Tab moves between the fields, Enter submits — the two things anyone typing a login
-            // will try without being told.
+            // Tab cycles the visible fields, Enter submits — the two things anyone typing a login
+            // will try without being told. When joining, the address leads: Address -> Name ->
+            // Password. When hosting, there is no address, so it is just Name -> Password.
             if (IsKeyPressed(KEY_TAB)) {
-                st.editing_pass = !st.editing_pass;
-                st.editing_name = !st.editing_pass;
+                if (st.join_mode) {
+                    if (!st.editing_addr && !st.editing_name && !st.editing_pass) {
+                        st.editing_addr = true;  // nothing focused yet: land on the address
+                    } else {
+                        const bool a = st.editing_addr, n = st.editing_name;
+                        st.editing_addr = st.editing_pass;  // Password -> Address
+                        st.editing_name = a;                // Address -> Name
+                        st.editing_pass = n;                // Name -> Password
+                    }
+                } else {
+                    st.editing_pass = !st.editing_pass;
+                    st.editing_name = !st.editing_pass;
+                }
             }
             const bool submit = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER);
             static const char* items[] = {"Sign in", "Quit"};

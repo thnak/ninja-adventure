@@ -44,6 +44,7 @@ enum class Action : std::uint8_t {
 
 inline constexpr int kNameMax = 24;
 inline constexpr int kPassMax = 40;
+inline constexpr int kJoinAddrMax = 64;  // "255.255.255.255:65535" and a hostname both fit
 
 struct ShellState {
     Screen screen = Screen::kLogin;
@@ -58,6 +59,15 @@ struct ShellState {
     bool editing_name = false;
     bool editing_pass = false;
     const char* login_message = nullptr;  // set by the caller after a failed attempt
+
+    // The connection block, drawn ABOVE name/password. A multiplayer-in-a-cluster game has to ask
+    // WHICH world you are signing into: host your own (default) or join a friend's leader. This is
+    // the Minecraft/Valheim model from ARCHITECTURE §2 — the first node is the trusted leader and
+    // friends join as nodes #2..N. `join_addr` is that leader's ip:port. Held here for the same
+    // immediate-mode reason as name/pass: the buffer must outlive the frame.
+    bool join_mode = false;
+    char join_addr[kJoinAddrMax] = {};
+    bool editing_addr = false;
 };
 
 // Handles the keys that belong to the shell rather than to gameplay: Esc pauses/backs out, J opens

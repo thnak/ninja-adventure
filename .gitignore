@@ -13,6 +13,8 @@ assets/_src/
 # The account table the client writes beside itself. Contains Argon2 hashes, not passwords —
 # but it is per-machine state, not source.
 accounts.dat
+# Per-machine connection preference (host/join + last address), like accounts.dat: state, not source.
+client.cfg
 
 # Measurement scratch from tools/study_examples.py and tools/mock_world.py — contact sheets and
 # derived JSON, all regenerable, none of it source.

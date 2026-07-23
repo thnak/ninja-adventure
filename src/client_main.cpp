@@ -31,6 +31,36 @@ namespace {
 // Where the account table lives. One file beside the executable; P5 owns anything better.
 constexpr const char* kAccountsPath = "accounts.dat";
 
+// Per-machine connection state: which mode the player last chose (host vs join) and the leader
+// address they last typed. It sits beside accounts.dat and is treated the same way — machine state,
+// not source, so it is gitignored. Plain text and failure-tolerant on purpose: a missing or garbled
+// file means defaults, never a crash. P5 (the real cluster join) owns anything better.
+constexpr const char* kClientCfgPath = "client.cfg";
+
+void load_client_cfg(const char* path, ui::ShellState& shell) {
+    std::FILE* f = std::fopen(path, "rb");
+    if (f == nullptr) return;  // no file yet -> defaults, which is the intended first-run behaviour
+    char line[128];
+    while (std::fgets(line, sizeof line, f) != nullptr) {
+        if (std::strncmp(line, "join=", 5) == 0) {
+            shell.join_mode = std::atoi(line + 5) != 0;
+        } else if (std::strncmp(line, "join_addr=", 10) == 0) {
+            char* v = line + 10;
+            v[std::strcspn(v, "\r\n")] = '\0';  // strip the newline fgets leaves on
+            std::snprintf(shell.join_addr, sizeof shell.join_addr, "%s", v);
+        }
+        // Unknown keys are ignored — a newer build's cfg must not trip an older one.
+    }
+    std::fclose(f);
+}
+
+void save_client_cfg(const char* path, const ui::ShellState& shell) {
+    std::FILE* f = std::fopen(path, "wb");
+    if (f == nullptr) return;  // best-effort; a write failure here is never worth aborting a login
+    std::fprintf(f, "join=%d\njoin_addr=%s\n", shell.join_mode ? 1 : 0, shell.join_addr);
+    std::fclose(f);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -47,6 +77,7 @@ int main(int argc, char** argv) {
     int look_door = -1;                 // --door N: step onto door N, which takes you inside it
     int look_at_tx = -1;                // --at TX TY: park the camera on an arbitrary tile
     int look_at_ty = -1;
+    const char* connect_addr = nullptr;  // --connect HOST:PORT: prefill the login screen's join mode
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--shot") == 0 && i + 2 < argc) {
             shot_seconds = std::atoi(argv[i + 1]);
@@ -66,6 +97,8 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--at") == 0 && i + 2 < argc) {
             look_at_tx = std::atoi(argv[i + 1]);
             look_at_ty = std::atoi(argv[i + 2]);
+        } else if (std::strcmp(argv[i], "--connect") == 0 && i + 1 < argc) {
+            connect_addr = argv[i + 1];  // HOST:PORT of a friend's leader
         }
     }
 
@@ -90,6 +123,14 @@ int main(int argc, char** argv) {
     ui::Audio audio;
     audio.start_music();
     ui::ShellState shell;
+
+    // Restore the last connection choice, then let `--connect` override it. A flag is an explicit
+    // request for this run, so it wins over whatever the file remembered.
+    load_client_cfg(kClientCfgPath, shell);
+    if (connect_addr != nullptr) {
+        shell.join_mode = true;
+        std::snprintf(shell.join_addr, sizeof shell.join_addr, "%s", connect_addr);
+    }
 
     // Unattended mode signs itself in, so a screenshot is of the game rather than of a login box.
     if (shot_path != nullptr) {
@@ -300,21 +341,37 @@ int main(int argc, char** argv) {
         bridge.end_frame();
 
         if (act == ui::Action::kSignIn) {
-            LoginOutcome out{};
-            const int s = world.login(shell.name, shell.pass, out);
-            if (s >= 0) {
-                slot = s;
-                me = world.key_of(slot);
-                shell.screen = ui::Screen::kPlaying;
-                shell.login_message = nullptr;
-                world.save_accounts(kAccountsPath);
-                std::printf("signed in as '%s' (%s) -> slot %d\n", shell.name, describe(out), slot);
+            // Remember the connection choice for next launch, regardless of how the attempt below
+            // goes. It is machine convenience state, the same category as accounts.dat.
+            save_client_cfg(kClientCfgPath, shell);
+
+            if (shell.join_mode) {
+                // JOIN cannot connect yet, and this build refuses to pretend it can. Every
+                // cross-actor call still goes through `LocalRouter` (see world.hpp): swapping it
+                // for the distributed router and handing each node a subset of the chunk keys is
+                // the P5 step, and the node #2..N model in ARCHITECTURE §2 rides on exactly that.
+                // Until then, joining a remote leader is impossible, so we say so on the same
+                // message channel a failed login already uses rather than silently hosting.
+                shell.login_message =
+                    "Joining a remote world is the P5 step - this build hosts. Pick 'Host'.";
             } else {
-                shell.login_message = describe(out);
+                LoginOutcome out{};
+                const int s = world.login(shell.name, shell.pass, out);
+                if (s >= 0) {
+                    slot = s;
+                    me = world.key_of(slot);
+                    shell.screen = ui::Screen::kPlaying;
+                    shell.login_message = nullptr;
+                    world.save_accounts(kAccountsPath);
+                    std::printf("signed in as '%s' (%s) -> slot %d\n", shell.name, describe(out),
+                                slot);
+                } else {
+                    shell.login_message = describe(out);
+                }
             }
-            // Wipe the password out of process memory the moment it has been used. It is a small
+            // Wipe the password out of process memory the moment the attempt is over. It is a small
             // thing and it is free, and the alternative is a plaintext password sitting in a UI
-            // struct for the rest of the session.
+            // struct for the rest of the session. Done for the join path too: the box was filled.
             std::memset(shell.pass, 0, sizeof shell.pass);
         }
         if (act == ui::Action::kQuit) break;
