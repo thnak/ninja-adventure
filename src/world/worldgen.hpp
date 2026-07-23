@@ -121,6 +121,13 @@ inline constexpr int kStrongholdCell = 124;
 inline constexpr int kVillageEdgeMargin = 18;
 inline constexpr int kStrongholdKeepOut = 34;     // no stronghold this close to a village
 inline constexpr int kMaxRoadLength = 300;        // do not join villages further apart than this
+// Distance between one village street and the next: three tiles of house plus a two-tile
+// carriageway. Every house in this pack is exactly three tiles tall (`size_of`), so a row of them
+// fits the gap with nothing left over and no terrace is ever half a house deep.
+inline constexpr int kStreetPitch = 5;
+// How many houses a street takes on each side of the crossroads before the next street
+// opens. Two keeps a hamlet to a single short terrace and spreads a town over three.
+inline constexpr int kHousesPerSide = 2;
 
 class WorldLayout {
 public:
@@ -394,6 +401,24 @@ private:
         }
     }
 
+    // One paved tile, unless a building or open water is already there. `put` overwrites whatever
+    // it finds, which is right for a road crossing a meadow and wrong for a street being laid
+    // between houses that are already up.
+    void pave(int x, int y) {
+        if (x < 1 || y < 1 || x >= kMapTiles - 1 || y >= kMapTiles - 1) return;
+        if (peek(x, y) == static_cast<std::uint8_t>(Terrain::kBuilding)) return;
+        if (terrain_base(seed_, kOverworld, x, y) == Terrain::kWater) return;
+        put(x, y, Terrain::kPath);
+    }
+
+    // A village street: two tiles of carriageway from `x0` to `x1` with its north kerb at `y`.
+    void street(int x0, int x1, int y) {
+        for (int x = x0; x <= x1; ++x) {
+            pave(x, y);
+            pave(x, y + 1);
+        }
+    }
+
     // Two tiles wide, and never over a building: roads are laid before the houses go up, but a
     // village square placed later must be able to overwrite a road rather than the reverse.
     void paint_road(int x, int y) {
@@ -409,7 +434,12 @@ private:
     void build_villages() {
         for (Village& v : villages_) {
             v.first = static_cast<std::uint16_t>(structures_.size());
-            const int plaza = 3 + v.tier;  // tier 1 -> 4 tiles, tier 5 -> 8
+            // SMALLER THAN IT WAS (it used to be 3 + tier). The square was the only thing that said
+            // "village" when the houses were scattered, so it had to be big; at tier 5 that made it
+            // 17 tiles across, wider than the screen is tall, and arriving at a town meant standing
+            // in a paved field with the buildings over the horizon. Now that the streets carry the
+            // settlement's shape, the square can go back to being a square.
+            const int plaza = 2 + v.tier / 2;  // tier 1 -> 2 tiles, tier 5 -> 4
 
             // The square. Its edge is noisy so it reads as trodden ground rather than as a stamp.
             // Compared as SQUARED distances against an integer radius, so there is no sqrt and no
@@ -427,33 +457,99 @@ private:
                 }
             }
 
-            // Houses ring the square. The count is what `tier` actually MEANS today — a hamlet has
+            // Houses LINE STREETS. The count is what `tier` actually MEANS today — a hamlet has
             // four buildings and a town has a dozen, and that is legible from a distance without a
             // label, which is the whole point of putting the difficulty gradient in the map.
+            //
+            // THEY USED TO BE SCATTERED, by rejection sampling over a square annulus around the
+            // square. That reads as a camp rather than as a village, and rebuilding the asset pack
+            // author's own `Village.tscn` from his scene file is what made the gap obvious: his
+            // houses sit in rows along a paved street, and ours sat wherever the sampler landed.
+            // The measurable part of the gap was never decoration density — ours already sits
+            // inside the pack's own band — it was that nothing was aligned to anything.
+            //
+            // The hinge is a property `try_place` already had: it paves the row under the front
+            // wall, because every house sprite in this pack faces SOUTH. So placing a house whose
+            // doorstep row IS a street makes the door open onto that street, for free and by
+            // construction rather than by a check that could drift out of step with the art.
             const int want = 3 + 2 * v.tier;
             Rng r(seed_ ^ 0xB00C'0000ull ^ (static_cast<std::uint64_t>(v.tx) << 16) ^ v.ty);
             int placed = 0;
             bool hall = false;
-            for (int attempt = 0; attempt < want * 14 && placed < want; ++attempt) {
-                // A SQUARE annulus just outside the square: close enough to belong to it, far
-                // enough that the square itself stays open. Rejection sampling over integer offsets
-                // rather than polar cos/sin, for the reason in `block_noise` — trig is the other
-                // place two compilers are free to disagree, and one disagreement here shifts a
-                // house, which shifts every later rejection test in the village.
-                const int span = plaza + 7;
-                const int hx = v.tx - span + static_cast<int>(r.below(
-                                                static_cast<std::uint32_t>(2 * span + 1)));
-                const int hy = v.ty - span + static_cast<int>(r.below(
-                                                static_cast<std::uint32_t>(2 * span + 1)));
-                if (std::max(std::abs(hx - v.tx), std::abs(hy - v.ty)) < plaza + 1) continue;
+            const int span = plaza + 8;
+            int street_lo = v.ty;
+            int street_hi = v.ty;
 
-                StructureKind kind = house_for(v.ring, r);
-                if (!hall && v.tier >= 3 && placed == 0) {
-                    kind = StructureKind::kHouseRed;  // the hall, once, and first
-                    hall = true;
+            // The hall faces the SQUARE, not a street. It is the one building a village has only
+            // from tier 3, so it is the thing that should be looked at on arrival — and a square
+            // with nothing addressing it is just a large paved nothing, which is exactly how the
+            // first version of this read on screen. Its doorstep row lands on the square's own
+            // northern kerb, by the same rule the terraces use.
+            if (v.tier >= 3) {
+                const StructureSize s = size_of(StructureKind::kHouseRed);
+                hall = try_place(v.tx - s.w / 2, v.ty - plaza - s.h, StructureKind::kHouseRed);
+                if (hall) ++placed;
+            }
+
+            // Street rows walk outward from the square, alternating south then north, so a hamlet
+            // gets one street and a town gets three on each side. Pitch is house height + street
+            // width; both are integers and stay integers, for the reason in `block_noise` — a float
+            // here would let two compilers disagree about where a house goes.
+            for (int row = 1; row <= 3 && placed < want; ++row) {
+                for (int side = 0; side < 2 && placed < want; ++side) {
+                    const int sy = (side == 0) ? v.ty + plaza + row * kStreetPitch
+                                               : v.ty - plaza - row * kStreetPitch;
+                    if (sy < 4 || sy >= kMapTiles - 4) continue;
+
+                    // Houses first, then the street over what is left. The other order would pave
+                    // the ground a house is about to stand on and `try_place` would still take it,
+                    // which is how you get a doorway opening into the middle of a carriageway.
+                    //
+                    // A terrace grows OUTWARD FROM THE CROSSROADS, east side then west, rather than
+                    // sweeping from one end of the span. Sweeping was the first version and it piles
+                    // every house against the western edge, because the loop stops as soon as the
+                    // village has its quota — so a tier-5 town got one long left-justified terrace
+                    // and five bare streets.
+                    int lo = v.tx;
+                    int hi = v.tx + 1;
+                    for (int dir = 0; dir < 2; ++dir) {
+                        int on_side = 0;
+                        int hx = (dir == 0) ? v.tx + 3 : v.tx - 3;
+                        while (on_side < kHousesPerSide && placed < want) {
+                            StructureKind kind = house_for(v.ring, r);
+                            if (!hall && v.tier >= 3) {
+                                kind = StructureKind::kHouseRed;  // the hall, once, and first
+                                hall = true;
+                            }
+                            const StructureSize s = size_of(kind);
+                            const int x0 = (dir == 0) ? hx : hx - s.w;
+                            if (x0 < v.tx - span || x0 + s.w > v.tx + span) break;
+                            if (try_place(x0, sy - s.h, kind)) {
+                                ++placed;
+                                ++on_side;
+                                lo = std::min(lo, x0);
+                                hi = std::max(hi, x0 + s.w - 1);
+                                const int gap = 1 + static_cast<int>(r.below(2));
+                                hx = (dir == 0) ? x0 + s.w + gap : x0 - gap;
+                            } else {
+                                hx += (dir == 0) ? 2 : -2;
+                            }
+                        }
+                    }
+                    if (hi - lo < 2) continue;  // nothing stood up here; lay no street either
+                    // Trimmed to the terrace it serves, plus a kerb. Paving the whole span left
+                    // carriageways running out into empty meadow like runways.
+                    street(lo - 2, hi + 2, sy);
+                    street_lo = std::min(street_lo, sy);
+                    street_hi = std::max(street_hi, sy + 1);
                 }
-                if (!try_place(hx, hy, kind)) continue;
-                ++placed;
+            }
+
+            // The spine: one north-south carriageway through the square, joining every street to
+            // every other and to the road network outside. Without it a village is a stack of
+            // unconnected terraces.
+            for (int y = street_lo; y <= street_hi; ++y) {
+                for (int x = v.tx; x <= v.tx + 1; ++x) pave(x, y);
             }
             v.count = static_cast<std::uint16_t>(structures_.size() - v.first);
         }

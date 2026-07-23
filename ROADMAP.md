@@ -87,7 +87,7 @@ Dựng sân khấu thật, trước khi tune bất cứ thứ gì lên trên nó
 | Thống nhất art: **địa hình + cây** sang Ninja Adventure | ✅ 9 loại địa hình, cây 2 mảnh mọc trên nền đúng vòng |
 | **Thế giới đầu tiên 100% Ninja Adventure** | ✅ không còn ô Kenney nào trong world |
 | Ảnh từng quần xã (`--ring N`) | ✅ `docs/biomes/` |
-| **Worldgen đặt làng / cứ điểm / đường** | ✅ 51 làng, 27 cứ điểm, 522 công trình, `src/world/worldgen.hpp` |
+| **Worldgen đặt làng / cứ điểm / đường** | ✅ 51 làng, 27 cứ điểm, 519 công trình xếp dọc phố, `src/world/worldgen.hpp` |
 | **Gỡ nông trại khởi đầu + tường/tháp/rào đặt-từng-ô** | ✅ `BuildKind` còn 2 giá trị |
 | **Lớp không khí**: lá bay / mưa / tuyết theo vòng | ✅ 0 state, 0 message |
 | **BFS đa nguồn** (tới làng gần nhất) | ✅ một lượt quét, không phải một field mỗi làng |
@@ -357,10 +357,33 @@ Nhưng kết luận cũ vẫn đứng: **không có bộ chuyển cát↔cỏ.**
 scene cho thấy ông ấy ghép cứng cát vào cỏ rồi rắc vật thể lên che. Nên 4 địa hình dùng art của pack,
 7 địa hình vẫn tự sinh.
 
+## Xen giữa: R5 — làng có phố
+
+Dựng lại `Village.tscn` của tác giả cho thấy khoảng cách với làng của ta **không nằm ở mật độ trang
+trí** — `density` của ta là 0.095, dải của pack là 0.084–0.104, đã nằm trong dải. Nó nằm ở **bố cục**:
+`worldgen.hpp` đặt nhà bằng rejection sampling trong một vành vuông quanh quảng trường, tức là rắc
+ngẫu nhiên, nên không có gì thẳng hàng với gì cả.
+
+Bản lề là một tính chất `try_place` vốn đã có: nó lát hàng ô ngay dưới mặt tiền, vì **mọi sprite nhà
+trong pack này đều quay mặt xuống nam**. Đặt nhà sao cho hàng thềm của nó *chính là* mặt đường thì
+cửa tự mở ra phố — không cần thêm phép kiểm tra nào có thể lệch khỏi art về sau.
+
+| | |
+|---|---|
+| Phố | chạy đông-tây, bước 5 ô = 3 ô nhà + 2 ô lòng đường; cắt đúng bằng dãy nhà nó phục vụ |
+| Dãy nhà | mọc **ra hai bên từ ngã tư**, mỗi bên tối đa 2 căn, rồi mở phố mới |
+| Trục | một đường bắc-nam xuyên quảng trường, nối mọi phố với mạng đường ngoài |
+| Sảnh | tier ≥ 3, quay mặt ra **quảng trường** — thứ đáng nhìn khi vừa tới nơi |
+| Quảng trường | thu từ `3 + tier` xuống `2 + tier/2`; ở tier 5 nó từng rộng 17 ô, hơn cả chiều cao màn hình |
+
+Tier giờ đọc được từ hình dạng: tier 1 một dãy phố, tier 3 hai, tier 5 sáu. Số công trình 522 → **519**
+(quảng trường nhỏ hơn làm vài chỗ đặt hụt). Windows/MSVC ra đúng từng con số của Linux — `grass
+362748`, `path 22169`, `buildg 5259` — nên tính tất định của worldgen còn nguyên.
+
 Còn nợ: **ash/stone vẫn là nền lát đá trong nhà** — bộ CC0 này không có đất cháy hay đá lộ thiên
 nào; đó là art phải tự vẽ, để lại cho P9.
 
 ## Không còn gì chặn đường
 
-Mọi quyết định đã chốt. **P0, P1, P2 xong, và R0–R4 (dựng hình) xong.** Việc tiếp theo là
+Mọi quyết định đã chốt. **P0, P1, P2 xong, và R0–R5 (dựng hình + bố cục làng) xong.** Việc tiếp theo là
 **P3 — hệ thống thế giới.**
