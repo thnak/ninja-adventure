@@ -27,22 +27,26 @@
 | 13 | Skill composition | `abilities.hpp` constexpr table, but behavior is hand-written branches. | Composition columns; six shipped abilities become rows. | RFC-001, RFC-008 |
 | 14, 15 | Asset reuse, tint/filters | Renderer already layers (katana overlay, windup pulse, smoke 1.6×); raylib tint is one parameter. | Status→tint/overlay map. | RFC-006 |
 | 16 | Battlefield states | Camera shake exists; zone particles render closed-form from world clock. | Chunk-level state channel (earthquake: shake amp, aim scatter). | RFC-010, RFC-006 |
-| 17 | RL-friendly | **The seam is live**: `boss_policy(BossObs) → BossAction` pure function, built in F3 exactly so F4 can swap it. | BossObs v2 per RFC-007; versioned checkpoints. | RFC-007 |
+| 17 | RL-friendly | **The seam is live**: `boss_policy(BossObs) → BossAction` pure function, built in F3 exactly so F4 can swap it. | RFC-007's 120-float observation vector (`kObsVersion`) + 15-action space (`kActionCount`) replacing today's `BossObs`; versioned checkpoints. | RFC-007 |
 
 ## The detailed set (status as of 2026-07-23)
 
 | RFC | Title | Status |
 |---|---|---|
-| 001 | Ability System | **Accepted** |
-| 002 | Status & Effect Framework | Draft |
-| 003 | Physics & Material Interaction | Draft |
-| 004 | Terrain & Combat Entity | **Accepted** |
-| 005 | Boss Ability Authoring | **Accepted** |
-| 006 | Visual FX & Telegraph Standards | Draft |
-| 007 | RL Observation & Action Space | **Accepted** |
-| 008 | Data-driven Skill Definition (JSON) | Draft |
-| 009 | Damage, Resistance & Effect Build-up | Draft |
-| 010 | Battlefield Simulation | Draft |
+| 001 | Ability System | **Accepted (revised after review)** |
+| 002 | Status & Effect Framework | **Accepted (revised after review)** |
+| 003 | Physics & Material Interaction | **Accepted (revised after review)** |
+| 004 | Terrain & Combat Entity | **Accepted (revised after review)** |
+| 005 | Boss Ability Authoring | **Accepted (revised after review)** |
+| 006 | Visual FX & Telegraph Standards | **Accepted (revised after review)** |
+| 007 | RL Observation & Action Space | **Accepted (revised after review)** |
+| 008 | Data-driven Skill Definition (JSON) | **Accepted (revised after review)** |
+| 009 | Damage, Resistance & Effect Build-up | **Accepted (revised after review)** |
+| 010 | Battlefield Simulation | **Accepted (revised after review)** |
+
+All ten finalized through dual-model adversarial review 2026-07-23; see each RFC's own
+`## Review Record` and [RECONCILIATION.md](RECONCILIATION.md) for the cross-RFC arbitration pass
+that followed.
 
 ## Build order (topological, from the RFCs' declared dependencies)
 
@@ -68,3 +72,68 @@
 - Deferred `lake_islands` → unblocked by RFC-004's terrain-scar overlay writes.
 - The six shipped abilities → migrate to RFC-001 pipeline / RFC-008 rows;
   behavior identical, representation changes.
+
+## Instance, vitals & persistence set (RFC-013/014/015/016)
+
+> Companion to the second detailed batch (RFC-013, RFC-014, RFC-015, RFC-016), all four
+> **Accepted (revised after review)** as of 2026-07-24. Unlike RFC-021/022, this set is
+> mostly green-field: the gaps below are genuinely unbuilt, not already-shipped behavior
+> being written down after the fact — cited as "proposed by [RFC]" throughout.
+
+### Gap table
+
+| Concept | Engine today | Gap | Owner |
+|---|---|---|---|
+| Player vitals/regen | Three `int16_t` pools `hp_`/`mana_`/`stamina_` (`player_actor.hpp:462-464`), capped at `kPlayerMaxHp=100`/`kPlayerMaxMana=60`/`kPlayerMaxStamina=100` (`tiles.hpp:1086-1088`); unconditional stamina+2/tick, mana+1/tick, HP+1/3000ms gated on `world_ms_ - last_hurt_ms_ > kCombatCooldownMs=5000ms` (`tiles.hpp:1092-1098`, `player_actor.hpp:88-100`). Creatures (`tiles.hpp:361-401`) carry `hp`/`max_hp` with no per-tick regen field anywhere in `chunk_actor.hpp`, save one named exception: `boss_reset()` (`chunk_actor.hpp:1242-1257`) fully heals a leashed dojo boss after `kBossLeashTicks=50` ticks with no target present. | No RFC had codified any of the above as a binding contract before now, and no food/consumable healing exists — `GrantVitals` (`player_actor.hpp:178-183`) is shipped plumbing with no caller for it yet. | RFC-013 |
+| Death/respawn | `handle(HurtPlayer)` (`player_actor.hpp:166-176`) sets `dead_ticks_=kRespawnTicks=30` (`tiles.hpp:1114`) uniformly for every map; `respawn()` (`player_actor.hpp:440-446`) resets position to `respawn_tx_`/`respawn_ty_` and refills all three vitals pools, touching inventory not at all, regardless of `map`. | GAME.md:136's dungeon/mine death row ("bị đẩy ra ngoài, mất đồ mang theo") has no code behind it — the instanced-band ejection fork (`pending_eject_`, `SetInstanceReturn`, the merged `respawn()` listing that clears `items_[]`) is entirely new, not a rewrite of shipped logic. | RFC-013 |
+| Instance allocation | `kMapCount=2` (`tiles.hpp:39`); no `InstanceManager` class anywhere in `src/`; `World::build()` still constructs every chunk actor up front (`ARCHITECTURE.md:300-301`'s own admission). RFC-022 fixes the `MapId` partition, `Portal`, `MapSession`, and a leader-only `resolve()` that stops deliberately before `allocate_new()`'s internals (RFC-022 §2.4). | `InstanceManager` (a new `Require<Trusted>` actor), the monotonic `MapId` counter, `declare_lazy<ChunkActor>` activation, `MapDirector` `FanOutAdd`/`FanOutRemove` messaging, and the two-timer teardown (`kInstanceIdleGraceMs`=5min / `kInstanceChunkIdleTimeoutMs`=30s) are all proposed, none shipped. | RFC-014 |
+| Chunk-actor sparse addressing | `chunk_index()` (`tiles.hpp:726-728`) is a dense `c.map*kChunksPerMap+c.cy*kMapChunks+c.cx` formula sized for `kMapCount=2`. Three `kChunkCount`-sized consumers exist: `SnapshotBus::publish`/`view` (`snapshot.hpp:129,135`), `effect_tick` (`client_main.cpp:490`), and `World::build_bosses()`/`World::chunks_` (`world.hpp`) — the third caught only by this run's own audit, not RFC-022's original flag. | The two-tier scheme (`persistent_index()` bounded to a fixed `kPersistentBandCount=16`, plus a per-open-session `InstanceChunkBlock` sized to that map's own `chunk_edge`) is proposed by RFC-014 §4, not built. | RFC-014 |
+| Client wire protocol | `protocol.hpp` defines only in-process actor messages (`Tick`, `CreatureEnter`, `MoveIntent`, `HurtPlayer`, `Teleport`, `PlanAttack`/`AttackPlan`, `UseAbility`/`AbilityPlan`, `GetPlayer`, etc.) — no client-facing wire/network layer exists in `src/` at all. `PlayerBeacon` (`protocol.hpp:109-116`, `kBeaconPeriod=3`, `kBeaconLease=12`, `protocol.hpp:118-119`), upserted by chunks at `chunk_actor.hpp:154-155`, is the only existing interest-set-shaped mechanism. | `PublishedCreature`/`PublishedProjectile`/`PublishedEffect`/`PublishedPlayer{Remote,Self}` packed wire structs, `ChunkDelta` id-keyed delta encoding, the `ClientInterestSet` (reusing `fan_beacons()`'s existing 5×5 window), and a per-view byte budget are all proposed by RFC-015, none shipped. | RFC-015 |
+| Save/persistence | Zero matches for "sqlite" (case-insensitive) anywhere in `src/` or `tools/`; the only persisted state is `account.hpp`'s `AccountStore` (`accounts.dat`, fixed relative path, no world concept). RFC-007's checkpoint format (§6) has no filesystem path or retention policy. | A `SqliteStore`-backed `progression.db` schema, a `WorldPersistenceActor` (`Require<Trusted>`, event-sourced overlay log wrapping the five mutating messages), a `saves/<world_name>/` multi-world layout with explicit create/load/delete, and RL-checkpoint storage/retention are all proposed by RFC-016, none shipped. | RFC-016 |
+
+### Build order
+
+```
+RFC-022 (accepted) ──▶ RFC-014 ──▶ ┬─ RFC-013
+                                    ├─ RFC-015
+                                    └─ RFC-016
+```
+
+- **RFC-022 is the fixed foundation, already accepted before this batch.** It commits the
+  `MapId` partition, `MapDescriptor`, `Portal`/`PortalKind`/`PortalBinding`, `SessionScope`,
+  and `MapSession` shapes, and its own §2.4 stops explicitly at `allocate_new()`'s internals
+  — naming that gap as RFC-014's to fill, not something either RFC leaves ambiguous.
+- **RFC-014 must land before the other three because each of them names a concrete
+  RFC-014 output as a dependency, in its own text, not just as a topic overlap:**
+  - RFC-013 §6.2 keys its persistent-vs-instanced death fork directly on
+    `MapDescriptor.category`/`kPersistentBandCount` and targets ejection at
+    `MapSession.return_*` — both RFC-014 outputs (RFC-013 §Interactions: "Supplies
+    `MapDescriptor.category`/`kPersistentBandCount`... `MapSession.return_*`... the
+    `present`/`members` bookkeeping this RFC's ejection plugs into").
+  - RFC-015 §3.4 "adopts RFC-014 §4 verbatim" for every wire-side chunk-keyed structure it
+    introduces, including the `effect_tick` migration RFC-014 named by number — it does not
+    re-derive a competing sparse-addressing scheme.
+  - RFC-016 §7 ("Resolving RFC-014's flagged breadcrumb requirement") and §6.2's citation of
+    RFC-014 §3.6's `TEARING_DOWN` state both build directly against RFC-014 decisions RFC-014
+    §6.1 itself flagged as unresolved dependencies for RFC-016 to close.
+- **RFC-013, RFC-015, and RFC-016 run in parallel after RFC-014** because none of the three
+  names a hard dependency on either of the other two in its own Interactions table — RFC-013
+  calls RFC-015 "no new replication format is required," RFC-015 calls RFC-016 "orthogonal,"
+  and RFC-016 calls RFC-013 "concurrent... states one explicit default ruling RFC-013 is free
+  to override, not required to." They cite each other's field lists and rulings for
+  consistency, but none blocks on the others being finished first.
+
+### Adjacency to the still-proposed set (RFC-011/012/017/018)
+
+Of the four still-proposed RFCs, only RFC-011 and RFC-018 are named anywhere in this batch's
+Interactions sections — RFC-012 and RFC-017 are not cited by RFC-013/014/015/016 at all.
+RFC-015 names itself as a hard upstream dependency of RFC-011 ("Depended on by: RFC-011
+(proposed, Combat HUD) — needs a defined client-side data source," header; its Non-goals
+reiterate that consuming `PublishedPlayerSelf`/`PublishedCreature` for the HUD is "RFC-011's
+concern," not this RFC's), and RFC-016 §4.1 reserves (but leaves `NULL`, unpopulated) an
+`equipped_ability_0`/`equipped_ability_1` column against a future RFC-011 manual-loadout
+picker, purely so that landing RFC-011 later is "a code change to WRITE this column, never a
+schema migration to ADD it." RFC-013 and RFC-014 both flag RFC-018 (proposed, loot/rewards) as
+orthogonal rather than dependent — RFC-013 §Interactions: "RFC-018 governs what a creature
+*drops*; this RFC governs what a player *loses*. Neither reads the other's tables," and
+RFC-014's Non-goals excludes "loot/reward tables" from its own scope by name.

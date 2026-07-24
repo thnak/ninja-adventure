@@ -5,10 +5,9 @@
 > (Battlefield Control), §5 (Terrain Evolution), §12 (Destructible Counterplay)
 > Scope owner for: the `CombatEntity` chassis, the terrain scar layer, battlefield-control
 > primitives, destructible counterplay, and their contract with the tile grid and the flow field.
-> Supersedes: **`RFC-001-combat-entity-and-materials.md`** (a pre-series draft from the old
-> IMPLEMENTATION_MAP numbering; its `ticks_left`-decrementing CombatEntity violates load-bearing
-> rule 3 below and must never be implemented) and the "RFC-004 (surface tags)" dependency cited by
-> the pre-series `RFC-010-rl-observation-schema.md`. Both pre-series files should be archived.
+> Earlier exploratory drafts were removed; this set (RFC-001..010) is canonical. One such draft's
+> `ticks_left`-decrementing CombatEntity idea must never be implemented — it violates load-bearing
+> rule 3 below.
 > Reconciliation: §2b is the normative single-ownership boundary with RFC-010 (Battlefield
 > Simulation); RFC-010 requires the conforming amendment listed there.
 
@@ -190,8 +189,11 @@ struct EntityDef {
     std::uint8_t arm_ticks;      // telegraph duration before kActive
     std::uint16_t life_ticks;    // kActive duration; 0 = never becomes kActive (v1: kFallingRock
                                  // only — its whole life is the arming window; see §3)
-    // Aura (0 = none)
-    Status aura_status;          // applied via RFC-002 rules
+    // Aura (radius 0 = none). RFC-002 §8 AuraSpec's single-entry apply — build-up OR coating,
+    // never both (mirrors RFC-008 §7.5's `{channel|coating, gain}` aura block).
+    Channel aura_channel;        // RFC-002 Channel::kNone if this aura applies a coating instead
+    Coating aura_coating;        // RFC-002 Coating::kCount if this aura applies build-up instead
+    std::uint16_t aura_gain;     // build-up points [0,1000]/pulse, or coating ticks/pulse
     AuraAffects aura_affects;
     float aura_radius;           // tiles
     std::uint8_t aura_period;    // ticks between applications to the same field
@@ -215,8 +217,8 @@ ring scaling of entity HP and of damage dealt *to* entities.
 | `kIceWall` | GroundAndShot | no | 40 | 8 | 300 (30 s) | — | scar: none; spawn `kWaterPool` (r 1.2, 60 ticks) |
 | `kRockSpike` | Ground | no | 30 | 8 | 200 | — | scar `kCracked` |
 | `kSmokeCloud` | None | **yes** | — (indestructible) | 2 | 50 | target-drop (§6) | — |
-| `kWaterPool` | None | no | — | 0 | 100 | `Status::kWet`, Everyone, r 1.5, period 10 | — |
-| `kFirePatch` | None | no | — | 5 | 80 | `Status::kBurning`, EnemiesOfTeam, r 1.2, period 10 | scar `kScorched` |
+| `kWaterPool` | None | no | — | 0 | 100 | Wet coating (gain 80 ticks/pulse), Everyone, r 1.5, period 10 | — |
+| `kFirePatch` | None | no | — | 5 | 80 | Heat build-up (gain 60/pulse (tunable)), EnemiesOfTeam, r 1.2, period 10 | scar `kScorched` |
 | `kThunderTotem` | Ground | no | 60 | 10 | 400 | periodic_cast (RFC-001), period 50 | scar `kCracked` |
 | `kFallingRock` | None | no | 30 | 20 (= whole life) | 0 — never Active; Impact fires at arm elapse (§3) | hittable **by projectiles only** while arming | scar via §8.4 escalation on impact (`kCracked`, upgrading in-window); nothing if intercepted |
 
@@ -225,7 +227,20 @@ Rationale notes:
 - **`kSmokeBomb` and `kRainCall` migrate onto this chassis**: `ZoneKind` and `struct Zone` are
   deprecated by this RFC; `kSmokeCloud`/`kWaterPool` reproduce their exact current numbers (50 and
   100 ticks, radii 3.0 and 4.0 as spawned by those abilities — the table radii above are the
-  *default* spawn radii; a spawner may override radius within `[0.5, 4.0]` **(tunable)**).
+  *default* spawn radii; a spawner may override radius within `[0.5, 4.0]` **(tunable)**). The
+  ownership boundary with RFC-010, which currently still lists these circles and a `step_zones`
+  step as its own, is settled in §2b — RFC-010 must be amended, `Zone` is not "migrated", it dies.
+- **Telegraph floors (RFC-006 §1.3)**, per kind: `kIceWall`/`kRockSpike` arm 8 = the tier-1 floor;
+  `kThunderTotem` 10 and `kFallingRock` 20 clear their tiers. `kFirePatch` arm 5 sits exactly on
+  the tier-0 floor (its Burning aura is a damaging resolution, so T1 applies). `kSmokeCloud`
+  arm 2 and `kWaterPool` arm 0 are *compliant, not exceptions*: RFC-006 T1 scopes minimum
+  wind-ups to damaging/hard-CC resolutions, and smoke and water damage nothing and CC nothing —
+  their "arm" is visual pop-in only.
+- **Always-hot restriction (normative)**: `kThunderTotem` and `kFallingRock` may be authored only
+  into always-hot content — boss rooms and dojo interiors (RFC-005 enforces this at authoring
+  time), and the §5 spawn check refuses them elsewhere, *including from player casts*. A player
+  ability may therefore not plant a totem in an open-world chunk that could drop to 1 Hz or
+  sleep; §9 states the defensive LOD rule for the impossible case anyway.
 - **`kIceWall` dying into a water pool** is the counterplay dividend: breaking the wall is also
   laying the conductor for the Thunder combo. Emergent, not scripted — it is one table cell.
 - **`kFallingRock` is the umbrella's "shoot a meteor out of the air"** (§12). RFC-001 owns the
@@ -233,17 +248,51 @@ Rationale notes:
   whose whole life is its arming telegraph, hittable only by projectiles, and whose destruction
   before `arm` completes cancels the Impact callback.
 
+### 2b. Ownership reconciliation with RFC-010 — single owner per feature
+
+RFC-010 (Battlefield Simulation) §4.2/§4.4 currently defines overlapping primitives for the same
+phenomena. This section is the normative boundary; **RFC-010 must be amended to conform** (a
+required follow-up — this document cannot edit that one):
+
+| feature | single owner | consequence for RFC-010 |
+|---|---|---|
+| Hazard circles (smoke cloud, wet ground, fire patch) | **this RFC** — `kSmokeCloud` / `kWaterPool` / `kFirePatch` entities | RFC-010's "Hazard zone" designer-tool row and its retained `step_zones` tick step are superseded. `Zone` dies with this RFC (Open Question 1); it is never "migrated to end_ms semantics" |
+| Impact scars (cracked / rubble / crater / scorched) | **this RFC** — §8 `ScarKind`, `kMaxScars = 64`, the heal ladder | RFC-010 `Surface::kCracked / kRubbled / kScorched` rows are deleted; its Invariant P-3 (≤ 90 s dwell) is rescoped to RFC-010-owned surfaces and fields only. §8's heal ladder (≤ 10-min crater) is the normative scar bound — tone-safe, because healing is restoration and nothing counts down *against* the player (GAME.md §0) |
+| Spreading terrain fire (`kBurning` on flammable baseline), coefficient surfaces (`kMudded`, `kIced`), field states (earthquake) | **RFC-010** | unchanged there |
+
+Fire on the ground therefore has exactly one meaning per owner: `kFirePatch` (here) is a
+*stationary, ability-spawned hazard circle* — it never migrates, never spreads, and never writes a
+Surface; `kBurning` (RFC-010) is a *per-tile spreading surface* ignited by Fire impacts on
+flammable baseline. In v1 they never convert into each other (a `kFirePatch` does not ignite
+`kBurning`; that hand-off is future work and would be one trigger-table row in RFC-010).
+
+**Time base.** This RFC keeps absolute world *ticks* (`u32`); RFC-010 stores `end_ms`
+(`i64`). Both are the same absolute-deadline discipline (RFC-010 Invariant L-2), the conversion is
+fixed (`world_ms = tick × 100` at `kTicksPerSecond = 10`), and a `u32` tick counter wraps after
+~13.6 years — not the 49-day `u32`-ms wrap RFC-010 rightly rejected. One implementation converts
+at the boundary; neither doc's records change shape for the other.
+
 ### 3. Entity state machine
 
 ```
-            spawn accepted                    t >= state_tick + arm_ticks
+            spawn accepted              t >= state_tick + arm_ticks  &&  life_ticks > 0
   (checked, §5)  ──────────►  kArming  ──────────────────────────────────►  kActive
                                  │                                             │
-                                 │ hp<=0 && hittable_while_arming              │ hp<=0  OR  t >= expire_tick
+                                 ├─ (a) hp<=0 && hittable_while_arming         │ hp<=0  OR  t >= expire_tick
+                                 │      intercepted: Impact cancelled,         │
+                                 │      NO scar, NO death_spawn                │
+                                 ├─ (b) anti-trap whiff at arm elapse (§4):    │
+                                 │      footprint occupied — NO scar,          │
+                                 │      NO death_spawn                         │
+                                 ├─ (c) arm elapse && life_ticks == 0          │
+                                 │      (kFallingRock only): fire Impact       │
+                                 │      (RFC-001), stamp scar per §8.4 —       │
+                                 │      never passes through kActive           │
                                  ▼                                             ▼
                               kDying  ◄────────────────────────────────────────┘
                                  │   plays death_fx (effect_life_of(death_fx) ticks),
-                                 │   stamps death_scar, spawns death_spawn — all AT ENTRY,
+                                 │   stamps death_scar, spawns death_spawn — all AT ENTRY
+                                 │   (except exits (a)/(b) above, which stamp/spawn nothing),
                                  │   so a chunk that sleeps mid-kDying loses only the visual
                                  ▼
                               removed (record freed at t >= state_tick + effect_life_of(death_fx))
@@ -253,6 +302,11 @@ Rules:
 
 - **kArming**: no collision, no aura, no vision blocking. Visible as `arm_fx` on the footprint
   (RFC-006 telegraph standard). Not hittable unless `hittable_while_arming`.
+- **kArming with `life_ticks == 0`** (v1: `kFallingRock` only): the entity has no Active phase.
+  At arm elapse it fires its Impact payload (RFC-001 owns the payload), stamps its scar per §8.4,
+  and enters kDying in the same tick. If it was destroyed first — projectile interception, exit
+  (a) — the Impact is cancelled and nothing is stamped. This is the explicit terminal transition
+  for the "shoot a meteor out of the air" body.
 - **kActive**: collision + aura + vision per def; hittable if `destroyable`.
 - **kDying**: inert immediately on entry. All gameplay products (scar, death_spawn) are applied at
   the *entry tick*, never during the FX playback — LOD-safe by construction.
@@ -274,6 +328,13 @@ positions and circular radii, like zones today.
 they are recomputed from the entity list by any consumer that needs them (renderer, probe), the
 same "derived, not stored" discipline as chunk ownership.
 
+**Circle → bitmap rasterization rule** (for `vision_bits`, since vision blockers keep float
+positions and circular radii): a tile's bit is set iff its **centre** lies inside the circle —
+`dist(tile_centre, (x, y)) < radius`, computed in the same fixed-point the movement check uses. A
+radius-3.0 `kSmokeCloud` therefore sets ~28 tiles. One rule, deterministic, identical in every
+consumer that rebuilds the bitmap. (Auras need no rasterization: they test creature positions
+against the circle directly, as zones do today.)
+
 **Movement.** The per-tile walk check that R7 introduced (`MoveIntent` consulting `terrain_of`)
 gains one AND: a step onto a tile with `block_bits` set is refused, both axes independently (the
 existing slide-along-walls behaviour). This applies to players and creatures alike — walls are
@@ -284,8 +345,13 @@ or player stands on the footprint tile, **the entity dies instead of arming** (s
 no scar, no death_spawn, `death_fx` plays as the whiff). A wall can therefore never crush, trap, or
 imprison; standing your ground beats the wall. This is the telegraph-first principle applied to
 terrain: the 8-tick arming window *is* the dodge window, and holding the tile is a valid dodge.
-Corollary: no "wall the player into a corner" degenerate boss strategy can exist for RL to find
-(RFC-007) — the player can always stand in the closing gap.
+Corollary, scoped honestly: a *single closing wall* can never seal a player in — standing in the
+gap whiffs it. Full encirclement of a stationary player (blockers on all 8 neighbouring tiles,
+none on the player's own tile) **is** constructible, and RL self-play may find it (RFC-007) — but
+it is always escapable: every blocking kind is destroyable (a 30-HP spike is three sword blows),
+blocker lifetimes are ≤ 20 s for spikes, and the anti-trap rule keeps the player's own tile
+permanently safe. The guarantee is *escapability*, not impossibility (restated in RL
+Considerations).
 
 **Spawn placement validity** (checked at spawn request, §5): blocking entities require
 `is_walkable(terrain_of(...))` and no existing blocking entity on the tile. Water, trees, and
@@ -302,18 +368,26 @@ SpawnEntity { EntityKind kind; std::uint16_t tx, ty; Faction team; std::uint64_t
 ```
 
 - **Cap**: `kMaxEntities = 16` per chunk **(tunable)**; the published view carries the same 16.
-  With 24 payload bytes each that is ≤ 384 bytes per chunk view — same order as the zone/effect
-  arrays it partly replaces.
+  At 28 published bytes each (the packed projection, §10) that is ≤ 448 bytes per chunk view —
+  same order as the zone/effect arrays it partly replaces.
 - **Refusal, not eviction, is the default**: a spawn into a full chunk is refused (the caster sees
   the whiff FX; the ability was still spent — RFC-001 owns whether refusal refunds). Deterministic
-  and simple.
+  and simple. A batch (below) that only partly fits places its accepted tiles and refuses the
+  rest, tile by tile.
+- **Always-hot kinds are refused outside always-hot content**: `kThunderTotem` and `kFallingRock`
+  spawn only into boss-room/dojo chunks (§2 restriction; RFC-005 owns the authoring-side check,
+  this verb-side check is the backstop).
 - **One exception**: a spawn tagged as boss-room content (RFC-005 sets a flag on the verb) may
   evict the **oldest non-boss entity** in the chunk. A boss fight must not be censorable by
   pre-littering the room.
-- **Per-caster cap**: a player may have `kMaxEntitiesPerPlayer = 3` **(tunable)** blocking entities
-  alive per map; the oldest dies (normal kDying) when a fourth is placed. This is the anti-cheese
-  bound on walling a stronghold spawn shut — combined with entity lifetimes (≤ 40 s) permanent
-  spawn-camping via walls is not constructible.
+- **Per-caster cap — counted in cast batches, not tiles**: every blocking entity spawned by one
+  ability activation (e.g. `kIceWall` × 3 tiles) belongs to one **batch** occupying one budget
+  slot; a player may have `kMaxCastBatchesPerPlayer = 3` **(tunable)** blocking batches alive per
+  map. Placing a fourth batch kills the *oldest whole batch* (normal kDying per tile). Tiles of
+  the same batch never evict each other, so a multi-tile wall cannot self-destruct during its own
+  spawn, and one wall — whatever its authored length — costs one slot, not the whole budget. This
+  is the anti-cheese bound on walling a stronghold spawn shut — combined with entity lifetimes
+  (≤ 40 s) permanent spawn-camping via walls is not constructible.
 
 ### 6. Vision blockers and targeting
 
@@ -339,7 +413,9 @@ line-of-sight primitive:
 Entities join the two existing hit loops; no third loop is added:
 
 - **Melee/strike arcs**: the arc resolution that today iterates creatures also iterates
-  `destroyable` Active entities (plus Arming interceptables) in reach. Friendly-fire on entities is
+  `destroyable` **Active** entities in reach — never Arming ones. The one Arming-hittable kind,
+  `kFallingRock`, is interceptable **by projectiles only** (§2): a falling body is out of sword
+  reach by definition, so melee has no carve-in here. Friendly-fire on entities is
   **always on** regardless of team — walls do not dodge, and you must be able to break your own
   wall to reopen your lane. (Damage crediting to `owner` feeds RFC-009's assist rules.)
 - **Projectiles**: each flight step first tests creatures (current behaviour), then tests the
@@ -361,7 +437,8 @@ build-up — entities have no `Status` slot. One multiplier table **(all tunable
 
 The full material system (Flesh/Stone/Spirit/…) is RFC-003's; this table is the v1 stand-in and
 RFC-003 §materials supersedes it cell-for-cell when it lands. RFC-009 owns how entity damage
-interacts with resistance curves.
+interacts with resistance curves. Column names are the canonical four elements; in code, Rock =
+`Element::kEarth` and Thunder = `Element::kShock` (`tiles.hpp`) — one mapping, stated once.
 
 **Monsters versus blockers.** A monster whose flow-field `descend()` step or beacon-chase step is
 refused by `block_bits` for `kBlockedRepathTicks = 5` consecutive ticks **(tunable)** switches to
@@ -371,6 +448,9 @@ re-rolls its wander. This single rule is what makes an ice wall a *purchase of t
 wall's HP* rather than an exploit — and it needs no pathfinding change at all.
 
 ### 8. The terrain scar layer
+
+This RFC is the **sole owner** of impact scars (§2b); RFC-010's `Surface::kCracked / kRubbled /
+kScorched` rows and its 90 s dwell cap do not apply to this layer.
 
 **A scar is a per-tile modifier with an absolute heal tick.** Chunk state:
 
@@ -421,7 +501,10 @@ Earth-FX final frames + darkening tint, scorched a red-brown tint — asset-free
 
 **Persistence**: scars and entities are both **"vị trí quái" class data** (ARCHITECTURE.md §3:
 in-memory, not saved). A world reload heals every scar and despawns every entity. This is
-tone-correct (the world never accrues damage while you are away) and makes P5 free.
+tone-correct (the world never accrues damage while you are away) and makes P5 free. The same rule
+covers node death: a chunk re-placed on another node (ARCHITECTURE.md §2) restarts from seed with
+no scars and no entities — exactly like creature re-seeding; combat state is never part of the
+hand-off.
 
 ### 9. Simulation LOD and sleep contract
 
@@ -432,7 +515,7 @@ above:
 |---|---|---|---|
 | state transitions | exact | up to 0.9 s late — acceptable: arming windows only ever *lengthen* (never surprise-shorten) | fast-forwarded by tick math: `state`, expiry, and scar decay are all functions of `t` |
 | auras | applied when `t >= next_aura_tick`, then `next_aura_tick = t + period` | same test, so at most 1 application per 1 Hz tick — auras thin out, never burst | `next_aura_tick = max(next_aura_tick, t)` — **no retroactive stacking, ever** |
-| kFallingRock / totem casts | exact | a boss room always has a player in it, hence is always at 10 Hz — RFC-005 must only author interceptables and totems into player-adjacent content (stated there as a rule) | n/a |
+| kFallingRock / totem casts | exact | unreachable by construction: §2's always-hot restriction plus the §5 spawn-check backstop keep these kinds out of chunks that can degrade. Defensive rule if one ever exists at 1 Hz anyway: casts thin exactly like auras — cast when `t >= next_cast_tick`, then `next_cast_tick = t + cast_period` | `next_cast_tick = max(next_cast_tick, t)` — no retroactive casts, same as auras |
 | removal | exact | ≤ 0.9 s late | computed at wake |
 
 The invariant to test: **for any (entity, t), the gameplay-visible state is a function of the
@@ -441,8 +524,29 @@ reason every timestamp in §1 is absolute.
 
 ### 10. Replication and determinism
 
-- Entities and scars are published in the `ChunkView` as fixed arrays (16 entities × 24 published
-  bytes; 64 scars × 8 bytes), copied not referenced — the established snapshot discipline.
+- Entities and scars are published in the `ChunkView` as fixed arrays of **packed published
+  projections**, copied not referenced — the established snapshot discipline. The in-memory
+  record (§1, ~48 bytes with alignment) is *not* the wire shape; the view carries only what a
+  consumer needs:
+
+  ```cpp
+  struct PublishedEntity {        // 28 bytes, packed
+      std::uint32_t id;           // FX continuity across snapshots
+      float x, y;
+      std::uint8_t kind, state, team, radius_q;
+      std::int16_t hp;            // sign carries indestructible
+      std::uint16_t _pad = 0;
+      std::uint32_t state_tick;   // renderer derives arm progress + Active FX loop phase
+      std::uint32_t expire_tick;  // ttl for UI; RFC-007 lifetime fraction
+  };  // owner, next_aura_tick, next_cast_tick are sim-internal and never published
+
+  struct PublishedScar {          // 8 bytes, packed
+      std::uint8_t tx, ty, kind, _pad = 0;
+      std::uint32_t heal_tick;    // made_tick is sim-internal escalation bookkeeping
+  };
+  ```
+
+  16 entities × 28 B = 448 B and 64 scars × 8 B = 512 B per chunk view (caps tunable, §5/§8).
 - Spawn/damage/death all happen inside the owning chunk's tick; cross-chunk effects (an arc
   spilling over a seam) inherit the existing seam behaviour and its P3 fix path (§6).
 - Entities **do not migrate**: they are stationary (even `kFallingRock` — it falls onto a fixed
@@ -463,21 +567,21 @@ reason every timestamp in §1 is absolute.
 | **RFC-003 Physics & Material Interaction** | Owns materials of entities (superseding §7's stand-in table), conduction (WaterPool + Thunder), friction/grip/stability read from scars, and impulse vs blocking entities. |
 | **RFC-005 Boss Ability Authoring** | Authors boss kits *in terms of* archetype ids; owns the boss-room eviction flag, and the rule that interceptables/totems appear only in always-hot content (§9). |
 | **RFC-006 Visual FX & Telegraph Standards** | Owns `arm_fx / active_fx / death_fx` mapping, tinting, and the **looping-FX channel** entities need (see Asset & Engine Constraints). Arming telegraphs must meet RFC-006's minimum-read-time standard. |
-| **RFC-007 RL Observation & Action Space** | Owns the normative obs encoding; §RL below is input to it. Requires an "attack blocking entity" affordance in monster/boss action spaces. |
+| **RFC-007 RL Observation & Action Space** | Owns the normative obs encoding (Block E: 3 nearest slots, class one-hot). This RFC supplies the fields it reads: `EntityDef.observable` and `EntityDef.obs_class` — Barrier/HazardZone/Projectile/Caster (§1) — with `kFallingRock` as the only Projectile-class kind (sibling `Projectile` records are not CombatEntities). Requires an "attack blocking entity" affordance in monster/boss action spaces. |
 | **RFC-008 Data-driven Skill Definition** | Owns the eventual serialized form of `EntityDef` and archetype references from skill JSON/YAML. v1 ships the constexpr table; the field set here is the schema. |
 | **RFC-009 Damage, Resistance & Build-up** | Owns damage numbers into and out of entities, the scar-worthy impact threshold, entity-HP tier scaling, and kill credit from `owner`. |
-| **RFC-010 Battlefield Simulation** | Consumes entities + scars as the substrate for field-wide states (earthquake spawning scar waves, etc.). Field-wide states are out of scope here. |
+| **RFC-010 Battlefield Simulation** | §2b is the single-ownership boundary: hazard circles and impact scars are this RFC's; spreading fire (`kBurning`), `kMudded`/`kIced` surfaces, and field states are RFC-010's. RFC-010 must be amended to drop its Hazard-zone row, `step_zones`, and `Surface::kCracked/kRubbled/kScorched`, and to rescope Invariant P-3 (§2b). Field-wide states remain out of scope here. |
 
 ---
 
 ## RL Considerations
 
-- **Observation (proposal to RFC-007).** In a 10×7 boss room, entities fit either encoding: (a)
-  three 70-bit planes (blocking / hostile-hazard / friendly-hazard) or (b) a top-K list, K = 4
-  **(tunable)**, of `(dx, dy, kind, hp_frac, ttl_frac)` — dx/dy room-local ints, fractions
-  fixed-point 0..1000, matching the `BossObs` quantisation style already in `boss.hpp`. Scars can
-  be a single "rough-ground fraction under me / under target" pair rather than a plane; they are
-  second-order for policy quality.
+- **Observation (adopted by RFC-007).** RFC-007 shipped Block E: the **3 nearest** observable
+  entities, each encoded as presence + dx/dy + class one-hot + element one-hot + lifetime
+  fraction (RFC-007 §2, indices 68–103). This RFC supplies the source data — `observable` and
+  `obs_class` (§1); no plane encoding or top-K = 4 variant exists. Scars are not individually
+  observed: they surface through RFC-007 Block G's ground classes (rubble/crater → Slow,
+  cracked → Unstable); they are second-order for policy quality.
 - **Action space.** The boss needs at most: its existing actions + `kSpawnPattern[i]` entries
   (RFC-005 authors the patterns) + `kBreakBlocker` (attack the nearest hostile blocking entity —
   reuses the §7 monster rule). Remember `DqnAgent`'s hard-coded `kActionCount = 15`
@@ -487,10 +591,13 @@ reason every timestamp in §1 is absolute.
   observation channels still mean what Gen-0's did. Archetype *tuning* changes (HP, lifetimes) are
   environment drift the league-training setup already tolerates; archetype *semantic* changes
   (blocking → non-blocking) require a new kind value instead.
-- **Degeneracy guards already in the design**: the anti-trap rule (§4) removes wall-imprisonment
-  strategies; per-caster caps and refusal-not-eviction (§5) bound entity spam so reward hacking
-  via clutter is capped at 16 records; auras thin under LOD rather than burst (§9) so training in
-  always-hot dojo rooms matches live behaviour.
+- **Degeneracy guards already in the design**: the anti-trap rule (§4) removes single-wall
+  imprisonment; full encirclement is *not* prevented and self-play may find it, but it is bounded
+  to a ≤ 20 s, breakable inconvenience (every blocker destroyable, the player's own tile always
+  safe) — escapability is the guarantee, not impossibility. Per-caster batch caps and
+  refusal-not-eviction (§5) bound entity spam so reward hacking via clutter is capped at 16
+  records; auras thin under LOD rather than burst (§9) so training in always-hot dojo rooms
+  matches live behaviour.
 - **Dojos**: dojo self-play rooms are ordinary chunks; entities work there unmodified. Training
   episodes should randomise initial scar state of the room floor **(tunable curriculum)** so
   policies do not overfit to clean floors.
@@ -530,10 +637,12 @@ reason every timestamp in §1 is absolute.
 
 ## Open Questions
 
-1. **Zone deprecation mechanics.** Should `Zone` be deleted in the same change that lands
-   `CombatEntity` (touches `kSmokeBomb`/`kRainCall` resolution and the renderer), or coexist one
-   phase with entities feature-flagged? Proposed: same change — two parallel lingering-circle
-   systems is exactly the divergence this RFC exists to prevent — but that widens the first PR.
+1. **Zone deprecation mechanics.** Ownership is settled — `Zone` dies with this RFC (§2b), and
+   RFC-010's `step_zones` retention is superseded. The open question is only *landing mechanics*:
+   deleted in the same change that lands `CombatEntity` (touches `kSmokeBomb`/`kRainCall`
+   resolution and the renderer), or coexist one phase with entities feature-flagged? Proposed:
+   same change — two parallel lingering-circle systems is exactly the divergence this RFC exists
+   to prevent — but that widens the first PR.
 2. **Refused-spawn refunds.** When a full chunk refuses an entity spawn, is the ability cost
    refunded? This RFC leans "no refund, show the whiff" for simplicity; RFC-001 owns the ruling
    and it should be uniform across all refusal reasons (occupied tile at arm-time included).
@@ -570,3 +679,38 @@ reason every timestamp in §1 is absolute.
 - **Any change to `terrain_of`, the worldgen overlay, or the flow field.** Explicitly out of
   scope, and the invariants in §4/§8 exist to keep it that way.
 - **Ice bridges / walkability-granting entities** — future work; noted in Open Question 5.
+
+---
+
+## Review Record
+
+Adversarial review, 2026-07-23. Opus: **revise**. Sonnet: **revise**. All co-upheld findings applied:
+
+- §2b added — single owner per feature vs RFC-010 (hazard circles + scars here; spreading fire,
+  mud/ice surfaces, fields there); P-3 rescoped; time-base reconciled; fire duality resolved.
+- RFC-007 contract made real: `observable` + `obs_class` fields (§1), Projectile class = only
+  `kFallingRock`; §RL rewritten to RFC-007's adopted K=3 Block E encoding.
+- Header now notes only that earlier exploratory drafts were removed and this set is canonical
+  (the stray pre-series filenames never existed in the repo; tick-decrementing CombatEntity must
+  not be built).
+- §3: explicit `life_ticks == 0` terminal transition (kFallingRock fires Impact, never kActive);
+  anti-trap and interception arrows added; §1 comment fixed.
+- §5: per-caster cap counted in cast batches with whole-batch eviction (no self-evicting walls);
+  always-hot spawn-check backstop for totem/kFallingRock; §9 defensive 1 Hz cast rule +
+  `next_cast_tick` field added.
+- §7: melee never hits Arming interceptables (projectiles only); Rock=kEarth/Thunder=kShock note.
+- §5/§10: byte budgets recomputed against new packed `PublishedEntity` (28 B) / `PublishedScar`
+  (8 B) projections. §4: anti-trap corollary downgraded to escapability (also in §RL guards);
+  circle→`vision_bits` rasterization rule defined. §2: `kFirePatch` arm 4→5 + RFC-006 tier-floor
+  justifications; kFallingRock scar row harmonized with §8.4. §8: node-death re-placement noted.
+
+Unresolved (out of single-file scope): RFC-010 conforming amendment to §2b — directed by this
+RFC's §2b, to be executed in its own change.
+
+Reconciliation: `EntityDef.aura_status` (the legacy whole-`Status` field) replaced with RFC-002
+§8's mapped `AuraSpec` shape — `aura_channel`/`aura_coating` + `aura_gain` as the single-entry
+apply, `aura_affects`/`aura_radius`/`aura_period` unchanged — and the `kWaterPool`/`kFirePatch`
+archetype rows re-expressed on it, per RECONCILIATION.md ruling 8. Dangling references to the two
+nonexistent pre-series filenames (`RFC-001-combat-entity-and-materials.md`,
+`RFC-010-rl-observation-schema.md`) removed from the header and Review Record per RECONCILIATION.md
+ruling 6.

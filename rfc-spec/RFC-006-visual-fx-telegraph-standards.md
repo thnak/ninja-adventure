@@ -1,6 +1,6 @@
 # RFC-006: Visual FX & Telegraph Standards
 
-- **Status:** Draft
+- **Status:** Accepted (revised after review)
 - **Date:** 2026-07-23
 - **Umbrella:** [RFC_Unified_Combat_System.md](RFC_Unified_Combat_System.md) §2 (Telegraph-first), §14 (Asset Reuse), §15 (Visual Filters), §16 (Battlefield States — visual side)
 - **Depends on:** RFC-001 (ability pipeline phases), RFC-002 (status framework), RFC-009 (damage numbers feeding danger tiers)
@@ -82,7 +82,7 @@ They declare:
 
 ```yaml
 telegraph: { shape: cone, reach: 3.5, arc_deg: 90, tier: heavy }   # tier -> min windup
-fx:        { impact: slash_heavy, recipe: rock_red }               # sheet + tint recipe
+fx:        { impact: fx.slash_heavy_rock_red }   # an RFC-008 fx.* document carrying this RFC's recipe fields (§4)
 ```
 
 The validator rejects a `heavy` ability whose wind-up is shorter than the tier's minimum
@@ -143,7 +143,7 @@ skill-icon accents alike. Values are RGB; alpha is per-use (see §1.4, §6).
   elements (color-vision accessibility). Motifs are procedural draw calls, not sprites.
 - Status tint colors (§6) are the *established* P2 values and stay; they are deliberately
   in the same families as their causing elements (Frozen↔Ice, Burning↔Fire,
-  Shocked↔Thunder, Muddy↔Rock) so the combo system (GAME.md §7) teaches its own mapping.
+  Shocked↔Thunder, Mired↔Rock) so the combo system (GAME.md §7) teaches its own mapping.
 - Future schools (Plant/Water/Light/Darkness/Wind/Death) exist as icons only and get
   palette rows **only** when they become real elements — out of scope for v1.
 
@@ -153,14 +153,15 @@ The single most load-bearing table in this RFC. A telegraph's **tier** is derive
 what the hit can do; the tier dictates the minimum wind-up. RFC-005 and RFC-008
 validators MUST reject abilities that violate it.
 
-Let `d` = expected damage as a fraction of the **reference player HP for the content's
-ring/realm** (reference values owned by RFC-009), and `cc` = hard-control duration in
-ticks (stun/root/freeze from RFC-002).
+Let `d = (base_damage × ring_damage_scale) / kPlayerMaxHp` — the ability's expected
+damage after RFC-009's ring scaling (baked into monster stats at spawn), over the flat
+global player-HP constant. No per-ring player-HP table exists or is needed. Let `cc` =
+hard-control duration in ticks (stun/root/freeze from RFC-002).
 
 | Tier | Qualifies when | Min wind-up | Required cues |
 |---|---|---|---|
 | 0 `light` | `d < 0.10` and `cc == 0` | **5 ticks** (0.5 s) (tunable) | source cue only (decal optional) |
-| 1 `moderate` | `0.10 ≤ d < 0.25` or `cc < 10` | **8 ticks** (0.8 s) (tunable) | source cue + ground decal |
+| 1 `moderate` | `0.10 ≤ d < 0.25` or `0 < cc < 10` | **8 ticks** (0.8 s) (tunable) | source cue + ground decal |
 | 2 `heavy` | `0.25 ≤ d < 0.50` or `10 ≤ cc < 20` | **12 ticks** (1.2 s) (tunable) | source cue + ground decal |
 | 3 `deadly` | `d ≥ 0.50` or `cc ≥ 20` | **16 ticks** (1.6 s) (tunable) | source cue + ground decal + imminent flash mandatory; boss pose swap where the sheet has one |
 
@@ -168,6 +169,25 @@ Tier is computed at authoring/validation time from the ability's data (RFC-008),
 runtime. Sanity check against shipped values: the Samurai's attack (`kBossAttackWindup
 = 10`, 20 damage on a ~100 HP player → `d = 0.2` → tier 1, min 8 ✓) and charge
 (`kBossChargeWindup = 14` ≥ 12 for tier 2 ✓) already conform.
+
+Tier resolution and floors (structural):
+
+- **Highest tier wins.** The `d`/`cc` clauses overlap by design (`d = 0.30, cc = 5`
+  matches tier 1's control clause and tier 2's damage clause); an ability's tier is the
+  **highest** tier any of its clauses qualifies for.
+- **This table is a floor among floors.** The effective minimum wind-up is
+  `max(tier minimum, RFC-001 V2, RFC-005 §R4)`. RFC-001 V2 layers `cast_ticks ≥ 4` on
+  every hostile ability and `≥ 8` on heavy/committed hostile payloads; RFC-005 §R4 layers
+  `max(kWindupFloor = 6, escape-distance formula)` on every boss ability. So tier 0's
+  5-tick minimum is reachable only by a plain hostile instant-hit jab (4 ≤ 5 ✓); a tier-0
+  *boss* ability really gets ≥ 6, and a tier-0 heavy/committed hostile payload gets ≥ 8.
+  These floors never conflict — the binding one is simply the largest.
+- **Where this is enforced.** RFC-005's validator implements the check (R7 #5: `windup ≥`
+  this table's minimum, declared tier cross-checked against the RFC-009-resolved damage
+  key; R7 #6 folds in §R4's floor). RFC-008's validator does **not** yet: V30's flat
+  `cast.ticks ≥ 3` is weaker than every row here and never computes `d`/`cc`. RFC-008
+  MUST add the equivalent check; until it does, only boss kits are machine-checked
+  against this table.
 
 Additional timing rules (structural):
 
@@ -214,6 +234,13 @@ Per-state render rules (all alphas 0–255; all values tunable):
 `fill_frac` is a pure function of `(total, left)` — two integers already replicated —
 so every client draws the identical countdown with no extra state or float drift.
 
+Short and decal-less wind-ups (structural): at `total ≤ 5` (= ARM 2 + IMMINENT 3), CHARGE
+has zero ticks and is skipped — ARM hands straight to IMMINENT. When a tier-0 ability
+omits the decal, the same state machine drives the §1.6 source-cue stack instead: ARM
+starts the shake, CHARGE ramps the pulse with `fill_frac`, IMMINENT flashes the pulse at
+6 Hz, and FIZZLE desaturates the stack to grey for its 2 ticks. One lifecycle, with or
+without a decal.
+
 #### 1.5 Truth-in-advertising (hitbox = decal)
 
 The resolution shape used by the simulation and the decal drawn by the renderer are
@@ -227,7 +254,9 @@ NOT resolve hits from a different (e.g. padded) shape than the one drawn.
 Because monster sheets have no attack frames, the source cue is standardized as an
 overlay stack at the monster's position (all existing behaviors, now normative):
 
-1. **Shake**: sprite jitters ±1.5 px world-space during wind-up (exists).
+1. **Shake**: sprite jitters ±1.5 px world-space during wind-up (exists). The amplitude
+   scales with the Options "reduce screen shake & motion" setting (R7) down to zero — a
+   motion-sensitive player loses the jitter, never the pulse or the decal.
 2. **Pulse**: additive overlay of the sprite silhouette in the telegraph's hue —
    physical red today, element hue when elemental attacks arrive — alpha ramping
    30→110 with `fill_frac` (exists as red; hue generalization is new).
@@ -250,7 +279,7 @@ to bystanders, and the replication path already exists and is cheap.
 ```cpp
 enum class TelegraphShape : std::uint8_t { kCircle, kRing, kLine, kCone, kTiles };
 
-struct Telegraph {                    // 28 bytes; replicated in the chunk view
+struct Telegraph {                    // 35 B packed / 40 B with float alignment; replicated in the chunk view
     std::uint32_t id;                 // stable within the chunk for interpolation
     TelegraphShape shape;
     Element element;                  // kNone = physical red
@@ -269,11 +298,20 @@ struct Telegraph {                    // 28 bytes; replicated in the chunk view
 - `kTiles` carries its tile list in a parallel fixed array (8 × packed 8-bit local
   offsets) — chunk-local, so a byte per axis suffices.
 - **Cap: 8 live telegraphs per chunk** (tunable). The cap is a design budget, not just a
-  memory one (§8 R4). On overflow the *newest* commit is refused by the sim (the ability
-  fails to cast) — never silently drawn-but-not-resolved or resolved-but-not-drawn,
-  which would break §1.5.
-- Wire cost at the cap: 8 × 28 B ≈ 224 B/chunk/tick in the worst case, comparable to the
-  existing effect list, and only in chunks with active combat — acceptable for the
+  memory one (§8 R4). Overflow resolves by tier, never by arrival order: if the newest
+  commit's tier is strictly higher than the lowest-tier live telegraph's, the sim cancels
+  that lowest-tier telegraph (oldest among ties) — a true interrupt: FIZZLE visual, no
+  impact, cooldown refunded per RFC-005 R6 — and admits the new one; otherwise the newest
+  commit is refused (the ability resolves as a Hold, cooldown not spent). A boss's deadly
+  slam is never silently eaten by pre-existing minor hazard telegraphs, and a refused
+  commit is a well-defined no-op in the RL action log, not noise. Never silently
+  drawn-but-not-resolved or resolved-but-not-drawn, which would break §1.5.
+  Authoring-side, RFC-005's validator must count the kit's worst case (abilities + ≤ 4
+  adds + spawned RFC-004 entity arming telegraphs, `kMaxEntities = 16`/chunk) and reject
+  kits that can legitimately exceed 8 in their own room.
+- Wire cost at the cap: 8 × 40 B = 320 B, plus 16 B of `kTiles` tile arrays when every
+  record carries one — ≈ 336 B/chunk/tick absolute worst case, comparable to the existing
+  effect list, and only in chunks with active combat — acceptable for the
   leader-replicated model.
 
 ### 3. FX layering model
@@ -302,15 +340,22 @@ Structural rules:
 
 ### 4. Tint/filter reuse — FX recipes
 
-A **recipe** turns one packed sheet into a family of skills (umbrella §14). Recipes are
-data (hosted in RFC-008 skill definitions); this RFC defines their fields and legality.
+A **recipe** turns one packed sheet into a family of skills (umbrella §14). A recipe is
+not a separate document kind and is never referenced by a `recipe:` key: its fields live
+**on the `fx.*` document** (RFC-008 §7.1), and skills reference plain fx ids
+(`"fx": "fx.rock_red"`) exactly as RFC-008 already does — one authoring pipeline, not
+two. RFC-008 §7.1 today carries only the flat multiplicative `tint [r,g,b,a]`; it MUST
+grow the fields below (glow pass, scale, frame window, play mode) — RFC-006 is the
+schema authority for this block (see Interactions), and a variant stays what RFC-008
+promises: a new ~8-line fx document, zero new art.
 
 ```cpp
-struct FxRecipe {                    // referenced by name from skill JSON
+struct FxRecipe {                    // the recipe fields of an fx.* document (RFC-008 §7.1)
     EffectKind base;                 // which packed strip to play
     std::uint8_t tint_r, tint_g, tint_b;   // multiplicative pass (255,255,255 = none)
     std::uint8_t glow_alpha;         // additive silhouette pass in the element hue; 0 = off, max 140
-    Element glow_element;            // picks the additive hue from §1.2
+    Element glow_element;            // additive hue from §1.2; kInherit = resolved at spawn
+                                     //   from the spawning Effect's `element` field (FX-4)
     std::uint8_t scale_eighths;      // 8 = 1.0x; range 4..24 (0.5x..3x)
     EffectKind trail;                // second strip played behind a moving user; kCount = none
     FxPlayMode mode;                 // §9, FX-3
@@ -321,7 +366,8 @@ Two-pass rule (structural): the multiplicative tint pass can only darken/shift t
 sheet; brightening variants MUST use the additive glow pass. One pass alone cannot
 express "red-hot rock".
 
-Canonical v1 recipes (names structural, numbers tunable):
+Canonical v1 recipes — each row is an `fx.*` id (`fx.rock_red`, …); names structural,
+numbers tunable:
 
 | Recipe | base | tint | glow | Reads as |
 |---|---|---|---|---|
@@ -331,7 +377,7 @@ Canonical v1 recipes (names structural, numbers tunable):
 | `ice_flash` | kIce | none | Ice 60 | frost burst |
 | `fire_burst` | kFire | none | Fire 80 | flame burst |
 | `shock_arc` | kShock | none | Thunder 90 | thunder strike |
-| `blast_combo` | kBlast | none | element of the *detonating* status | combo detonation, hue tells which combo |
+| `blast_combo` | kBlast | none | `kInherit` — resolved at detonation from `Effect.element` (FX-4), i.e. the detonating status's element | combo detonation, hue tells which combo |
 
 (`Purple rock = cursed rock` from umbrella §14 is future-school work and deliberately
 absent from v1.)
@@ -353,21 +399,39 @@ contiguous sub-range; reordering is out (it multiplies atlas entries for margina
 
 ### 6. Status visual filters
 
-One status per creature (P2 decision), so filters never stack. The multiplicative wash
-colors are the shipped P2 values (canonical); the motif overlays are new and drawn on
-L3. All statuses use *both* channels (accessibility, same argument as §1.2).
+RFC-002's shipped model, rendered faithfully: at most one active **ladder primary**
+(Cold/Heat/Shock/Earth/Stagger, stage 1–3) plus the binary **coating** (Wet) that
+coexists freely with it — so one primary wash *and* the coating overlay can be live at
+once, and the renderer must show the *stage*, not just the channel. The per-channel hues
+are the shipped P2 values where P2 had them (canonical); Earth reuses P2's mud hue (the
+old Muddy coating folds into the Earth ladder — RFC-002 §11). There is no Poison channel
+in v1 (RFC-002 Open Question 2 / RECONCILIATION.md ruling 1).
+**Stage scales the wash** — the "stage-scaled intensity" RFC-002 assigns here: wash
+alpha ≈ 40 / 70 / 100 (tunable) at stage 1/2/3, motif density growing with stage. Motifs
+are new, drawn on L3; every channel uses *both* wash and motif (accessibility, same
+argument as §1.2).
 
-| Status | Wash (multiplicative) | Motif overlay (additive, L3) | Extra rule |
+| Channel (hue) | Stage 1 | Stage 2 | Stage 3 |
 |---|---|---|---|
-| Frozen | `140,210,255` | 3 static frost notches on the sprite rim | **animation freeze-frame**: the walk cycle halts on its current frame — free, and the strongest read of the five |
-| Burning | `255,150,90` | Fire strip frames 0–3 at 0.5× scale, looping at the sprite's feet | — |
-| Wet | `150,190,255` | 1-px drip line under the sprite every 8 ticks | — |
-| Muddy | `180,150,110` | dark band, alpha 90, over the lower third of the sprite | — |
-| Shocked | `255,245,130` | one jagged polyline across the sprite, redrawn every 3 ticks (same generator as the Thunder decal motif) | — |
+| Cold `140,210,255` | Chilled — light wash, 1 frost notch on the rim | Frostbound — deeper wash, 3 static rim notches | Frozen — full wash + **animation freeze-frame** (walk cycle halts on its current frame — free, and the strongest read in the game) |
+| Heat `255,150,90` | Singed — faint wash, 1 ember fleck | Burning — Fire strip frames 0–3 at 0.5× scale looping at the feet | Ablaze — same loop at 0.75× + a shimmer ring (its Heat aura is real, RFC-002) |
+| Shock `255,245,130` | Static — wash only | Shocked — one jagged polyline across the sprite, redrawn every 3 ticks (same generator as the Thunder decal motif) | Overloaded — two polylines + 1-tick white sprite flash every 5 ticks |
+| Earth `180,150,110` | Encumbered — faint mud wash, 1 clod fleck | Mired — deeper wash + dark band over the lower third (P2's Muddy look) | Root — full wash + short stone spikes pinning the feet |
+| Stagger (no wash) | Unsteady — subtle 1-px wobble, no wash | Staggered — 2-tick white flicker | Knockdown — desaturate 40% + 3 orbiting spark dots above the head |
+
+Coatings coexist with any primary (a creature can be Wet **and** Frostbound):
+
+| Coating | Wash (multiplicative) | Motif overlay (additive, L3) |
+|---|---|---|
+| Wet | `150,190,255` | 1-px drip line under the sprite every 8 ticks |
+
+When a coating and a primary coexist, the two multiplicative washes compose (both are
+mild by design) and the motifs stack on L3 within R3's motion budget — coating motifs are
+static or slow precisely so they never compete with the primary's read.
 
 Zones render on L1 as their element/status hue at fill alpha 60 (tunable), outline
 alpha 140, with the status motif scattered inside — a Wet zone visibly *is* the Wet
-status painted on the floor. No new art.
+coating painted on the floor. No new art.
 
 ### 7. Battlefield-state render filters (visual side of §16)
 
@@ -376,7 +440,7 @@ implementations converge:
 
 | State (from RFC-010) | Visual filter | Caps |
 |---|---|---|
-| Earthquake | camera shake ±2 px at 10 Hz max; L1 decals additionally tremble ±1 px at 8 Hz ("telegraphs tremble", umbrella §16) | shake respects the Options "reduce screen shake" toggle; gameplay accuracy effects are RFC-010's, not the renderer's |
+| Earthquake | camera shake ±2 px at 10 Hz max; L1 decals additionally tremble ±1 px at 8 Hz ("telegraphs tremble", umbrella §16) | shake respects the Options "reduce screen shake & motion" setting (R7); gameplay accuracy effects are RFC-010's, not the renderer's |
 | Fog / smoke | L5 grey wash, alpha ≤ 100 | telegraph outlines clamp to min alpha 200 *through* fog — a state may hide the world but never the promise (fairness rule F1, structural) |
 | Rain/storm (weather) | existing P1 particle layer; adds Wet-status motif to zones | — |
 
@@ -405,7 +469,10 @@ Numbered so reviews can cite them:
 - **R6 — Hue is never alone.** Element ⇒ hue + motif (§1.2); status ⇒ wash + motif
   (§6); danger ⇒ geometry + fill animation (luminance-based, colorblind-safe).
 - **R7 — Options.** "Telegraph opacity" slider (75–150% of the §1.4 alphas) and the
-  existing "reduce screen shake" toggle live in the shipped Options screen.
+  existing "reduce screen shake" toggle — widened to "reduce screen shake & motion",
+  governing camera shake (§7), decal tremble, and the §1.6 sprite jitter alike — live in
+  the shipped Options screen. Pulses, decals, and outlines are fairness reads and are
+  never removed by any setting (F1 floors still apply).
 - **R8 — Distance legibility.** The charge glyph (§1.6) and boss pose swap exist so a
   threat is classifiable at ≥ 8 tiles, where a 16-px sprite's silhouette detail is gone.
 
@@ -428,25 +495,36 @@ system build-out:
   implemented as long-lived `Effect`s, because effect age→frame mapping and telegraph
   fill math are different contracts.
 - **FX-3 — Play modes.** Add `FxPlayMode { kOneShot, kLoop, kHold }` consumed by the
-  renderer's age→frame map: `kOneShot` = today's behavior; `kLoop` = `frame = age %
-  frames` for channel/zone/status motifs; `kHold` = clamp to last frame (e.g. debris
-  settling via a recipe frame window, §4). Sim-side eviction still uses the record's
-  lifetime; `kLoop` records are evicted by their owner (zone expiry, status cure), not
-  by age.
-- **FX-4 — Effect record extension.** `Effect` grows `element` (for recipe hue),
-  `recipe` id, and `rot` (uint8, 256-step, for cones/projectiles). Budget stays small:
+  renderer's age→frame map: `kOneShot` = today's behavior; `kHold` = clamp to last frame
+  (e.g. debris settling via a recipe frame window, §4). `kLoop` is **not an `Effect`
+  record**: it is the derived channel RFC-004 asked for, adopted verbatim — the renderer
+  computes `frame = (t − state_tick) % frames` straight from the owner's already-published
+  record (entity `active_fx`, zone id, status primary+stage), so a 400-tick entity loop
+  costs no new sim state and no new message, occupies no slot in the FX-4 effect budget,
+  and can never be evicted mid-fight by impact churn. A loop exists exactly as long as
+  its owner record says so (zone expiry, status cure, entity death).
+- **FX-4 — Effect record extension.** `Effect` grows `element` (for recipe hue and
+  `kInherit` resolution, §4), `recipe` id (the `fx.*` document id, §4), and `rot` (uint8,
+  256-step, for cones/projectiles). Budget stays small:
   ≤ 16 bytes/record, cap 24 effects/chunk (tunable) with a drop policy of *oldest
   cosmetic first*; records flagged as telegraph-adjacent (IMPACT flashes, FIZZLE) are
   never dropped before cosmetics — dropping a promise's resolution is a §1.5 violation.
-- **FX-5 — LOD behavior.** Combat visibility is guaranteed by construction: the beacon
-  interest set keeps every chunk within 5×5 of a player at active LOD (10 Hz), so any
-  telegraph a player can see ticks at full rate. Requirements for the edges: (a) a chunk
-  demoted below active LOD MUST clear its effect list and fizzle its telegraphs (they
-  are sub-second transients; replaying them on wake is a lie about *when*); (b) monsters
-  whose beacons expired resolve pending wind-ups as whiffs at 1 Hz — cheap, and no
-  player can observe the difference; (c) on chunk wake, any telegraph with
-  `left > total` (corrupt/stale) is dropped without impact. This satisfies the
-  "tolerate being ticked at reduced rate or slept" constraint with zero new mechanisms.
+- **FX-5 — LOD behavior.** Combat visibility is guaranteed by construction: RFC-010's
+  Invariant L-1 keeps every chunk holding a player beacon at active LOD (10 Hz), boss
+  rooms are pinned active during a fight, and background chunks spawn no effects — so
+  every telegraph a player can see ticks at full rate, and no player can ever watch a
+  demoted wind-up. The *fate* of in-flight combat on demotion is owned by RFC-010 and
+  RFC-005, not here: a sleeping boss fight is **paused** (RFC-005 §R8) or leash-reset
+  (RFC-010's boss row), never cancelled by the visual layer. RFC-006's own obligations
+  are only: (a) cosmetic `Effect` records are dropped on demotion and never replayed on
+  wake — they are sub-second transients, and replaying them is a lie about *when*; (b) a
+  paused fight's `Telegraph` records freeze automatically (`left` decrements only when
+  the chunk steps) and resume honestly on wake — FIZZLE is **never** used for LOD
+  transitions, it is reserved for real interrupts (T4), and no cooldown-refund question
+  arises because nothing is cancelled; (c) on chunk wake, any telegraph with
+  `left > total` (corrupt/stale) is dropped without impact. This satisfies the "tolerate
+  being ticked at reduced rate or slept" constraint with zero new mechanisms and zero
+  overlap with RFC-010's ownership.
 - **FX-6 — Unpacked sheets are not blockers.** The `Magic/*` family (Shield/Aura/
   Boost/Spark) and the spinning projectile sheets are not yet packed. Nothing in §1–§3
   depends on them: ground decals are procedural geometry, source cues reuse the packed
@@ -462,24 +540,32 @@ system build-out:
   phases run; RFC-006 owns what they look like and their minimum durations (§1.3 feeds
   back as a constraint on RFC-001 phase lengths).
 - **RFC-002 (Status & Effects):** status identity, durations, and cure rules live
-  there; §6 maps each status id to exactly one wash+motif row. New statuses added by
-  RFC-002 MUST add a row here (structural).
+  there; §6 maps each ladder channel × stage and each coating to a wash+motif row and
+  owns the stage-scaled intensity RFC-002 assigns here. New channels or coatings added
+  by RFC-002 MUST add rows here (structural).
 - **RFC-003 (Physics & Materials):** knockback/impulse outcomes are RFC-003's; this RFC
   only notes that materials may modulate *impact FX choice* via recipes (e.g. stone
   impacts use `rock_plain` debris) — no physics semantics here.
 - **RFC-004 (Terrain & Combat Entity):** entity spawn/death FX and hazard-activation
   telegraphs (`kTiles`) use this grammar; crater/scorch decal *state* is RFC-004's,
-  their L0 render slot is §3's.
+  their L0 render slot is §3's. The looping visual its Active entities need is FX-3's
+  derived channel — computed from the published entity record, no new sim state
+  (RFC-004's own proposal, adopted verbatim).
 - **RFC-005 (Boss Ability Authoring):** every authored boss ability declares
   `{shape, tier}`; the authoring validator enforces §1.3 minimums, §2's cap, and R4's
   screen budget. Pose availability per boss sheet is RFC-005's data; §1.6 rule 4 says
   when a pose is mandatory (tier 3, where the sheet has one).
 - **RFC-007 (RL Observation):** see below.
 - **RFC-008 (Data-driven Skills):** hosts `telegraph:` and `fx:` blocks in skill JSON
-  using this RFC's vocabulary (shapes, tiers, recipe names). RFC-006 is the schema
-  authority for those two blocks; RFC-008 for everything else.
-- **RFC-009 (Damage & Build-up):** owns the reference-HP tables and expected-damage
-  computation that §1.3's `d` is evaluated against; tier thresholds live here.
+  using this RFC's vocabulary (shapes, tiers, fx ids). RFC-006 is the schema authority
+  for those two blocks; RFC-008 for everything else. Two required deltas on RFC-008:
+  §7.1 `fx.*` documents grow the §4 recipe fields (today: flat `tint` only), and its
+  validator gains the §1.3 tier check (V30's `cast.ticks ≥ 3` is weaker than every tier
+  minimum).
+- **RFC-009 (Damage & Build-up):** owns `ring_damage_scale` and the expected-damage
+  computation feeding §1.3's `d = (base_damage × ring_damage_scale) / kPlayerMaxHp`; no
+  per-ring player-HP table exists or is asked for. The tier thresholds themselves are
+  §1.3's.
 - **RFC-010 (Battlefield Simulation):** owns battlefield-state lifecycles and LOD/replication
   policy; §7 fixes their render filters, FX-5 states the visual layer's LOD obligations.
 
@@ -497,12 +583,19 @@ system build-out:
   §1.3 tier table is the natural hook for RFC-007 reward shaping (dodge-window rewards)
   and for RFC-005 difficulty ceilings: "harder" may never mean "shorter than tier
   minimum".
-- **Observation cost:** telegraphs add nothing to the observation beyond what RFC-007
-  already carries (`winding_up`, cooldowns, committed target offsets); the decal is
-  derived data. Policies never consume pixels.
+- **Observation cost:** telegraphs add nothing *new* to the observation: RFC-007 already
+  carries wind-up flags, slot cooldowns, and pipeline phase one-hots plus phase progress
+  (equivalently `total`/`left`); the decal is derived data, and policies never consume
+  pixels. Honesty note: RFC-007's target block carries **no telegraph geometry** — no
+  committed aim point, shape kind, arc, or width — so a sparring defender can learn
+  shape-exact dodges only for point/circle threats (via relative position at commit);
+  cone/line shape-membership (§1.5) is not computable from the v1 obs. If defender
+  training needs it, the geometry fields are an RFC-007 addition, not a telegraph-side
+  change.
 - **Whiff semantics** (T2/T5) make the dodge a stable learning signal in both
-  directions: the boss's policy learns that commitment has a cost, the defending agent
-  (sparring) learns that leaving the shape always works.
+  directions: the boss's policy learns that commitment has a cost, and the defending
+  agent (sparring) learns that escaping a committed threat always works — shape-exactly
+  for point/circle under the v1 obs; see the Observation-cost caveat for cone/line.
 
 ## Asset & Engine Constraints Honored
 
@@ -517,16 +610,17 @@ system build-out:
 | No bespoke combo art | `blast_combo` recipe hue-codes the detonating status (§4) over the existing Blast strip |
 | Magic/* FX and spin sheets unpacked | FX-6: explicitly non-blocking; procedural decals + rotated frames as fallback |
 | Chill guardrail (GAME.md §0) | T2 (nothing chases), no screen-wide alarms, R5/R7 caps and options, telegraphs exist only inside opted-into combat |
-| 1024² overworld with LOD / sleep | FX-5: clear-on-demote, whiff-at-1 Hz, drop-stale-on-wake |
-| Server-authoritative, cheap replication | Telegraphs are capped chunk-view records (≤ 224 B/chunk worst case, §2), same channel as effects |
+| 1024² overworld with LOD / sleep | FX-5: cosmetics dropped on demote, paused fights freeze and resume honestly (sim fate owned by RFC-005/010), stale telegraphs dropped on wake |
+| Server-authoritative, cheap replication | Telegraphs are capped chunk-view records (≤ ~336 B/chunk worst case, §2), same channel as effects |
 | RL: one policy per archetype, dojos visible in-world | Parity rule keeps dojo spectating honest (players watching training see real telegraphs); nothing per-individual anywhere |
 
 ## Open Questions
 
-1. **Tier reference HP.** §1.3 evaluates `d` against a per-ring/realm reference player
-   HP owned by RFC-009. If RFC-009 lands with gear-driven HP spreads > ~2×, tiering by
-   expected fraction may need a percentile definition (e.g. `d` against the 25th-
-   percentile HP for the content's ring) — needs RFC-009's numbers first.
+1. **Tier `d` under gear spreads.** §1.3 computes `d` against the flat global
+   `kPlayerMaxHp` (RFC-009 keeps ring scaling on monster stats; no player-side table
+   exists). If gear-driven player-HP spreads > ~2× ever land, tiering may need a
+   percentile definition (e.g. `d` against the 25th-percentile HP for the content's
+   ring).
 2. **`kTiles` payload size.** 8 tiles per record covers spike rows and cracking floors
    in a 10×7 room; large terrain events (RFC-004 multi-tile collapses) may need either
    multiple records or a rectangle variant. Decide when RFC-004's entity list is final.
@@ -562,3 +656,22 @@ system build-out:
   rendering; the Disabled-icon cooldown convention is noted, not specified.
 - **PvP readability.** PvP is off by default (GAME.md §11); telegraphs for
   player-vs-player are not considered.
+
+## Review Record
+
+Adversarial review, 2026-07-23 — Reviewer-Opus: **revise**; Reviewer-Sonnet: **revise**.
+
+Applied:
+- FX-5 rewritten to visual-layer obligations only: cosmetics dropped on demote, paused fights freeze/resume (RFC-005 §R8), sim fate owned by RFC-010; FIZZLE reserved for real interrupts; the whiff-at-1-Hz clause deleted.
+- §6 rebuilt on RFC-002's shipped model: five ladder channels × 3 stages with stage-scaled wash intensity, Poison/Stun rows added, coexisting Wet/Muddy coatings with a composition rule.
+- §4 recipes unified with RFC-008: recipe fields live on `fx.*` documents, skills reference plain fx ids; the required §7.1 field delta is stated; `kInherit` sentinel resolves `blast_combo`'s glow from `Effect.element` at detonation.
+- §1.3: `d = (base_damage × ring_damage_scale) / kPlayerMaxHp` (no per-ring player-HP table); "highest tier wins" rule; tier-1 control clause tightened to `0 < cc < 10`; RFC-001 V2 / RFC-005 §R4 floors reconciled via an explicit max-of-floors rule; enforcement stated honestly (RFC-005 R7 #5 implements it; RFC-008 must add a check — V30 is insufficient).
+- §2: struct size corrected to 35 B packed / 40 B aligned; wire cost ≈ 336 B including `kTiles` arrays; cap overflow now tier-prioritized (higher tier cancels lowest with cooldown refund, else a clean refused-Hold no-op for RL); RFC-005 validator must budget entity/add telegraphs against the 8-cap.
+- FX-3: `kLoop` is RFC-004's requested zero-sim-state derived channel (computed from the owner's published record), outside the FX-4 effect budget and unevictable.
+- §1.4: CHARGE skipped at `total ≤ 5`; decal-less tier-0 lifecycle defined on the §1.6 source-cue stack.
+- §1.6 / R7 / §7: sprite jitter and decal tremble folded under "reduce screen shake & motion", scalable to zero; fairness reads never removed.
+- RL Considerations: observation claim corrected — RFC-007 v1 carries no telegraph geometry, so shape-exact dodge learning is scoped to point/circle; cone/line geometry flagged as a possible RFC-007 addition.
+
+Unresolved: none. The reviewers' "clamp hostile tier-0 to 8" was applied against RFC-001's *current* two-tier V2 (4 baseline / 8 heavy-committed) rather than the stale flat-8 citation; RFC-005's validator already gained the §1.3 check the Sonnet-only finding said was missing, so only the RFC-008 half required a fix.
+
+Reconciliation: §6 wash table re-keyed to the canonical channel set — Frost→Cold, the Poison row replaced by the Earth ladder (Encumbered/Mired/Root, reusing P2's mud hue), Stun→Stagger (Unsteady/Staggered/Knockdown); the Muddy coating row removed (folds into Earth/Mired), leaving Wet the sole coating — per RECONCILIATION.md ruling 1.

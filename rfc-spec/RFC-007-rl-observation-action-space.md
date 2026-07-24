@@ -1,7 +1,10 @@
 # RFC-007: RL Observation & Action Space
 
-> Status: **Draft**
+> Status: **Accepted (revised after review)**
 > Umbrella: [RFC_Unified_Combat_System.md](RFC_Unified_Combat_System.md) §17
+> Earlier exploratory drafts of this F4 tensor contract were removed; this RFC is the sole owner
+> of the observation/action layout. "RFC-010" in this series refers exclusively to
+> RFC-010-battlefield-simulation.md.
 > Depends on: RFC-001 (ability pipeline), RFC-002 (statuses), RFC-004 (combat entities), RFC-005
 > (boss ability authoring), RFC-009 (damage fractions), RFC-010 (battlefield LOD)
 > Grounded in: `src/world/boss.hpp` (the existing obs→action seam), RLDrive `core/`
@@ -12,14 +15,15 @@
 ## Summary
 
 This RFC fixes the **tensor interface** between the combat simulation and every learned policy in
-the game: one observation vector layout (`kObsSize = 112` floats, version-stamped), one discrete
+the game: one observation vector layout (`kObsSize = 120` floats, version-stamped), one discrete
 action space (**exactly 15 actions**, matching the `kActionCount = 15` hardcode in RLDrive's
 `DqnAgent`), shared by **every** RL archetype — dojo bosses, dungeon monsters, and village guards
 alike. One policy per archetype (10–15 policies total), never per individual.
 
 The observation is **egocentric, identity-free, and stateless**: no boss ID, no room ID, no
-absolute coordinates, no frame history. Entities appear as *behavior classes and elements* (RFC-004
-tags), hazards as *ray closeness*, abilities as *slot cooldowns and pipeline phases* (RFC-001).
+absolute coordinates, no frame history. Entities appear as *behavior classes and elements*
+(RFC-004's `obs_class`/`observable` fields), hazards as *ray closeness*, abilities as *slot
+cooldowns and pipeline phases* (RFC-001).
 This is the concrete mechanism behind the umbrella's promise that *"RL learns patterns, not
 individual bosses"*: a policy trained against ice walls and burn zones has literally no channel
 through which to memorize a specific boss or room.
@@ -93,8 +97,8 @@ A designer authoring a new RL boss (RFC-005) does **not** design an observation 
    continues improving it against the persona suite and self-play.
 
 A designer never sees a float vector. But the *shape* of the obs is a design contract they can rely
-on: "the policy can see status build-up, hazard rays, cooldowns, and channel phases — and nothing
-else." If a boss mechanic is invisible in the obs, the policy is blind to it, and the designer
+on: "the policy can see the status ladder (primary, stage, coatings), hazard rays, cooldowns, and
+pipeline phases — and nothing else." If a boss mechanic is invisible in the obs, the policy is blind to it, and the designer
 knows that from this document rather than from a confused training run.
 
 ## Reference-level Design
@@ -117,14 +121,17 @@ triples effective training throughput on the measured ~790 steps/s CPU budget (A
 Actions are **durative**: an action chosen at decision tick `t` is executed by the chunk for the
 next `kDecisionPeriod` ticks (movement) or until its pipeline completes (casts).
 
-At reduced simulation LOD (RFC-010: 1 Hz background chunks), live inference degrades by the same
-rule — one decision per `kDecisionPeriod` *elapsed* ticks — and a slept chunk runs no inference at
-all. This works only because the observation is **stateless** (§2.8): it is rebuilt entirely from
-current chunk state, so a boss waking from sleep needs no warm-up history.
+LOD interaction (RFC-010): an **actively engaged** boss never runs at reduced cadence — engagement
+requires a player in the room, and a chunk with a player nearby runs at full rate by RFC-010's own
+ladder — so the 300 ms grain is the *only* decision grain a fighting player ever meets. The
+degradation rule — one decision per `kDecisionPeriod` *elapsed* ticks, and no inference at all in
+a slept chunk — applies to **unengaged** inference (idle patrol decisions) and to robustness
+across LOD transitions. This works only because the observation is **stateless** (§2.8): it is
+rebuilt entirely from current chunk state, so a boss waking from sleep needs no warm-up history.
 
 ### 2. The observation vector
 
-`kObsSize = 112` floats. `kObsVersion = 1`. Layout is fixed at these indices; two independent
+`kObsSize = 120` floats. `kObsVersion = 1`. Layout is fixed at these indices; two independent
 implementations must produce bit-identical vectors from the same chunk state (§2.7).
 
 Encoding conventions, used everywhere below:
@@ -134,61 +141,85 @@ Encoding conventions, used everywhere below:
   *absent/far = 0*, which keeps "all zeros" meaning "nothing there" (important for padded slots).
 - **One-hots** are all-zero when the category is "none".
 - Positions are **egocentric tile offsets** (`target − self`), clamped to ±`kObsRange = 8` tiles
-  (tunable) and divided by 8. Never absolute, never room coordinates.
+  (tunable) and divided by 8. Never absolute, never room coordinates. Known, accepted saturation:
+  the 10×7 room's maximum separation is 9 tiles, one beyond the clamp, so a corner-to-corner gap
+  reads the same as an 8-tile gap — accepted because no ability range or steering decision in the
+  kit catalog distinguishes distances beyond 8 tiles, and presence·freshness (idx 23) still marks
+  the target present.
 
-#### Block S — Self (indices 0–19)
+#### Block S — Self (indices 0–22)
+
+The status sub-block (idx 1–9) is RFC-002's authoritative model — one **primary ladder channel**
+(`Channel`: Cold/Heat/Shock/Earth/Stagger) at a stage 1..3, plus independently coexisting
+**coating** bits (Wet + one reserved slot — RFC-002 §1's `coating_ticks[2]`) — a documented pruning
+of RFC-002's proposed 18-float encoding: the 5 raw build-up meters and soft-resist flags are
+deferred to the reserved block (the designated v2 feature, with RFC-009). Wet-and-Frozen, Rooted,
+and Knockdown are all representable, and the stage feature preserves the ladder gradient
+RFC-002/RFC-009 rely on.
 
 | idx | feature | source & encoding |
 |---|---|---|
 | 0 | own HP | fixed-point `hp_frac` 0..1000 → `/1000` |
-| 1–5 | own status one-hot | RFC-002 status: Frozen, Burning, Wet, Muddy, Shocked |
-| 6 | status ticks left | `/80` (the longest base status duration; clamp 1) |
-| 7–10 | own pipeline phase one-hot | RFC-001: Idle, Windup(Cast/Channel), Active(Release/Travel), Recover |
-| 11 | phase progress | `elapsed_ticks / total_ticks` of the current phase; 0 when Idle |
-| 12–15 | ability cooldown fractions, slots 0–3 | `cd_ticks_left / cd_total`; 0 when ready **or slot absent** |
-| 16–19 | facing one-hot | Down, Up, Left, Right |
+| 1–5 | primary channel one-hot | RFC-002 `Channel`: Cold, Heat, Shock, Earth, Stagger (all-zero = `kNone`) |
+| 6 | primary stage | `stage / 3` (stages 1..3; 0 when no primary) |
+| 7 | stage ticks left | `stage_ticks / 80`, clamp 1 |
+| 8–9 | coating bits | Wet, reserved (RFC-002 `Coating` mask — 2-bit slot, only Wet used in v1; idx 9 spare per RFC-002 OQ5) |
+| 10–13 | own pipeline phase one-hot | RFC-001: Idle, Windup(Cast/Channel), Active(Release/Travel), Recover |
+| 14 | phase progress | `elapsed_ticks / total_ticks` of the current phase; 0 when Idle |
+| 15–18 | ability cooldown fractions, slots 0–3 | `cd_ticks_left / cd_total`; 0 when ready **or slot absent** |
+| 19–22 | facing one-hot | Down, Up, Left, Right |
 
 Deliberately **excluded from S**: archetype constants (scale tier, mass, reach, element affinity).
 They are constant for a given policy, therefore carry zero information for that policy and would
 only waste network capacity. Per-archetype numbers live in the stat block (RFC-005/RFC-008), not in
-the obs.
+the obs. This exclusion is load-bearing, so it becomes a rule: **reach, scale tier, and mass are
+archetype invariants** — every member of an archetype, including elite stat variants
+(GiantRacoonGold), shares them exactly; a variant that changes any of them is a new archetype
+(§4). The RFC-005 kit validator must enforce this invariance across kits sharing an archetype.
 
-#### Block T — Primary target (indices 20–39)
+#### Block T — Primary target (indices 23–42)
 
 The primary target is the nearest engaged player (or, in self-play/sparring, the opposing agent).
 
 | idx | feature | source & encoding |
 |---|---|---|
-| 20 | presence·freshness | `max(0, 1 − beacon_age/kBeaconLease)` — presence and staleness are one feature; an expired beacon reads as absent (0). Lease = 12 ticks (existing) |
-| 21–22 | dx, dy | tile offset, clamp ±8, `/8` |
-| 23–24 | vx, vy | `(pos_now − pos_prev_decision) / kDecisionPeriod` in tiles/tick, clamp ±0.8, `/0.8` |
-| 25 | target HP | fraction |
-| 26–30 | target status one-hot | as Block S |
-| 31 | target status ticks left | `/80` |
-| 32–35 | target pipeline phase one-hot | the player's ability pipeline is observable too (RFC-001 — players telegraph); Idle, Windup, Active, Recover |
-| 36 | target phase progress | as idx 11 |
-| 37–39 | target last-verb one-hot | Melee, Ranged, Magic — the school of the target's most recent attack this episode |
+| 23 | presence·freshness | `max(0, 1 − beacon_age/kBeaconLease)` — presence and staleness are one feature; an expired beacon reads as absent (0). Lease = 12 ticks (existing) |
+| 24–25 | dx, dy | tile offset, clamp ±8, `/8` |
+| 26–27 | vx, vy | `(pos_now − pos_prev_decision) / kDecisionPeriod` in tiles/tick, clamp ±0.8, `/0.8` |
+| 28 | target HP | fraction |
+| 29–33 | target primary channel one-hot | as Block S idx 1–5 (Cold, Heat, Shock, Earth, Stagger) |
+| 34 | target primary stage | as idx 6 |
+| 35 | target stage ticks left | as idx 7 |
+| 36–37 | target coating bits | Wet, reserved (as idx 8–9) |
+| 38–41 | target pipeline phase one-hot | the player's ability pipeline is observable too (RFC-001 — players telegraph); Idle, Windup, Active, Recover |
+| 42 | target phase progress | as idx 14 |
 
 Velocity is computed from positions at the last two *decision* ticks (not sim ticks), from the same
 quantized beacon data both sides already replicate; no extra state is stored beyond one previous
 position per tracked target.
 
-#### Block T2 — Secondary target (indices 40–45)
+Removed from the draft layout: a target **last-verb one-hot** (Melee/Ranged/Magic). No RFC defines
+that delivery taxonomy as a stable field — RFC-008's own Open Questions still list "basic attacks
+in or out of the pack" as unresolved — and §2.7's bit-identical rule forbids any feature whose
+data source is unsettled. Three reserved floats are earmarked for its return once RFC-008 defines
+the taxonomy and registers it with RFC-001.
+
+#### Block T2 — Secondary target (indices 43–48)
 
 Dungeons are group content (2–4 players). One compact slot for the second-nearest player:
 
 | idx | feature |
 |---|---|
-| 40 | presence·freshness (as idx 20) |
-| 41–42 | dx, dy (clamp ±8, `/8`) |
-| 43 | HP fraction |
-| 44 | winding-up flag (1 if in Windup/Active phase) |
-| 45 | reserved, always 0 in v1 |
+| 43 | presence·freshness (as idx 23) |
+| 44–45 | dx, dy (clamp ±8, `/8`) |
+| 46 | HP fraction |
+| 47 | winding-up flag (1 if in Windup/Active phase) |
+| 48 | reserved, always 0 in v1 |
 
 Players 3 and 4 are *not* individually observed in v1 (see Open Questions Q3); they still influence
 the fight through damage and through whichever of them becomes nearest.
 
-#### Block R — Terrain & hazard rays (indices 46–61)
+#### Block R — Terrain & hazard rays (indices 49–64)
 
 8 rays from the agent's tile in compass order N, NE, E, SE, S, SW, W, NW; horizon `D = 8` tiles
 (tunable). Two channels per ray:
@@ -198,25 +229,25 @@ the fight through damage and through whichever of them becomes nearest.
 | blocked closeness | closeness to the first **impassable** tile (room wall, RFC-004 Wall-class entity, terrain block) |
 | hazard closeness | closeness to the first tile inside a **hazard** (RFC-004 aura/zone with a damaging or hard-CC effect, e.g. burn ground, spike row) |
 
-Indices: ray `i` (0..7) → `46 + 2i` blocked, `46 + 2i + 1` hazard. Rays walk tiles (Bresenham on
+Indices: ray `i` (0..7) → `49 + 2i` blocked, `49 + 2i + 1` hazard. Rays walk tiles (Bresenham on
 the tile grid), reading the same `terrain_of` + chunk entity state the movement code reads.
 
-#### Block G — Ground & confinement (indices 62–67)
+#### Block G — Ground & confinement (indices 65–70)
 
 | idx | feature |
 |---|---|
-| 62–65 | ground class under self, one-hot: Normal, Slow (mud/rubble), Conductive (water/wet), Unstable (cracked) — the RFC-003 material projection into four gameplay classes |
-| 66 | standing-in-hazard flag (inside any RFC-004 hazard aura) |
-| 67 | wall closeness: `max(0, (4 − d)/4)` where `d` = Chebyshev distance to nearest impassable tile; 0 in open field |
+| 65–68 | ground class under self, one-hot: Normal, Slow (mud/rubble), Conductive (water/wet), Unstable (cracked) — the RFC-003 material projection into four gameplay classes |
+| 69 | standing-in-hazard flag (inside any RFC-004 hazard aura) |
+| 70 | wall closeness: `max(0, (4 − d)/4)` where `d` = Chebyshev distance to nearest impassable tile; 0 in open field |
 
 Note the projection: the policy sees ground **classes**, not terrain identities. Water and rain-wet
 grass are both "Conductive"; the learned Thunder-avoidance transfers between them. RFC-003 owns the
 authoritative material→class mapping table.
 
-#### Block E — Combat-entity slots (indices 68–103)
+#### Block E — Combat-entity slots (indices 71–106)
 
 The 3 nearest relevant `CombatEntity` instances (RFC-004) within `kObsRange`, ordered by distance,
-12 floats each. Slot `k` (0..2) starts at `68 + 12k`:
+12 floats each. Slot `k` (0..2) starts at `71 + 12k`:
 
 | offset | feature |
 |---|---|
@@ -230,11 +261,13 @@ The 3 nearest relevant `CombatEntity` instances (RFC-004) within `kObsRange`, or
 entities are excluded there, not here). Entity **class and element are the entire identity** the
 policy receives — this is the pattern-learning contract (§ RL Considerations).
 
-#### Reserved (indices 104–111)
+#### Reserved (indices 107–119)
 
-Always 0 in v1. Reserved so that v2 features (RFC-009 build-up meters are the known candidate) can
-be added **without changing `kObsSize`**, letting v1 checkpoints keep loading while retraining
-catches up (see §6 versioning).
+Always 0 in v1. 13 floats, earmarked: **10** for the RFC-002/RFC-009 build-up meters (5 channels ×
+self and target — the known v2 candidate) and **3** for the target last-verb one-hot once RFC-008
+settles the delivery taxonomy (see Block T note). Reserved so v2 features can be added **without
+changing `kObsSize`**, letting v1 checkpoints keep loading while retraining catches up (see §6
+versioning).
 
 #### 2.7 Determinism & quantization rule
 
@@ -260,6 +293,13 @@ chunk re-placement after node death. A stateless obs makes LOD transitions free.
 heap-buffer-overflow (action spaces < 15) is structurally impossible. If the upstream
 `action_count` parameter lands later, this stays 15 anyway (see Open Questions Q1).
 
+Caution — the upstream constant is **derived, not free**: `ActionSpace.hpp` computes
+`kActionCount = kNumSteerLevels × kNumThrottleLevels` (5×3, car semantics); we reuse the bound
+while discarding the steer/throttle meaning. `CombatEnvironment` must therefore
+`static_assert(kActionCount == 15)` (equivalently: define `kCombatActionCount = 15` and assert
+equality) so that any future edit to the car constants fails our build instead of silently
+corrupting the game's action space.
+
 | id | action | semantics (executed by the chunk over the next decision period) |
 |---|---|---|
 | 0 | Hold | stand; recover; telegraph nothing |
@@ -273,20 +313,25 @@ heap-buffer-overflow (action spaces < 15) is structurally impossible. If the ups
 
 1. **The promise rule.** If the agent is in Windup/Active (a committed telegraph), every action is
    coerced to Hold. A telegraph is a promise (umbrella §1, boss.hpp); only external interruption
-   (RFC-001/RFC-002 stun) cancels it — never the caster's own next decision.
+   (RFC-001/RFC-002 Stagger interrupt) cancels it — never the caster's own next decision.
 2. **Dead or cooling slots.** Casting an absent slot, or one on cooldown, or one whose resource
    check fails (RFC-005) coerces to Hold. In training this is additionally penalized (§5) so the
    policy learns its own action mask; at inference it is merely harmless.
 3. **Movement never leaves the arena.** Steps/Approach/Retreat are clamped by the same collision
    the player uses (RFC-004); there is no action that exits the boss's room. Leash behavior on a
    vanished target stays the engine's (`kBossLeashTicks`), not the policy's.
-4. **Aim mode is resolved at commit.** Lead aim samples target velocity once, at the cast decision;
-   the dash/projectile then follows the committed point (matching the existing charge semantics:
-   "dash to where the target stood at commit").
+4. **Aim is resolved at commit.** Both modes commit to a fixed point at the cast decision, and the
+   dash/projectile follows that committed point thereafter. **Direct** commits to the target's
+   position at commit — exactly the shipped gen-0 charge semantics ("dash to where the target
+   stood at commit", boss.hpp). **Lead** samples target velocity once at commit and extrapolates
+   to `target_pos + v · (windup + travel)`. Lead is strictly a learned refinement; the gen-0
+   script never emits it.
 
 Generation-0 compatibility: the existing hand script maps exactly — `kApproach`→5,
-`kAttackLeft/Right`→7 (facing now derived, not chosen), `kCharge`→11 (charge bound to slot 1),
-`kHold`→0. The script remains the fallback brain and the behavior-cloning teacher (§6).
+`kAttackLeft/Right`→7 (Cast slot 0 = cleave, **Direct**; facing now derived, not chosen),
+`kCharge`→**8** (Cast slot 1 = charge-dash, **Direct** — matching boss.hpp's committed-point
+semantics; charge is slot 1 per §4), `kHold`→0. The script remains the fallback brain and the
+behavior-cloning teacher (§6).
 
 ### 4. Archetypes — one policy each
 
@@ -294,7 +339,7 @@ An **archetype** = (policy network, obs v-version, slot-binding template, stat-b
 archetypes share §2's obs layout and §3's action table. Proposed roster — **13 of the 15-policy
 budget** (tunable in membership, capped at 15 by ARCHITECTURE.md §7):
 
-| # | policy id | members (from the audited RL shortlist) | slots bound (content per RFC-005) |
+| # | policy id | members (from the audited RL shortlist) | slots bound (names illustrative — RFC-005 owns concrete abilities) |
 |---|---|---|---|
 | 1 | `boss.melee_bruiser` | **GiantRedSamurai** (first RL boss), GiantBlueSamurai | 0 cleave, 1 charge-dash |
 | 2 | `boss.artillery` | Squids (Shoot pose only — never melee-slotted) | 0 ink shot, 1 volley |
@@ -314,8 +359,11 @@ Explicitly **excluded as RL agents** (asset audit, 2026-07-23): Dragons (multi-p
 GiantSlime / Flam / Spirit (idle+hit sheets only). They remain scripted or non-boss content.
 Wild animals and non-combat villagers never get policies (GAME.md §5: hand-written behavior).
 
-Individuals within an archetype differ **only** in stats and equipment (RFC-005/RFC-008 data),
-never in weights. A new boss joining an existing archetype inherits its checkpoint on day one.
+Individuals within an archetype differ **only** in scalar stats (HP, damage, cooldowns) and
+equipment (RFC-005/RFC-008 data), never in weights — and never in reach, scale tier, or mass,
+which are archetype invariants precisely because Block S omits them (§2). GiantRacoonGold is the
+same body at the same reach; a variant that changes body geometry is a new archetype. A new boss
+joining an existing archetype inherits its checkpoint on day one.
 
 ### 5. Reward shaping — under the chill guardrail
 
@@ -326,8 +374,13 @@ Structural rules first; they matter more than the coefficients:
   room, structures, villages, or the overworld. A behavior cannot be learned toward a signal that
   does not exist — this is how "difficulty never chases the player" survives contact with an
   optimizer.
-- **R-honesty.** Rewards flow only through the RFC-001 pipeline (§3 gives no off-pipeline verb),
-  so no gradient ever favors an untelegraphed hit. Whiffs are **not** penalized beyond their
+- **R-honesty.** Reward flows only through the RFC-001 pipeline. §3 gives no off-pipeline verb,
+  and the one off-pipeline damage source that exists — RFC-005's `contact_damage` base stat,
+  triggerable by pure movement (Step/Approach) with no telegraph — is **excluded from the
+  damage-dealt term**: body-contact damage earns exactly zero reward (it still counts in the
+  opponent's damage-taken term and still ends episodes). With that exclusion in place, no gradient
+  ever favors an untelegraphed hit: a policy cannot learn body-blocking or contact harassment
+  because the optimizer never sees it pay. Whiffs are **not** penalized beyond their
   opportunity cost: a visible miss is a designed outcome ("wind-up, strike, or a visible miss"),
   and punishing it teaches over-cautious, unreadable play.
 - **R-symmetry.** Self-play and sparring use the same table with roles swapped; league/sparring
@@ -337,7 +390,7 @@ Per-decision reward (clip final sum to [−1, +1] per step (tunable)):
 
 | term | value | notes |
 |---|---|---|
-| damage dealt | `+1.0 ×` (damage / target max HP) (tunable) | damage fractions per RFC-009 |
+| damage dealt | `+1.0 ×` (damage / target max HP) (tunable) | damage fractions per RFC-009; **pipeline-delivered only — `contact_damage` excluded** (R-honesty) |
 | damage taken | `−1.0 ×` (damage / own max HP) (tunable) | |
 | terminal win (opponent dead) | `+0.25` (tunable) | |
 | terminal loss (agent dead) | `−0.25` (tunable) | |
@@ -383,7 +436,7 @@ Personas are pure functions over the same obs/action interface — they are, pre
 Weights: RLDrive `NetworkCheckpoint` JSON, flat vector, layout
 `[layer: weights out×in row-major][biases out]` in layer order; the ~10-line `flatten/unflatten`
 is ours (the helper is Windows-gated) and already verified bit-exact round-trip. Network shape:
-`112 → 64 → 64 → 15` (tunable) ≈ 12.2k parameters ≈ 160 KB JSON — committable and diffable.
+`120 → 64 → 64 → 15` (tunable) ≈ 12.9k parameters ≈ 170 KB JSON — committable and diffable.
 
 Metadata: a **sidecar** `<checkpoint>.meta.json` (the upstream format is not ours to extend):
 
@@ -424,7 +477,11 @@ is the absolute backstop.
 
 Generation 0 is **never random weights** (the "boss must not be dumb at spawn" rule): it is the
 hand script behavior-cloned into the network offline (supervised on script decisions over persona
-episodes until ≥ 98% action agreement (tunable)), committed to the repo. If a policy's training
+episodes), committed to the repo. Scope this honestly: the script's support is only 4 of the 15
+verbs (Hold, Approach, Cast-slot-0 Direct, Cast-slot-1 Direct), so the ≥ 98% action-agreement
+target (tunable) is measured **on that support** and certifies nothing about the other 11 verbs.
+Gen 0 is a narrow imitation seed whose only job is "not dumb at spawn"; the unused verbs acquire
+their value estimates from subsequent ε-greedy training, not from cloning. If a policy's training
 regresses or misbehaves, rollback = republish an earlier hash; the scripted `boss_policy` remains a
 permanent, indistinguishable fallback (the game does not bet on RL — GAME.md §10).
 
@@ -440,17 +497,28 @@ batch 64, γ = 0.97 (≈ 9 s horizon at 3.3 decisions/s), lr 1e-3, target-net sy
 - **RFC-001 (Ability System)**: the pipeline phases (Cast/Channel → Release/Travel → Recover) are
   the source of Block S idx 7–11 and Block T idx 32–36; the promise rule (§3.1) restates RFC-001's
   no-self-cancel rule at the action layer. Phase durations feed Lead aim (§3, id 11–14).
-- **RFC-002 (Status & Effect)**: the 5-status one-hots and duration fractions read RFC-002's
-  authoritative status set; if RFC-002 adds a status, that is an obs-version bump (§6.2), not a
-  silent re-mapping.
+- **RFC-002 (Status & Effect)**: the status sub-blocks (§2 Blocks S/T) are RFC-002's authoritative
+  model verbatim — primary `Channel` one-hot (Cold/Heat/Shock/Earth/Stagger), stage, stage ticks,
+  and coexisting coating bits (Wet + reserved) — a documented pruning of RFC-002's proposed 18/9-float
+  RL encoding: build-up meters and soft-resist flags are deferred to the reserved block (v2, with
+  RFC-009). If RFC-002 adds a channel or coating, that is an obs-version bump (§6.2), not a silent
+  re-mapping.
 - **RFC-003 (Physics & Material)**: Block G's four ground classes are a fixed projection of
   RFC-003 materials/terrain properties; RFC-003 owns the mapping table.
 - **RFC-004 (Terrain & Combat Entity)**: Block E's class taxonomy (Barrier/HazardZone/Projectile/
-  Caster) is derived from RFC-004 tags; RFC-004 defines which entities are observable. Ray hazard
-  channels read RFC-004 auras.
+  Caster) is sourced from RFC-004's `EntityDef.obs_class` field, gated by `EntityDef.observable`
+  (RFC-004 §1). Ray hazard channels read RFC-004 auras.
 - **RFC-005 (Boss Ability Authoring)**: binds concrete abilities to the 4 action-space slots per
   archetype; consequently **RFC-005 kits are capped at 4 slots** — that cap originates here and
   RFC-005 must honor it. Wind-up/recover durations authored there surface in the obs unchanged.
+  **Conflict resolution:** RFC-005 §R5 currently sketches a per-kit *generated* enumeration
+  (`[Hold, Approach, Reposition] + Use/UseL/UseR…`, bound 11, variable per archetype). That scheme
+  is superseded by §3's fixed 15-verb table: this RFC owns the action vocabulary (RFC-005's own
+  Interactions list assigns it "the `kActionCount` fix"), and a sub-15 space is precisely the
+  documented DqnAgent overflow — "safely under 15" is the segfault case, not the safe case. Kits
+  declare slot bindings only; UseL/UseR is subsumed by derived facing (§3, ids 7–14) and
+  Reposition by Step/Retreat. RFC-005 §R5 must be amended to reference §3 as the single
+  enumeration.
 - **RFC-006 (Visual FX & Telegraphs)**: the telegraph a player sees and the phase feature a policy
   sees are projections of the *same* pipeline state — one source of truth, two renderings. This RFC
   adds no visual requirements.
@@ -462,6 +530,12 @@ batch 64, γ = 0.97 (≈ 9 s horizon at 3.3 decisions/s), lr 1e-3, target-net sy
 - **RFC-010 (Battlefield Simulation)**: LOD/sleep constraints motivate statelessness (§2.8) and
   decision-cadence degradation (§1); RFC-010 owns replication of the (small) per-boss state this
   RFC adds: current action id, decision-tick phase, one previous target position.
+- **Earlier drafts.** An early "BossObs v2" sketch of this same F4 contract (integer struct, 7×7
+  surface/occupancy grid, 6-meter status array, 8-action enum, `kBossObsVersion = 2`) predates
+  this RFC and is superseded in full: this RFC is the only F4 tensor contract, and "RFC-010"
+  refers exclusively to RFC-010-battlefield-simulation.md. No file by that draft's name, or by
+  RFC-004's likewise-superseded pre-series draft, exists in `rfc-spec/` — the set RFC-001..010 is
+  canonical.
 
 ## RL Considerations
 
@@ -503,7 +577,7 @@ checkpoint + hash. The obs's integer-first rule keeps *inference* reproducible e
 | Exactly 4 elements (Fire/Ice/Rock/Thunder) | all element one-hots are width 4; other schools are out of scope and unrepresentable in obs v1 |
 | `kActionCount = 15` hardcode + unchecked writes in DqnAgent/TrainBatch | action space is exactly 15 by design; the vendored core runs unmodified and the segfault class is unreachable |
 | kEffectLife/FX gaps (long FX truncation, unpacked Magic/* family) | no dependency: this RFC consumes pipeline *state*, not FX; visual standards live in RFC-006 |
-| DQN core from RLDrive, JSON checkpoints, ~790 steps/s CPU | obs is a flat float vector, action one int; MLP-sized (12.2k params); decision cadence ×3 throughput; `DqnTrainer` bypassed; flatten layout specified |
+| DQN core from RLDrive, JSON checkpoints, ~790 steps/s CPU | obs is a flat float vector, action one int; MLP-sized (12.9k params); decision cadence ×3 throughput; `DqnTrainer` bypassed; flatten layout specified; `static_assert` on the derived `kActionCount` (§3) |
 | One policy per archetype, 10–15 total | 13-policy roster, hard cap 15 |
 | Dojos train in-world & visible; RL bosses in 10×7 interior rooms | training arena is exactly `kRoomW × kRoomH = 10×7`; `TrainingActor` on leader at `Priority<2>`; in-world sparring is the rendered face of the same loop |
 | 1024² overworld with simulation LOD (1 Hz / sleep) | stateless obs (§2.8); cadence degrades with elapsed ticks; no inference in slept chunks; no history to migrate |
@@ -515,7 +589,7 @@ checkpoint + hash. The obs's integer-first rule keeps *inference* reproducible e
    mirror hardcode in `gpu/GpuDqnTrainer.cpp:77`) is a small upstream fix to a live project we
    deliberately do not fork. Until it lands, 15 is a hard wall; if it lands, do we ever *want* more
    than 15 verbs, or is 15 a healthy forcing function for readable bosses?
-2. **Obs v2 migration policy.** When RFC-009 build-up meters claim reserved indices 104–111: do v1
+2. **Obs v2 migration policy.** When RFC-009 build-up meters claim reserved indices 107–119: do v1
    checkpoints keep running (they see zeros — safe but blind) while retraining proceeds per
    archetype, or do we gate the RFC-009 rollout on all 13 policies re-passing Gate A? Needs a
    decision before the reserved block is first used.
@@ -535,6 +609,16 @@ checkpoint + hash. The obs's integer-first rule keeps *inference* reproducible e
    multi-agent episodes is enough for village-raid quality. If not, guard archetypes may need a
    variant action table — which breaks the "one action space" simplification and must be its own
    amendment.
+7. **Is the ray/ground-class projection enough for RFC-010's terrain surfaces and RFC-004's
+   scars, or does F4 need a per-tile encoding?** Today RFC-010's `Surface` values (burning/mud/
+   ice) and RFC-004's `ScarKind` scars reach the policy only through Block R's per-ray hazard
+   closeness and Block G's 4-way ground class — real signal, but coarser than a per-tile plane
+   (a policy cannot currently distinguish "standing on burning ground" from "standing on iced
+   ground" beyond both tripping the hazard-closeness ray). If training shows this is too lossy —
+   a boss failing to learn burn-avoidance distinctly from ice-avoidance, say — the fix is a new
+   feature claimed from the reserved block (§2, indices 107–119): a small per-ray or under-foot
+   surface/scar one-hot, sized once real training signal exists, not speculatively now. Until
+   then this is the honest answer to "where do battlefield surfaces show up in the obs."
 
 ## Non-goals
 
@@ -552,3 +636,26 @@ checkpoint + hash. The obs's integer-first rule keeps *inference* reproducible e
   (RFC-010). Where those change, this RFC consumes their outputs via the versioned obs contract.
 - **No GPU training path** in v1; the CPU budget suffices at this network size, and `gpu/` is
   Windows-gated upstream.
+
+## Review Record
+
+Reviewers: **Opus — revise**; **Sonnet — revise**. Revised 2026-07-23; all upheld findings applied.
+
+Applied:
+- Status blocks rebuilt on RFC-002's real model (primary channel + stage + coatings; Poison/Stun visible; Wet+Frozen encodable); meters deferred to reserved; `kObsSize` 112→120, blocks renumbered.
+- An early "BossObs v2" draft of this contract explicitly superseded/retracted; RFC-010 = battlefield simulation only.
+- `contact_damage` excluded from the damage-dealt reward term, making R-honesty's guarantee actually hold.
+- Charge fixed: `kCharge`→id 8 (Cast slot 1, **Direct**); Direct/Lead commit semantics disambiguated (§3 rule 4).
+- Target last-verb one-hot removed to reserved until RFC-008 defines the Melee/Ranged/Magic taxonomy.
+- §4 slot-binding names marked illustrative — RFC-005 owns concrete abilities.
+- Reach/scale/mass declared archetype invariants (elites vary scalar stats only); RFC-005 validator duty noted.
+- Action-space authorship resolved: §3's fixed 15 supersedes RFC-005 §R5's generated 11-action scheme (sub-15 is the segfault case).
+- Gen-0 ≥98% agreement scoped to the script's 4-verb support; gen 0 renamed a narrow imitation seed.
+- `static_assert(kActionCount == 15)` required — the upstream constant is derived car semantics.
+- `kObsRange = 8` vs the room's 9-tile max separation: saturation stated and accepted (§2 conventions).
+- §1 clarified: an engaged boss always runs full cadence; LOD degradation applies to unengaged inference only.
+
+Reconciliation: status channel one-hots (Block S idx 1–5, Block T idx 29–33) re-keyed Frost→Cold, Poison→Earth, Stun→Stagger; coating bit idx 9/37 relabelled Muddy→reserved (Muddy folds into the Earth ladder, leaving Wet the sole v1 coating). Vector widths and `kObsSize` unchanged — rename only — per RECONCILIATION.md ruling 1. Dangling references to the two nonexistent pre-series filenames removed from the header, Interactions, and this Review Record per RECONCILIATION.md ruling 6; RFC-010 §6/§7 repointed here off the retracted schema, and the surface/scar encoding gap that repoint surfaced recorded as new Open Question 7 rather than invented in RFC-010, per RECONCILIATION.md ruling 6. Summary and RFC-004 Interactions lines reworded from "RFC-004 tags" to `observable`/`obs_class` fields per RECONCILIATION.md ruling 9; verified RFC-005 §R5 now references this section verbatim (no drift) per RECONCILIATION.md ruling 10.
+
+Unresolved:
+- None outstanding from this file's own review. (Physically deleting the two nonexistent pre-series filenames and renaming the duplicate RFC-001 pair were repo-hygiene items already resolved — neither file ever existed in `rfc-spec/`; see RECONCILIATION.md ruling 6.)

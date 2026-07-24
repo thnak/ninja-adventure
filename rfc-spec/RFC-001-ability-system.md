@@ -7,12 +7,9 @@
 > RFC-010 (battlefield simulation)
 >
 > **Numbering note.** RFC references in this document mean the current combat set:
-> `RFC-002`…`RFC-009` plus `RFC-010-battlefield-simulation.md`. Two earlier-generation drafts in
-> this directory collide with that scheme and are superseded, not referenced here:
-> `RFC-001-combat-entity-and-materials.md` (scope absorbed by RFC-004) and
-> `RFC-010-rl-observation-schema.md` (scope absorbed by RFC-007). `IMPLEMENTATION_MAP.md`'s
-> "Proposed RFC series" predates this set and uses a stale numbering. Marking those files
-> superseded and correcting the map is directory cleanup outside this document (see Review Record).
+> `RFC-002`…`RFC-009` plus `RFC-010-battlefield-simulation.md`. Earlier exploratory drafts that
+> once collided with this numbering were removed; no file by those names exists in `rfc-spec/`.
+> This set (RFC-001..010) is canonical.
 
 ---
 
@@ -638,8 +635,11 @@ Applied:
 - Charge→power curve handed wholly to RFC-009; `charge_mil = 1000` default for non-channel abilities.
 - I4 migration note added: shipped `Zone.ticks_left` must become absolute `expires_at_tick`.
 - T4 gained the pre-committed (RL duration-bucketed) release guard; `kBadTarget` stated as `kEntity`-only in v1.
-- Header numbering note disambiguates this set from the superseded `RFC-001-combat-entity-and-materials.md` / `RFC-010-rl-observation-schema.md` drafts and the stale IMPLEMENTATION_MAP series.
+- Header numbering note simplified: the two draft filenames it disambiguated against were never real files in this directory, and IMPLEMENTATION_MAP.md's status table is refreshed separately (RECONCILIATION.md ruling 12).
 - Clarity note (Sonnet-only; Opus withdrew it as a blocker): Samurai charge = `kEntity` targeting + `kDash` payload; targeting and payload are orthogonal axes (§7).
 
-Unresolved:
-- Directory-level cleanup — marking the two superseded draft files and correcting IMPLEMENTATION_MAP.md's RFC series — needs edits to other files, which this review session was not permitted to make.
+Unresolved: none outstanding from this file's own review.
+
+Reconciliation: header numbering note and Review Record dangling references to the two
+nonexistent pre-series filenames removed; IMPLEMENTATION_MAP.md's status table refreshed
+separately — per RECONCILIATION.md rulings 6 and 12.

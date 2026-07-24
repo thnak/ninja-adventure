@@ -1,11 +1,17 @@
 # RFC-008: Data-driven Skill Definition (JSON)
 
-> Status: **Draft**
+> Status: **Accepted (revised after review)**
 > Umbrella: [RFC_Unified_Combat_System.md](RFC_Unified_Combat_System.md) §13 (Skill Composition)
 > Scope: the serialization contract — file format, schemas, versioning, validation, referencing,
 > hot-reload — for skills, statuses, combat entities, FX/icon/sound references, and boss kits.
 > Runtime *semantics* of these documents belong to RFC-001/002/004/005/009 and are only referenced
 > here by number.
+>
+> **Numbering note.** RFC references in this document mean the current combat set:
+> `RFC-001-ability-system.md`, `RFC-002`…`RFC-009`, and `RFC-010-battlefield-simulation.md`.
+> Earlier exploratory drafts that once collided with this numbering were removed; no file by
+> those names exists in `rfc-spec/`. This set (RFC-001..010) is canonical, which matters doubly
+> for RFC-008, whose hash/versioning contract assumes stable cross-references.
 
 ---
 
@@ -19,7 +25,8 @@ Every other combat RFC ultimately serializes into this one. RFC-008 defines:
 - **Numbers:** integers only — ticks, millitiles, permille. No floats anywhere in data files, which
   makes the canonical byte form (and therefore the content hash every node must agree on) trivial.
 - **Identity:** dotted string ids (`skill.meteor`) plus an append-only `ids.lock.json` that pins
-  each id to a stable `u16` for the wire protocol and for RL action/observation stability (RFC-007).
+  each id to a stable `u16` for the wire protocol and for stable kit→action-slot binding across RL
+  checkpoints (RFC-007 — whose observations themselves are identity-free and never carry ids).
 - **Structure:** a skill is a fixed seven-phase pipeline
   (`cast → channel → release → travel → impact → persist → expire`, umbrella §1) expressed as a
   declarative object — no scripting, no arbitrary graphs.
@@ -93,7 +100,7 @@ python3 tools/build_combat_pack.py
 If you referenced an icon that doesn't exist, gave a monster a cast pose (monsters have no attack
 animations — the tool knows), used the element `water` (not in v1), or wrote `1.4` instead of
 `1400` permille, the build fails with a message naming your file, your line, and the rule you broke
-(rules are numbered — "V12: skill.meteor phases.impact.radius_mt exceeds 8000"). If it passes, the
+(rules are numbered — "V07: skill.meteor phases.impact.radius_mt exceeds 8000"). If it passes, the
 game picks it up; in a dev session with `--dev-data`, a running world picks up *tuning* changes
 within a couple of seconds without restarting.
 
@@ -178,16 +185,27 @@ codebase's existing habit of fixed-point at boundaries (`BossObs::hp_frac` is 0.
 
 | Suffix | Unit | Meaning | Range (V07) |
 |---|---|---|---|
-| `_ticks` | sim ticks | 10 Hz sim tick (100 ms) | 0..65535 |
+| `_ticks` | sim ticks | 10 Hz sim tick (100 ms); authored *durations* | 0..65535 |
 | `_mt` | millitiles | 1/1000 of a 16 px tile; `2200` = 2.2 tiles | 0..32000 |
 | `_pm` | permille | multiplier ×1000; `1400` = ×1.4 | 0..100000 |
 | `_deg` | degrees | angles, fan spreads | 0..360 |
-| `damage`, `hp`, `cost` | points | integer vital points | 0..32767 |
-| `weight` | relative weight | boss action selection etc. | 1..1000 |
+| payload channels | RFC-003 points | `damage`/`pierce`/`crush`/`impulse`/`heat`/`cold`/`electric`/`explosion`, 100 ≈ one light melee hit | 0..1000 |
+| `hp`, `cost` | points | integer vital points | 0..32767 |
+| `amount`, `gain`, `ticks` (status payloads) | build-up points / coating ticks | RFC-002 §1/§8 verbatim names (see §7.4) | 0..1000 / 0..255 |
 | `tint` | `[r,g,b,a]` | 0..255 each | — |
 
 Field names must carry the suffix when a unit applies (V08) — a reviewer can spot a wrong unit in
-a diff without opening the schema. All values are **(tunable)** unless a validation rule pins them.
+a diff without opening the schema. **Sole V08 exemption:** the RFC-002-mandated payload names
+(`channel`, `amount`, `radius`, `gain`, `period`, `team_mask` — RFC-002 §Interactions requires
+them verbatim) and RFC-003's eight channel names; their units are pinned in this table and §7.4.
+All values are **(tunable)** unless a validation rule pins them.
+
+**Authored durations vs absolute world ticks.** Every `_ticks`-suffixed field in an authored
+document is a *duration* and is `u16` per the table. The **absolute world tick** (`spawn_tick`,
+expiry instants) is a distinct runtime quantity: `std::uint32_t` world ticks since world start —
+matching RFC-004's `state_tick`/`expire_tick`/`heal_tick` and RFC-009's `last_gain_tick` — and is
+`u32` on the wire. It never appears in authored files; a `u16` here would wrap every ~109 minutes
+at 10 Hz and corrupt absolute expiry in a long-running process.
 
 The C++ loader converts at load time to whatever the sim wants (floats for positions, as
 `tiles.hpp` documents) — the *data contract* is integer; the *runtime representation* is the sim's
@@ -195,7 +213,10 @@ business.
 
 ### 4. Identity and `ids.lock.json`
 
-String ids are for humans and references; the wire, the snapshot bus, and RL tensors use `u16`.
+String ids are for humans and references; the wire and the snapshot bus use `u16`. RL never sees
+these ids: RFC-007's observation is egocentric and identity-free (behavior-class + element
+one-hots), so `u16` stability matters to RL only through kit→action-slot binding and checkpoint
+hashes — see RL Considerations.
 
 ```json
 {
@@ -238,7 +259,9 @@ Two SHA-256 hashes are computed and embedded in a sibling `combat_pack.hash.json
 pack — a file cannot contain its own hash):
 
 - **`struct_hash`** — hash of the canonical pack with every *value-class* field replaced by `0`.
-  Value-class fields are exactly those with a unit suffix from §3 plus `damage/hp/cost/weight/tint`.
+  Value-class fields are exactly those with a unit suffix from §3 plus the suffix-less §3 point
+  fields (the eight payload channels, `hp`, `cost`, `amount`, `gain`, status-payload `ticks`) and
+  `tint`.
   What remains: the set of ids, the numeric id assignments, which phases each skill has, every
   reference edge, every enum-valued field (element, shape kind, pose, material…).
 - **`full_hash`** — hash of the canonical pack as-is.
@@ -346,37 +369,79 @@ disabled atlas entry by name; no schema field for it.
 
 #### 7.4 Status document (`status.*`)
 
-The serialized shape of RFC-002's status framework; build-up/decay *semantics* and scale-tier
-multipliers are RFC-002/RFC-009's — this schema is where their parameters live.
+The serialized shape of RFC-002's status framework. RFC-002's model is **not** an open-ended set
+of author-invented statuses: it is a *fixed* set of five build-up **channels**
+(`cold, heat, shock, earth, stagger`) plus one binary **coating** (`wet`), one shared
+`StatusState` per combatant. RFC-008 serializes exactly that — the `status.*` document set is
+**closed** (V41): one document per channel and per coating, **six total in v1**. Authoring a
+seventh is a build error; new channels are an RFC-002 change landing here as a minor bump
+(`struct_hash` change, correctly).
+
+A **channel** document carries the tunables RFC-002/RFC-009 key off the channel:
 
 ```json
 {
   "schema": 1,
-  "id": "status.rooted",
-  "buildup_max": 100,
-  "decay_per_s": 20,
-  "duration_ticks": 30,
-  "speed_pm": 0,
-  "dot?": {"damage": 0, "period_ticks": 0},
-  "tint": [150, 100, 60, 120],
-  "overlay_fx?": "fx.root_debris",
-  "stacks_with?": []
+  "id": "status.cold",
+  "kind": "channel",
+  "channel": "cold",
+  "decay_per_s": 60,
+  "stage_ticks": [30, 30, 25],
+  "tint": [140, 190, 255, 120],
+  "overlay_fx?": "fx.frost_overlay"
 }
 ```
 
-- `decay_per_s` (points of build-up lost per second) rather than per-tick, so a chunk waking from
-  sleep computes `buildup = max(0, buildup - decay_per_s * elapsed_s)` in closed form — the LOD
-  rule of §11 applied to statuses. V19: every status must have `decay_per_s ≥ 1` (no absolute
-  immunities *and* no permanent marks; umbrella §9).
+A **coating** document is binary — a coating has `coating_ticks` and *no build-up meter*
+(RFC-002 §5/X2–X6). v1 defines exactly one, Wet:
+
+```json
+{
+  "schema": 1,
+  "id": "status.wet",
+  "kind": "coating",
+  "coating": "wet",
+  "default_ticks": 80,
+  "tint": [150, 190, 255, 120]
+}
+```
+
+**Application payloads** (in skill `impact.statuses`, entity auras) use RFC-002 §1/§8's field
+names **verbatim**, as RFC-002's Interactions section mandates of this RFC:
+
+- build-up: `{"channel": "cold", "amount": 60}` — RFC-002 `BuildupPacket` (`amount` absolute on the shared [0,1000] scale — no `buildup_max`, no rescale; RECONCILIATION.md ruling 5);
+- coating: `{"coating": "wet", "ticks": 60}` — RFC-002 `CoatingPacket`;
+- aura (single, on entities — §7.5): `{"channel"|"coating", "radius", "gain", "period",
+  "team_mask"}` — RFC-002 `AuraSpec`. Units pinned: `amount`/`gain` build-up points (for coatings,
+  `gain` = coating ticks per pulse), `period` ticks, `radius` **millitiles** (integer; ≤ 3000, the
+  ≤ 3.0-tile aura bound RFC-002 fixes so any aura fits a 10×7 boss room). These six names are the
+  sole V08 suffix exemption (§3).
+
+- `decay_per_s` (points of build-up lost per second, where one second = 10 nominal sim ticks;
+  evaluated closed-form over elapsed *world ticks*, never ticked) — so a chunk waking from sleep
+  computes `buildup = max(0, buildup - decay_per_s × elapsed_s)` in closed form: the LOD rule of
+  §11 applied to statuses. V19: every channel must have `decay_per_s ≥ 1` and every coating a
+  finite `default_ticks` (no absolute immunities *and* no permanent marks; umbrella §9).
 - `tint` is the umbrella-§15 filter: statuses render as a sprite tint (the shipped P2 combo system
   already established this), `overlay_fx` optionally adds a looping overlay (frost, arcs).
-- The current five statuses (`Frozen/Burning/Wet/Muddy/Shocked` in `tiles.hpp`) migrate into five
-  documents; `status_ticks_of`/`status_speed_scale` become pack data.
+- The current five statuses (`Frozen/Burning/Wet/Muddy/Shocked` in `tiles.hpp`) migrate onto these
+  documents (Frozen→`cold`, Burning→`heat`, Shocked→`shock`, Wet→the `wet` coating, Muddy→`earth`
+  ladder stage 2 / Mired — Muddy stops being a coating, RFC-002 §11);
+  `status_ticks_of`/`status_speed_scale` become pack data.
+- **Channel set (reconciled, RECONCILIATION.md ruling 1):** the closed set is
+  `cold / heat / shock / earth / stagger` + the `wet` coating — the four element books
+  (Ice→cold, Fire→heat, Thunder→shock, Rock→**earth**) each drive a ladder, plus non-elemental
+  `stagger`. **`Root` is representable** as the Earth terminal, so Rock-school control authors
+  `earth` build-up directly (no Muddy-coating workaround). Poison is not a v1 channel — no v1
+  content inflicts it (RFC-002 Open Question 2 parks it; the array is fixed `[5]`).
 
 #### 7.5 Combat entity document (`entity.*`)
 
 The umbrella-§3 checklist (HP, Lifetime, Collision, Aura/Status, Destroyable, Team, Tags) is this
 schema, field for field. Runtime behavior is RFC-004's.
+
+RFC-004's `EntityDef` **is the field set** (RFC-004 §Interactions: "the field set here is the
+schema"); this document is its serialized form, field for field.
 
 ```json
 {
@@ -384,40 +449,59 @@ schema, field for field. Runtime behavior is RFC-004's.
   "id": "entity.rock_spike",
   "material": "stone",
   "scale": "small",
+  "mass_pm?": 1000,
   "hp": 30,
-  "lifetime_ticks": 300,
-  "collision": "blocks_ground",
+  "arm_ticks": 8,
+  "hittable_while_arming?": false,
+  "lifetime_ticks": 200,
+  "collision": "ground",
+  "blocks_vision?": false,
   "team": "caster",
   "destroyable": true,
   "tags": ["rock", "obstacle"],
   "aura?": {
-    "radius_mt": 600,
-    "period_ticks": 5,
-    "statuses": [{"id": "status.rooted", "buildup": 40}]
+    "channel": "earth",
+    "radius": 600,
+    "gain": 6,
+    "period": 5,
+    "team_mask": "enemies"
   },
   "render": {"fx": "fx.rock_spike_idle", "anchor": "ground"},
-  "on_death?":  {"fx": "fx.rock_break", "sound": "snd.rock_break", "spawn": []},
-  "on_expire?": {"fx": "fx.rock_crumble"}
+  "on_death?":  {"fx": "fx.rock_break", "sound": "snd.rock_break", "scar": "crack", "spawn": []},
+  "on_expire?": {"fx": "fx.rock_crumble", "scar": "crack"}
 }
 ```
 
 - `material ∈ {flesh, stone, spirit, metal, wood, plant, water, slime}` (umbrella §8);
   `scale ∈ {tiny, small, medium, large, giant, titan}` (umbrella §10). Both are closed enums (V23);
   their *effects* (knockback resistance, build-up scaling) are RFC-003/RFC-009 formulas keyed off
-  these fields.
-- `collision ∈ {none, blocks_ground, blocks_all, blocks_projectiles}`.
+  these fields. `mass_pm` is the RFC-003 per-archetype mass override, permille of the tier's
+  default mass, bounded 500..1500 (±50% max, RFC-003 §4; V42).
+- `collision ∈ {none, ground, ground_and_shot}` — serializing RFC-004's
+  `Collision::{kNone, kGround, kGroundAndShot}` one-to-one.
+- `arm_ticks` (u8 range, 0..255) is the telegraph duration before the entity is active;
+  `hittable_while_arming` opts a falling body into the RFC-004 interception window (true only for
+  meteor-class bodies). `blocks_vision` participates in RFC-004's vision bitmap — this is how
+  `kSmokeCloud` expresses its entire purpose.
+- `aura` is a **single** RFC-002 `AuraSpec` (exactly one of `channel`/`coating`; §7.4 field names
+  verbatim), never a list — matching RFC-004's one `aura_channel`/`aura_coating` + `aura_gain`
+  apply per entity. `team_mask ∈ {enemies, everyone}` serializes RFC-004's `AuraAffects`.
+- `on_death.scar` / `on_expire.scar` use the V34 terrain enum — serializing RFC-004's `death_scar`
+  ("stamped on the entity's tile when it dies OR expires"). Ground scarring is *always* this or
+  `impact.terrain`, never an entity — see §7.6.
 - `team ∈ {caster, monster, player, neutral}` — `caster` means "inherits the spawner's team", which
   is how the same spike document serves a player and a boss.
 - **Replication shape (why this stays cheap):** a live entity on the wire/snapshot is exactly
   `(entity_u16, x, y, spawn_tick, hp)` — everything else is derived from the pack, which every node
-  holds byte-identically (§5/§6). Five fields per spike is what "combat state must be replicable
-  and cheap" serializes to.
-- **Sleep rule (V24, the LOD contract):** `lifetime_ticks` is absolute — expiry is
-  `spawn_tick + lifetime_ticks` in *world* ticks, so an entity in a slept chunk expires correctly
-  on wake with zero catch-up work. Auras apply only on ticks the chunk actually runs (at 1 Hz a
-  spike roots less often; nobody is there to care — that is the design, not a bug). No entity field
-  may express per-tick accumulation that would need replaying missed ticks; the validator rejects
-  any `period_ticks` of 0 with a non-empty status list.
+  holds byte-identically (§5/§6). `spawn_tick` is the **u32 absolute world tick** (§3), not a u16
+  duration. Five fields per spike is what "combat state must be replicable and cheap" serializes
+  to.
+- **Sleep rule (V24, the LOD contract):** `lifetime_ticks` is a duration whose expiry instant is
+  absolute — `spawn_tick + lifetime_ticks` in u32 *world* ticks, so an entity in a slept chunk
+  expires correctly on wake with zero catch-up work. Auras apply only on ticks the chunk actually
+  runs (at 1 Hz a spike coats less often; nobody is there to care — that is the design, not a
+  bug). No entity field may express per-tick accumulation that would need replaying missed ticks;
+  the validator rejects any aura `period` of 0.
 
 #### 7.6 Skill document (`skill.*`) — the phase pipeline
 
@@ -473,8 +557,8 @@ Top-level rules:
 Phase blocks:
 
 **`cast`** — the telegraph. This is where telegraph-first (umbrella §2) is structural: you cannot
-author a skill without a cast block, and V30 requires `ticks ≥ 3` for any skill whose `impact.damage
-> 0` — nothing damaging is untelegraphed.
+author a skill without a cast block, and V30 requires `ticks ≥ 3` for any skill whose impact
+payload has any nonzero channel — nothing damaging is untelegraphed.
 
 ```json
 "cast": {
@@ -500,15 +584,30 @@ promise shown is at least the promise kept.
 "channel": {"max_ticks": 20, "curve": "linear", "damage_bonus_pm_at_max": 500}
 ```
 
+`curve ∈ {linear}` — closed in v1 (V23); more curves are a minor bump with RFC-001 as the
+consumer.
+
 **`release`** — how the skill leaves the caster.
 
 ```json
 "release": {"kind": "spawn_projectile", "count": 1, "spread_deg": 0}
 ```
 
-`kind ∈ {strike, volley, spawn_projectile, spawn_entity, zone, from_sky}`; `count` 1..8 (V32);
-`spawn_entity` requires `"entity": "entity.<id>"`. `from_sky` is the Meteor verb: the travel body
-enters above the target rather than from the caster.
+`kind ∈ {strike, spawn_projectile, spawn_entity, from_sky}` — four kinds, each fully specified:
+
+- `strike` — direct hit: the impact phase resolves at the release tick, in the telegraphed shape,
+  with no in-flight segment and no spawned body. No companion fields; `count`/`spread_deg`/
+  `entity` are rejected on a strike (V32), and `travel` is forbidden (V33).
+- `spawn_projectile` — `count` bodies (1..8, V32) fanned across `spread_deg`; requires `travel`.
+- `spawn_entity` — requires `"entity": "entity.<id>"`; `count` 1..8 (V32).
+- `from_sky` — the Meteor verb: the travel body enters above the target rather than from the
+  caster; requires `travel`.
+
+Two kinds from earlier drafts are **cut, not deferred**: `volley` (redundant — it is
+`spawn_projectile` with `count > 1`) and `zone` (redundant — a lingering zone is a CombatEntity
+with an aura, i.e. `spawn_entity`; RFC-004 already migrated `Zone` onto that chassis). A closed
+enum with unspecified members is how two packer implementations diverge; every remaining kind has
+field-level rules above.
 
 **`travel?`** — the in-flight segment. Present ⇔ `release.kind ∈ {spawn_projectile, from_sky}`
 (V33).
@@ -529,31 +628,42 @@ body. No body = un-shootable arrow (cheap), body = destructible boulder (RFC-004
 
 ```json
 "impact": {
-  "damage": 45,
-  "impulse_mt": 3000,
+  "payload": {"damage": 120, "crush": 180, "impulse": 220, "explosion": 200, "heat": 40},
   "shape": {"kind": "circle", "radius_mt": 1800},
-  "statuses": [{"id": "status.muddy", "buildup": 60}],
+  "statuses": [{"channel": "earth", "amount": 600}],
   "fx": "fx.rock_blast",
   "sound": "snd.explosion_heavy",
   "terrain?": {"effect": "crack", "radius_mt": 1200}
 }
 ```
 
-Damage/resistance math is RFC-009 (this field is the *base* it starts from); impulse-vs-mass is
-RFC-003; `terrain` effects are RFC-003/RFC-004 and the schema only carries the closed enum
-`{none, crack, rubble, scorch, wet}` (V34).
+`payload` is RFC-003 §2's `AttackPayload` channel block, **all eight channels by name**
+(`damage, pierce, crush, impulse, heat, cold, electric, explosion`), each in RFC-003 points
+(0..1000, V43); an absent channel means 0 and is never materialized (§5). `impulse` is a
+**momentum magnitude in points** — RFC-003's `knockback = impulse / mass` — not a distance; no
+`_mt` displacement field exists in a payload. The geometry fields of `AttackPayload`
+(`dir`/`source_id`/`team`) are filled by the delivery system at runtime, never authored.
+`statuses` entries are RFC-002 build-up/coating packets with verbatim field names (§7.4).
+Damage/resistance math is RFC-009 (the payload is the *base* it starts from); channel resolution
+and impulse-vs-mass are RFC-003's; `terrain` effects are RFC-003/RFC-004 scars and the schema only
+carries the closed enum `{none, crack, rubble, scorch, wet}` (V34).
 
 **`persist?`** — what stays behind.
 
 ```json
 "persist": {
-  "spawn": [{"entity": "entity.rubble_patch", "at": "impact", "offset_mt": [0, 0]}]
+  "spawn": [{"entity": "entity.fire_patch", "at": "impact", "offset_mt": [0, 0]}]
 }
 ```
 
-Only entity spawns — lingering *behavior* is always an entity (with its own document, lifetime,
-sleep rule), never loose skill state. This is what makes battlefield state LOD-tolerant: after
-`expire`, the skill instance is gone and everything left is §7.5 entities.
+Only entity spawns — lingering *behavior* (an aura, a blocker, something with HP) is always an
+entity (with its own document, lifetime, sleep rule), never loose skill state. This is what makes
+battlefield state LOD-tolerant: after `expire`, the skill instance is gone and everything left is
+§7.5 entities. **Ground scarring is never a persist spawn:** RFC-004 defines scars — craters,
+rubble, cracked ground — as per-tile modifiers that decay, *never entities*. A skill that leaves a
+scar authors `impact.terrain`; the scar layer already carries the slow (RFC-004's scar speed
+multiplier). Spawning an entity to represent the same scar is double-representation and exactly
+what RFC-004 rules out.
 
 **`expire`** — implicit; carries no data (V35 rejects an authored `expire` key).
 
@@ -572,16 +682,36 @@ The authoring surface RFC-005 standardizes; RFC-007 consumes the action list.
   "hp": 700,
   "contact_damage": 20,
   "kit": [
-    {"skill": "skill.samurai_cleave", "pose": "attack", "cooldown_ticks": 15, "weight": 60},
-    {"skill": "skill.samurai_dash",   "pose": "charge", "cooldown_ticks": 40, "weight": 40}
+    {"skill": "skill.samurai_cleave", "pose": "attack", "cooldown_ticks": 15},
+    {"skill": "skill.samurai_dash",   "pose": "charge", "cooldown_ticks": 40}
   ],
-  "phase2?": {"hp_below_pm": 500, "kit": []},
+  "script": [
+    {"when": "winding_up",            "do": "hold"},
+    {"when": "dist <= 2 && cd_ready(0)", "do": "use 0"},
+    {"when": "dist > 4 && cd_ready(1)",  "do": "use 1"},
+    {"when": "",                       "do": "approach"}
+  ],
+  "phase2?": {"hp_below_pm": 500, "kit": [ /* 2–4 entries, same shape as kit (V44) */ ]},
   "rl": {"trainable": true, "archetype": "samurai", "room": "interior_10x7"}
 }
 ```
 
+- **Kit length is bounded in data**: `2 ≤ kit entries ≤ 4` per phase (V44) — RFC-005 caps kits at
+  2–4 and RFC-007's fixed 4-slot action budget is where that cap originates. An out-of-range kit
+  must die at pack build, not at training time (the DQN action-count overflow is real and
+  measured). Kit entries bind to action slots 0–3 **in array order**; there is no per-entry
+  selection `weight` — action selection is the generation-0 `script` or the trained policy, never
+  a weighted roll.
+- **`script` is mandatory** (V45): RFC-005 requires every kit to ship a declarative generation-0
+  behavior script (ordered rules, evaluated top-down, first match wins; empty `when` = always).
+  The condition/action vocabularies are RFC-005's closed sets (`winding_up`, `dist > N`,
+  `dist <= N`, `cd_ready(slot)`, `hp_below(frac)`, `phase_is(n)`, `adds_alive < n`, `&&`; `hold`,
+  `approach`, `reposition`, `use <slot>`); the packer validates against them (V45) but their
+  *semantics* are RFC-005 §R5's.
 - V20: every `pose` in the kit must exist in `capabilities/boss_poses.json` for this sheet.
-  `pose ∈ {attack, charge, shoot, none}`; `attack`/`charge` resolve to the directional L/R rows at
+  `pose ∈ {attack, charge, shoot, none}`; the capability file lists *rows* — the mapping is
+  `attack` ⇒ rows `attack_l` **and** `attack_r`, `charge` ⇒ `charge_l` and `charge_r`, `shoot` ⇒
+  `shoot`, `none` ⇒ no requirement — and `attack`/`charge` resolve to the directional L/R rows at
   runtime by facing (exactly `BossPose` in `boss.hpp` today).
 - V21: `rl.trainable: true` requires the sheet to be on the audited shortlist
   (GiantRedSamurai, GiantBlueSamurai, GiantBamboo, Squids, GiantFrog, GiantRacoon, GiantRacoonGold,
@@ -593,7 +723,7 @@ The authoring surface RFC-005 standardizes; RFC-007 consumes the action list.
   total, never per-individual); V36: the count of distinct archetypes across the pack must be ≤ 15.
 - `rl.room` is closed: `{interior_10x7}` — RL bosses train inside 10×7-tile interior rooms; the
   validator ensures nobody specs a kit whose telegraph shapes cannot fit
-  (V37: no kit skill may have a telegraph or impact `radius_mt > 3500`, line `length_mt > 9000` —
+  (V37: no kit skill may have a telegraph or impact `radius_mt > 3500`, line `length_mt > 10000` —
   half the room's short axis and its long axis respectively **(tunable)**).
 - Squids' only attack pose is `shoot`; V20 therefore forces its kit to ranged skills — the schema
   encodes the audit instead of trusting memory.
@@ -605,9 +735,10 @@ Reference edges, all resolved at pack build (dangling reference = build error):
 ```
 skill ──► icon ──► PNG (+Disabled twin)
 skill ──► fx   ──► sheet PNG (+ frame-count check) ──► snd (optional)
-skill ──► status ──► overlay fx (optional)
+skill ──► status (channel/coating names in payloads resolve to the closed status.* set)
+                 ──► overlay fx (optional)
 skill ──► entity (travel body / persist spawns / release spawn_entity)
-entity ──► fx, snd, status, entity (on_death spawns; V38: spawn-chain depth ≤ 2, no cycles)
+entity ──► fx, snd, status (aura channel/coating), entity (on_death spawns; V38: depth ≤ 2, no cycles)
 boss  ──► skill (kit), capability sheet entry
 ```
 
@@ -633,34 +764,39 @@ Numbered rules (build errors; the packer prints `V<nn>: <doc-id> <json-path>: <m
 | V16 | `loop` only on persist-/render-referenced fx |
 | V17 | every sound file exists |
 | V18 | every icon PNG exists **with** its `Disabled` twin |
-| V19 | every status `decay_per_s ≥ 1` (no permanent marks) |
+| V19 | every channel `decay_per_s ≥ 1`; every coating `default_ticks` finite (no permanent marks) |
 | V20 | boss kit poses ∈ measured capabilities of the sheet |
 | V21 | `rl.trainable` only for shortlisted sheets |
 | V22 | `phase2` only for sheets with `trans` |
-| V23 | material/scale/element/collision/team enums closed |
-| V24 | entity lifetimes absolute; aura `period_ticks ≥ 1` |
+| V23 | material/scale/element/collision/team/curve enums closed (collision = RFC-004's {none, ground, ground_and_shot}) |
+| V24 | entity expiry absolute (u32 world tick); aura `period ≥ 1` |
 | V25 | phase set: cast+release+impact mandatory, channel/travel/persist optional, nothing else |
 | V26 | element ∈ {none, fire, ice, rock, thunder} |
 | V27 | player pose ∈ {attack, ability1, ability2} |
 | V28 | player cost vital ∈ {stamina, mana}, never health |
 | V29 | no `pose` field outside `player` block / boss kit |
-| V30 | damaging skills: `cast.ticks ≥ 3` |
+| V30 | skills with any nonzero impact payload channel: `cast.ticks ≥ 3` |
 | V31 | telegraph shape covers impact shape |
-| V32 | release `count` ∈ 1..8 |
+| V32 | release: `count` ∈ 1..8 on spawn_projectile/spawn_entity; `strike` carries no companion fields |
 | V33 | `travel` ⇔ release kind ∈ {spawn_projectile, from_sky} |
-| V34 | terrain effect ∈ {none, crack, rubble, scorch, wet} |
+| V34 | terrain/scar effect ∈ {none, crack, rubble, scorch, wet} |
 | V35 | no authored `expire` phase |
 | V36 | distinct RL archetypes ≤ 15 |
-| V37 | RL-boss kit shapes fit the 10×7 room (radius ≤ 3500 mt, line ≤ 9000 mt) (tunable) |
+| V37 | RL-boss kit shapes fit the 10×7 room (radius ≤ 3500 mt, line ≤ 10000 mt) (tunable) |
 | V38 | entity spawn-chain depth ≤ 2, acyclic |
 | V39 | every referenced id exists in its domain |
 | V40 | reachability: every fx/snd/status/entity is referenced by something (warning, not error) |
+| V41 | `status.*` set closed: exactly RFC-002's five channels (`cold/heat/shock/earth/stagger`) + one coating (`wet`), six documents; payload `channel`/`coating` names drawn from it |
+| V42 | entity `mass_pm` ∈ 500..1500 (RFC-003 ±50% override bound) |
+| V43 | impact `payload` keys = exactly RFC-003's eight channel names, values 0..1000 |
+| V44 | boss kit: 2 ≤ entries ≤ 4 per phase (RFC-005/RFC-007 slot budget) |
+| V45 | boss `script` present, non-empty, parses against RFC-005's closed condition/action vocabularies |
 
 ### 9. Build pipeline and generated artifacts
 
 ```
 data/combat/**            tools/build_combat_pack.py           assets/_gen/combat_pack.json
-   authored JSON   ──────►  validate (V01..V40)        ──────►  canonical pack
+   authored JSON   ──────►  validate (V01..V45)        ──────►  canonical pack
                             assign ids (ids.lock)               combat_pack.hash.json
                             canonicalize + hash                 src/world/combat_ids.hpp   (generated)
 ```
@@ -707,15 +843,19 @@ Everything this schema can express must survive a chunk ticking at 1 Hz or sleep
    there is deliberately no "timer", "spawner-on-schedule", or wall-clock field in any schema.
    This is the tone guardrail (GAME.md §0) made structural: combat data physically cannot count
    down behind the player's back.
-5. Wire/snapshot shape per live object: `(u16 type, position, spawn_tick, hp[, status buildup])`;
-   the pack hash agreement (§5–§6) is what licenses deriving everything else locally.
+5. Wire/snapshot shape per live object: `(u16 type, position, u32 spawn_tick, hp[, status
+   meters/coating mask])` — `spawn_tick` at the §3 absolute-world-tick width, never u16; the pack
+   hash agreement (§5–§6) is what licenses deriving everything else locally.
 
 ---
 
 ## Worked example 1: Meteor, fully authored
 
 Umbrella §5: `Cast → Levitate → Fall → Impact → Earthquake → Crater/Rubble`, composed per §13 as
-`Rock + Sky + Fall + Explosion`. Four files (plus icon/sound map entries). Every number (tunable).
+`Rock + Sky + Fall + Explosion`. Three files (plus icon/sound map entries). Every number
+(tunable). The impact payload is RFC-003 §10's canonical Meteor, verbatim — the two RFCs must
+agree on the same skill to the last integer. The Crater/Rubble residue is `impact.terrain` only:
+per RFC-004 the scar layer carries the decay ladder and the slow, and scars are never entities.
 
 `data/combat/skills/meteor.skill.json`
 
@@ -752,16 +892,12 @@ Umbrella §5: `Cast → Levitate → Fall → Impact → Earthquake → Crater/R
       "body": {"entity": "entity.meteor_body"}
     },
     "impact": {
-      "damage": 45,
-      "impulse_mt": 3000,
+      "payload": {"damage": 120, "crush": 180, "impulse": 220, "explosion": 200, "heat": 40},
       "shape": {"kind": "circle", "radius_mt": 1800},
-      "statuses": [{"id": "status.muddy", "buildup": 60}],
+      "statuses": [{"channel": "earth", "amount": 600}],
       "fx": "fx.rock_blast",
       "sound": "snd.explosion_heavy",
       "terrain": {"effect": "rubble", "radius_mt": 1200}
-    },
-    "persist": {
-      "spawn": [{"entity": "entity.rubble_patch", "at": "impact", "offset_mt": [0, 0]}]
     }
   }
 }
@@ -778,6 +914,8 @@ a destroyable entity; kill it mid-fall and there is no impact.
   "material": "stone",
   "scale": "medium",
   "hp": 40,
+  "arm_ticks": 6,
+  "hittable_while_arming": true,
   "lifetime_ticks": 6,
   "collision": "none",
   "team": "caster",
@@ -788,29 +926,12 @@ a destroyable entity; kill it mid-fall and there is no impact.
 }
 ```
 
-`data/combat/entities/rubble_patch.entity.json` — the battlefield-control residue (umbrella §4).
-
-```json
-{
-  "schema": 1,
-  "id": "entity.rubble_patch",
-  "material": "stone",
-  "scale": "small",
-  "hp": 60,
-  "lifetime_ticks": 600,
-  "collision": "none",
-  "team": "neutral",
-  "destroyable": true,
-  "tags": ["rock", "rubble", "slow_zone"],
-  "aura": {
-    "radius_mt": 1200,
-    "period_ticks": 5,
-    "statuses": [{"id": "status.muddy", "buildup": 15}]
-  },
-  "render": {"fx": "fx.rubble_idle", "anchor": "ground"},
-  "on_expire": {"fx": "fx.dust_puff"}
-}
-```
+`arm_ticks` spans the whole fall and `hittable_while_arming` opens RFC-004's interception window —
+this is `kFallingRock`'s exact shape (hittable by projectiles while arming; scar on impact via the
+skill's `impact.terrain`, nothing if intercepted). There is **no** rubble entity: the rubble left
+behind is the `impact.terrain` scar, which RFC-004's scar layer decays stepwise
+(`kRubble → kCracked → kNone`) and which slows through the scar speed multiplier — a crater is
+something you wade through, not a thing with hit points.
 
 `data/combat/fx/rock_fall_hot.fx.json` — zero new art: the pack's 14-frame Rock strip, hot tint.
 
@@ -833,14 +954,20 @@ engine gap by construction.
 
 Tick timeline (10 Hz), for convergence checking: player presses ability2 at tick T. Cast T..T+7
 (telegraph ring visible from T). Release at T+8 spawns `entity.meteor_body` above the target tile;
-travel T+8..T+13. If the body survives, impact resolves at T+14: 45 damage base (RFC-009 applies
-resistance/material), impulse 3000 mt (RFC-003 divides by mass), Muddy build-up 60 in the circle,
-rubble terrain effect (RFC-003), and `entity.rubble_patch` spawns with absolute expiry T+14+600.
+travel T+8..T+13. If the body survives, impact resolves at T+14 with the payload
+`{damage 120, crush 180, impulse 220, explosion 200, heat 40}`: RFC-003 expands `explosion`,
+resolves material matrices, and computes knockback as `impulse / mass`; RFC-009 applies
+resistance and build-up math; the Earth build-up (600, lands Mired ≈ P2's Muddy slow) hits everyone in the circle; and the rubble
+scar is stamped on the tiles (RFC-004 scar layer — it decays and slows on its own, no entity).
 Skill instance expires; nothing else remembers it.
 
 ## Worked example 2: Spike, fully authored
 
 Umbrella §13: `Rock + Ground + Rise + Root = Spike`; umbrella §3: "Spike: Root + Destroyable".
+The reconciled v1 set (§7.4, RECONCILIATION.md ruling 1) makes **Root** representable as the Earth
+terminal, so Spike authors Rock's control identity directly: `earth` build-up (climbing
+Encumbered → Mired → Root) plus a small `stagger` rider from the physical hit. This is the payload
+the earlier "Muddy coating + Stun" workaround anticipated.
 
 `data/combat/skills/spike.skill.json`
 
@@ -872,10 +999,9 @@ Umbrella §13: `Rock + Ground + Rise + Root = Spike`; umbrella §3: "Spike: Root
     },
     "release": {"kind": "spawn_entity", "count": 1, "entity": "entity.rock_spike"},
     "impact": {
-      "damage": 12,
-      "impulse_mt": 0,
+      "payload": {"pierce": 100, "crush": 60},
       "shape": {"kind": "tile"},
-      "statuses": [{"id": "status.rooted", "buildup": 70}],
+      "statuses": [{"channel": "earth", "amount": 600}, {"channel": "stagger", "amount": 40}],
       "fx": "fx.rock_spike_rise",
       "sound": "snd.rock_break"
     }
@@ -892,21 +1018,28 @@ Umbrella §13: `Rock + Ground + Rise + Root = Spike`; umbrella §3: "Spike: Root
   "material": "stone",
   "scale": "small",
   "hp": 30,
-  "lifetime_ticks": 300,
-  "collision": "blocks_ground",
+  "arm_ticks": 8,
+  "lifetime_ticks": 200,
+  "collision": "ground",
   "team": "caster",
   "destroyable": true,
-  "tags": ["rock", "obstacle", "root_source"],
+  "tags": ["rock", "obstacle", "control_source"],
   "aura": {
-    "radius_mt": 600,
-    "period_ticks": 5,
-    "statuses": [{"id": "status.rooted", "buildup": 40}]
+    "channel": "earth",
+    "radius": 600,
+    "gain": 6,
+    "period": 5,
+    "team_mask": "enemies"
   },
   "render": {"fx": "fx.rock_spike_idle", "anchor": "ground"},
-  "on_death": {"fx": "fx.rock_break", "sound": "snd.rock_break"},
-  "on_expire": {"fx": "fx.rock_crumble"}
+  "on_death": {"fx": "fx.rock_break", "sound": "snd.rock_break", "scar": "crack"},
+  "on_expire": {"fx": "fx.rock_crumble", "scar": "crack"}
 }
 ```
+
+The shape mirrors RFC-004's `kRockSpike` row (Ground collision, arm 8, life 200, cracked scar on
+death); the aura is one RFC-002 `AuraSpec` with verbatim field names, feeding Earth build-up (6 per
+pulse — a slow mire) to enemies who stand next to it.
 
 `data/combat/fx/rock_spike_rise.fx.json` — the pack's dedicated RockSpike strip, untinted.
 
@@ -935,23 +1068,28 @@ pose is referenced anywhere, because none exists to reference.
 | RFC | Relationship |
 |---|---|
 | **RFC-001** (Ability System) | Executes the phase machine of §7.6: interrupt/refund rules, channel curves, cooldown enforcement. RFC-008 fixes the serialized shape and structural invariants (V25, V30–V33); RFC-001 fixes what each field *does* per tick. |
-| **RFC-002** (Status & Effect) | Consumes `status.*` documents (§7.4). Build-up ladders, replacement-vs-stacking (`stacks_with`), and the freeze ladder are RFC-002 semantics over RFC-008 fields. |
-| **RFC-003** (Physics & Material) | Consumes `impulse_mt`, `material`, `terrain.effect`. The impulse/mass formula and material interaction rules are RFC-003's; this schema only guarantees the closed enums (V23, V34). |
-| **RFC-004** (Terrain & Combat Entity) | Consumes `entity.*` documents (§7.5), including the travel-body counterplay and the replication 5-tuple. |
-| **RFC-005** (Boss Ability Authoring) | Authors against `boss.*` (§7.7). The pose-capability table and the RL-shortlist gate (V20–V22) are the mechanical rails RFC-005's process runs on. |
+| **RFC-002** (Status & Effect) | Consumes `status.*` documents (§7.4) — the closed channel/coating set, serialized with RFC-002's payload field names verbatim (`channel`, `amount`, `radius`, `gain`, `period`, `team_mask`), as its Interactions section mandates of this RFC. Build-up ladders and the freeze ladder are RFC-002 semantics over RFC-008 fields. |
+| **RFC-003** (Physics & Material) | Consumes the eight-channel `impact.payload` (V43 — skill files carry the eight channel numbers), `material`, `mass_pm` (archetype mass override, V42), `terrain.effect`. Channel resolution and the impulse/mass formula are RFC-003's; this schema only guarantees the closed enums and ranges (V23, V34, V43). |
+| **RFC-004** (Terrain & Combat Entity) | Consumes `entity.*` documents (§7.5) — the serialized `EntityDef`, field for field — including the travel-body counterplay, arming/interception, vision blocking, death scars, and the replication 5-tuple. The scar-never-entity rule is honored structurally (§7.6 persist). |
+| **RFC-005** (Boss Ability Authoring) | Authors against `boss.*` (§7.7), including the mandatory generation-0 `script` (V45) and the 2–4 kit bound (V44). The pose-capability table and the RL-shortlist gate (V20–V22) are the mechanical rails RFC-005's process runs on. |
 | **RFC-006** (Visual FX & Telegraph Standards) | Owns what a telegraph must look like (readability, color language, tint conventions); RFC-008 owns the `fx.*` container it standardizes into, and V30/V31 make its "always telegraphed, honestly telegraphed" rules non-optional. |
-| **RFC-007** (RL Observation & Action) | Reads the boss kit's ordered `kit` list as the discrete action space and pack `u16` ids in observations. Id stability (§4) and the hash regime (§5) are what keep checkpoints valid; see RL Considerations. |
-| **RFC-009** (Damage, Resistance, Build-up) | Starts from `impact.damage`, `statuses[].buildup`, `material`, `scale`. All multipliers/curves are RFC-009's; if RFC-009 needs a new per-skill knob, it lands as a minor-version optional field here. |
+| **RFC-007** (RL Observation & Action) | Binds the boss kit's ordered `kit` list into its 4 fixed ability slots inside the fixed 15-action space. Observations are RFC-007's and are **identity-free** — no pack id ever appears in an obs; entities surface as behavior-class + element one-hots. Id stability (§4) and the hash regime (§5) keep checkpoint↔slot bindings valid; see RL Considerations. |
+| **RFC-009** (Damage, Resistance, Build-up) | Starts from the effective `impact.payload` channels (post-RFC-003), `statuses[].amount`, `material`, `scale`. All multipliers/curves are RFC-009's; if RFC-009 needs a new per-skill knob, it lands as a minor-version optional field here. |
 | **RFC-010** (Battlefield Simulation) | Relies on §11: absolute lifetimes, closed-form decay, best-effort auras — the properties that let battlefield state tick at 1 Hz or sleep. |
 
 ---
 
 ## RL Considerations
 
-- **Action-space stability.** A boss archetype's action space is its kit list plus movement
-  primitives (RFC-007). Kit entries reference skills by `u16`; because ids are append-only (V09),
-  adding content never renumbers an existing action. Reordering or resizing a kit changes
-  `struct_hash`.
+- **Action-space stability.** The action space is **fixed at 15 actions** (RFC-007
+  `kActionCount = 15`, chosen so RLDrive's vendored DQN core runs unmodified): movement/hold
+  primitives plus 4 fixed ability slots. A kit's 2–4 entries (V44) bind into slots 0–3 in array
+  order; a 2-ability boss has two dead slots, safely coerced to Hold. The action space is never
+  kit-*sized*, only kit-*bound*. Kit entries reference skills by `u16`; because ids are
+  append-only (V09), adding content never renumbers an existing binding. Reordering or resizing a
+  kit changes `struct_hash`. Observations never carry these ids — RFC-007's obs is identity-free
+  by design (that *is* the "RL learns patterns, not individual bosses" mechanism); id stability
+  matters to RL only through slot binding and checkpoint hashes.
 - **Checkpoint binding.** Every `NetworkCheckpoint` JSON gains two fields:
   `"pack_struct_hash"` and `"pack_full_hash"`. The `TrainingActor` rules:
   - struct mismatch → checkpoint is *incompatible*; do not resume; fall back to the scripted
@@ -964,8 +1102,10 @@ pose is referenced anywhere, because none exists to reference.
   identical on every node — no float drift in the things a policy conditions on, matching the
   integer-obs stance already taken in `BossObs`.
 - **Budget rails in data.** V36 caps archetypes at 15 (one policy per archetype, GAME.md §10);
-  V37 keeps every trainable kit physically inside the 10×7 interior room. Both are enforced at
-  build time, before a single training step is spent on an impossible spec.
+  V44 caps kits at the 4-slot action budget so the DQN action-count overflow is unreachable from
+  data; V45 guarantees a scripted generation-0 fallback always exists; V37 keeps every trainable
+  kit physically inside the 10×7 interior room. All are enforced at build time, before a single
+  training step is spent on an impossible spec.
 
 ---
 
@@ -981,7 +1121,7 @@ pose is referenced anywhere, because none exists to reference.
 | 121 skill icons at 24 px with Disabled twins | §7.3 + V18: disabled state resolved by convention, verified at build |
 | `kEffectLife=6` truncation (Rock = 14 frames) | §7.1: lifetime derived from fx `frames × ticks_per_frame`, cap 255 (V15); per-kind life becomes pack data |
 | No bespoke combo art; Magic/* FX and spinning projectiles unpacked | §7.1 tint reuse for variants; §9: atlas manifest driven by referenced fx documents — sheets get packed when referenced |
-| RL: DQN from RLDrive, JSON checkpoints, one policy per archetype (10–15), 10×7 rooms, visible dojos | RL Considerations; V36, V37; checkpoint hash binding matches RLDrive's JSON checkpoint format |
+| RL: DQN from RLDrive, JSON checkpoints, one policy per archetype (10–15), 10×7 rooms, visible dojos | RL Considerations; V36, V37, V44 (fixed 15-action/4-slot budget), V45; checkpoint hash binding matches RLDrive's JSON checkpoint format |
 | 1024×1024 world, chunks at 1 Hz or asleep | §11 LOD contract: absolute lifetimes, closed-form decay, best-effort auras (V24) |
 | Server-authoritative, first-node leader, cheap replicable state | §5–§6 hash agreement at join; §7.5 five-field wire shape; leader refuses mismatched packs |
 
@@ -1013,6 +1153,12 @@ pose is referenced anywhere, because none exists to reference.
 6. **How much of `channel` ships in v1?** The schema reserves the block (§7.6); no v1 skill uses
    it yet. Shipping the field unused risks bit-rot; cutting it means a minor bump later. Lean:
    reserve but mark "no v1 consumer" in the schema docs, and let RFC-001 decide.
+7. **Channel-set reconciliation (blocking for "Root").** *Resolved — RECONCILIATION.md ruling 1.*
+   The canonical set is `cold/heat/shock/earth/stagger` + the `wet` coating: the four element books
+   (Ice/Fire/Thunder/**Rock**) each drive a ladder, Poison is deferred (no v1 source), and Muddy
+   folds into the Earth ladder (Mired). **Root is representable** as the Earth terminal, so §7.4 and
+   Worked Example 2 now author `earth` build-up directly. RFC-008 serializes this set in v1
+   (`struct_hash` reflects the six-document closed set).
 
 ---
 
@@ -1036,3 +1182,27 @@ pose is referenced anywhere, because none exists to reference.
   state is the five-field replication shape in §7.5.
 - **Player-authored loadout storage.** Which two abilities a player equips is player progression
   data (leader SQLite), not pack data.
+
+---
+
+## Review Record
+
+Votes: Reviewer-Opus — **revise**; Reviewer-Sonnet — **revise**. All ten converged mustFix items applied.
+
+Applied:
+- §7.4 rewritten: closed RFC-002 channel/coating set, verbatim payload names (`channel, amount, radius, gain, period, team_mask`); Muddy is a binary coating; `status.rooted` removed (V41).
+- §7.6 impact now carries RFC-003's eight-channel `payload` in points; `impulse_mt` (wrong quantity) deleted; Meteor matches RFC-003 §10's canonical numbers (V43).
+- §7.5 aligned to RFC-004 `EntityDef` field for field: 3-value collision enum, `blocks_vision`, `arm_ticks`, `hittable_while_arming`, single `AuraSpec` aura with `team_mask`, `mass_pm` override (V42), death/expire scars.
+- Meteor's `entity.rubble_patch` deleted; rubble is `impact.terrain` scar only — scars are never entities (RFC-004); persist section now forbids scar-as-entity.
+- §7.7 gains mandatory generation-0 `script` (V45); per-entry `weight` removed; kit bounded 2–4 (V44).
+- RL contract corrected: fixed 15-action/4-slot space; observations identity-free per RFC-007 — no pack ids in obs (§4, Interactions, RL Considerations).
+- Absolute world tick pinned to u32 (§3), distinct from u16 authored durations; `spawn_tick` wire width stated (§7.5, §11.5).
+- `release.kind` fully specified: `strike` defined; `volley`/`zone` cut as redundant (V32/V33).
+- Numbering note added: earlier exploratory drafts that once collided with the RFC-001/RFC-010 numbering are removed and not referenced.
+- Minors folded in: V37 line bound 9000→10000; `curve` closed enum (V23); `decay_per_s` tick basis clarified; V20 pose→capability-row mapping stated.
+
+Unresolved: none. (The former RFC-002 vs RFC-009 channel-set divergence, tracked as Open Question 7, is now resolved by the series editor — see Reconciliation below.)
+
+Reconciliation: §7.4 channel/coating enums re-keyed to the canonical set `cold/heat/shock/earth/stagger` + the single `wet` coating (V41 = six documents); the Muddy coating folds into the Earth ladder (Mired), so its coating doc, payloads, and the rock-spike/meteor examples now author `earth` build-up; `Root` is representable as the Earth terminal (Worked Example 2 and Open Question 7 updated); build-up `amount` reaffirmed absolute on the shared [0,1000] scale with no `buildup_max`/rescale — per RECONCILIATION.md rulings 1 and 5. Numbering-note dangling filenames removed per RECONCILIATION.md ruling 6. §7.5's `EntityDef` aura
+prose re-keyed from RFC-004's retired `aura_status` field name to its mapped `aura_channel`/
+`aura_coating`/`aura_gain` fields per RECONCILIATION.md ruling 8.

@@ -330,27 +330,26 @@ challenge realm), the player chooses to open the door, the boss never exits its 
 
 ### R5. The behavior seam: script and policy over one action space
 
-#### Action space (declared, then frozen)
+#### Action space (fixed and shared — never generated)
 
-Per archetype, the discrete action enumeration is generated *from the kit* and written into the
-compiled table:
+The action space is **RFC-007 §3's fixed 15-action table, verbatim and unmodified**: Hold,
+Step N/E/S/W, Approach, Retreat, Cast slot 0–3 × {Direct, Lead}. `kActionCount = 15`, exactly,
+for every archetype. Nothing about it is generated from the kit; what a kit contributes is only
+its **slot bindings** — `abilities` in kit order occupy Cast slots 0–3 (hence the ≤ 4 cap, §R2).
+Directional poses need no extra actions: facing is derived from `sign(dx)` at commit (RFC-007 §3).
 
-```
-actions = [ Hold, Approach, Reposition ]                       // 3 fixed motions
-         + for each slot s in kit order:
-               directional(s) ? [ UseL(s), UseR(s) ] : [ Use(s) ]
-```
-
-- `Reposition`: move perpendicular to the target bearing, clamped to the room — the action a
-  ranged kit (Squid) needs so "kite the corner" is learnable; melee kits keep it too (uniform
-  motion vocabulary across archetypes).
-- Bound: `3 + 2×4 = 11` actions worst-case — safely under the DQN's hard-coded 15
-  (`DqnAgent.cpp:25` pitfall, ARCHITECTURE.md §7) but the validator still checks
-  `action_count == checkpoint output_size` at load, because that segfault is real and measured.
-- **Masking rule (sim-side, unconditional):** any action referencing a slot that is on cooldown,
-  not in the current phase's `slots`, or below the current tier's slot count, **resolves to
-  `Hold`**. The sim is thereby safe against *any* policy output, scripted or learned; making the
-  mask visible to the learner is RFC-007's business.
+- **Why fixed, not "as many as the kit needs":** the vendored DQN sampler hard-codes
+  `kActionCount = 15` (`DqnAgent.cpp:25`); an action space *smaller* than 15 makes epsilon-greedy
+  emit out-of-range indices that `TrainBatch` writes unchecked — an ASan-confirmed
+  heap-buffer-overflow (ARCHITECTURE.md §7). A per-kit enumeration would be exactly that crash.
+  Pinning the table at 15 makes the segfault class structurally unreachable, and the vendored
+  core runs unmodified.
+- **Unused indices are total:** Cast actions for absent slots coerce to `Hold` (RFC-007 §3
+  execution rule 2), so every archetype executes all 15 indices safely.
+- **Masking rule (sim-side, unconditional):** any Cast action referencing a slot that is absent,
+  on cooldown, not in the current phase's `slots`, or below the current tier's slot count,
+  **resolves to `Hold`**. The sim is thereby safe against *any* policy output, scripted or
+  learned; making the mask visible to the learner is RFC-007's business.
 
 Decision cadence: the brain is consulted every `kDecisionPeriod = 3` ticks (tunable; matches the
 beacon cadence) and never while committed to a wind-up, dash, or Trans — a committed telegraph is
@@ -364,8 +363,11 @@ seam (obs in, action out) is untouched.
 
 Condition vocabulary (closed, validator-checked): `winding_up`, `dist > N`, `dist <= N`,
 `cd_ready(slot)`, `hp_below(frac)`, `phase_is(n)`, `adds_alive < n`, conjunction with `&&`.
-Action vocabulary: `hold`, `approach`, `reposition`, `use <slot>` (facing auto-resolved from
-target side for directional slots — exactly how the shipped script picks AttackLeft/Right).
+Action vocabulary: `hold`, `approach`, `retreat`, `step <n|e|s|w>`, `use <slot>` — each verb is
+one entry of RFC-007 §3's fixed table (`use` emits Cast-Direct; facing auto-resolved from target
+side for directional slots — exactly how the shipped script picks AttackLeft/Right). `dist` and
+target side are measured against the **primary target: the nearest engaged player** (RFC-007 §2,
+Block T) — multi-player target selection is RFC-007's, not re-specified here.
 
 The shipped Samurai brain, transliterated (this is the normative example — it must reproduce
 `boss_policy` in `boss.hpp` decision-for-decision):
@@ -439,13 +441,13 @@ the table). Checks, each with the constraint it defends:
 | # | Check | Defends |
 |---|---|---|
 | 1 | `sheet` exists and is on the §R1 shortlist; hard-excluded sheets rejected by name | asset audit |
-| 2 | every `pose` reference exists in the **measured** pose manifest; `directional: true` requires both L and R rows | walk-only/pose reality |
+| 2 | every `pose` reference exists in the **measured** pose manifest; `directional: true` requires both L and R rows, `directional: false` requires the plain (non-directional) row | walk-only/pose reality |
 | 3 | pose-capable sheet + strike ability ⇒ pose-bound telegraph (rule R3.1); ≤ 1 overlay-only strike ability | readability |
 | 4 | every `fx` name is a packed `EffectKind`; every declared FX phase ≤ `effect_life_of(kind)`; every `sfx` is a packed sound | the `kEffectLife` class of bug |
-| 5 | telegraph `class` is registered in RFC-006's registry | RFC boundary |
-| 6 | wind-up floor formula (§R4) per ability; tier table never scales wind-up/active/dash-speed; dash speed ≤ 9.0 | tone guardrail: readable at every tier |
-| 7 | every `shape` fits the declared room: radius/length ≤ 8 tiles (tunable), ring hole sane, dash clamp assumed | 10×7 room |
-| 8 | `2 ≤ slots ≤ 4`; enumerated `action_count ≤ 15` and recorded; equals gen-0 checkpoint `output_size` when one is present | DQN hard-cap pitfall |
+| 5 | telegraph `tier` ∈ 0–3; `windup ≥` RFC-006 §1.3's tier minimum; the tier's required cues are satisfiable (tier 3 ⇒ pose swap bound where the sheet has one); declared tier cross-checked against the RFC-009-resolved `damage_key` (warning-only until RFC-009 lands, then error — same ratchet as #14) | RFC-006 §1.3 delegation; readable at every damage level |
+| 6 | wind-up floor formula (§R4, including the tier minimum) per ability; tier table never scales wind-up/active/dash-speed; phase `modifiers` keys ∈ {`cooldown_scale`, `approach_speed_scale`} only; dash speed ≤ 9.0 | tone guardrail: readable at every tier and every phase |
+| 7 | every `shape` fits the declared room: radius/length ≤ ⌊min(room.w, room.h)/2⌋ + 1 (room-derived, not a flat constant — 4 tiles for the 10×7 room), ring hole sane, dash clamp assumed; corner check: from every floor tile, some point ≥ `escape_distance` outside the shape is reachable within the room | 10×7 room; no cornered-and-undodgeable hits |
+| 8 | `2 ≤ slots ≤ 4` bound onto RFC-007's Cast slots 0–3; `action_count == 15` always (never fewer — fewer is the segfault); gen-0 checkpoint `output_size == 15` when one is present | DQN hard-cap pitfall |
 | 9 | `cooldown > active + recover` per ability; `phases[].hp_above` strictly decreasing; 2 phases ⇒ Trans row exists | FSM sanity |
 | 10 | `summon.monster_kind` is a real walk-only monster; `count ≤ 4`; adds have no abilities | overlay-telegraph rule |
 | 11 | `element ∈ {Fire, Ice, Rock, Thunder, None}` | 4-element scope |
@@ -483,13 +485,17 @@ the table). Checks, each with the constraint it defends:
 - **RFC-003 (Physics & Material):** `material` and knockback/impulse behavior of dash contact.
 - **RFC-004 (Terrain & Combat Entity):** zones, spikes, walls a kit's `zone`/`persist` effects
   spawn are CombatEntities per RFC-004; the kit only names the entity kind.
-- **RFC-006 (Visual FX & Telegraph Standards):** owns the telegraph class registry, decal art
-  standards, elite tint, and how a >14-tick telegraph is drawn (loop vs dedicated channel). This
-  RFC owns only *which* class an ability must declare and the duration contract (window = windup).
+- **RFC-006 (Visual FX & Telegraph Standards):** owns the telegraph model this RFC declares
+  against — `TelegraphShape`, the §1.3 danger-tier table and its per-tier required cues, decal
+  art standards, elite tint, and how a >14-tick telegraph is drawn (loop vs dedicated channel).
+  This RFC owns only *which* tier/anchor an ability declares, the `shape.kind`→`TelegraphShape`
+  mapping, the duration contract (window = windup), and enforcing §1.3's floor in its validator
+  (the delegation RFC-006 §1.3 states explicitly).
 - **RFC-007 (RL Observation & Action Space):** owns `BossObs` extensions (phase bit, slot
-  cooldowns, add count), reward shaping, training loop, checkpoint gating and the `kActionCount`
-  fix. This RFC hands it a per-archetype declared action enumeration and a mandatory scripted
-  baseline.
+  cooldowns, add count), reward shaping, training loop, checkpoint gating, primary-target
+  selection, and the fixed 15-action table plus the `kActionCount` fix. This RFC hands it only
+  the per-kit slot bindings (≤ 4 slots onto Cast 0–3) and a mandatory scripted baseline — never
+  an action enumeration of its own.
 - **RFC-008 (Data-driven Skill Definition):** owns the file format, loading/codegen strategy, and
   schema-versioning; this RFC's §R2 is a schema *in* that format.
 - **RFC-009 (Damage, Resistance & Build-up):** owns every damage number behind `damage_key`, the
@@ -508,9 +514,9 @@ the table). Checks, each with the constraint it defends:
 3. **Action masking degrades to Hold** deterministically (§R5), so an off-policy or stale
    checkpoint can never crash or cheat the sim — at worst the boss hesitates, which reads as
    natural.
-4. **Two-phase = one policy.** Phase is an observation bit, the action space is the union of both
-   phases' slots, and phase-locked actions mask to Hold. Two networks per boss would double the
-   training budget for one sheet's worth of content.
+4. **Two-phase = one policy.** Phase is an observation bit, the action table stays the fixed 15
+   (all phases' slots bound onto Cast 0–3), and phase-locked Cast actions mask to Hold. Two
+   networks per boss would double the training budget for one sheet's worth of content.
 5. **Gen-0 must not be stupid** (ARCHITECTURE.md §7): the mandatory script *is* the pre-training
    opponent and the shipped fallback; the committed generation-0 checkpoint must beat or match the
    script before it replaces it (gate specifics in RFC-007).
@@ -535,7 +541,7 @@ the table). Checks, each with the constraint it defends:
 | 121 skill icons with Disabled twins | Not consumed by this RFC (boss kits have no player-facing icons); noted so no reviewer looks for it |
 | `kEffectLife=6` truncation | Already fixed in-tree as per-kind `effect_life_of()` (tiles.hpp); this RFC designs around the *class* of bug: validator #4 checks every FX phase against the per-kind life, and >14-tick telegraphs are contracted to RFC-006 (§R3.4) instead of abusing the effect channel |
 | No bespoke combo art; Magic/* FX and spinning projectiles not packed | validator #4 makes unpacked FX a build error, not a runtime surprise; kits wanting them (e.g. a blade-wave projectile) are authoring-blocked until the packing task lands |
-| RL: DQN from RLDrive, one policy per archetype, 10–15 total; dojos visible; boss rooms 10×7 interior | §R5 action budget under the hard-coded 15 (validator #8); §R1 archetype sharing; `room` field + range checks (validator #7); dojo/room plumbing already shipped (worldgen `dojo_rooms`) |
+| RL: DQN from RLDrive, one policy per archetype, 10–15 total; dojos visible; boss rooms 10×7 interior | §R5 adopts RFC-007's fixed 15-action table verbatim — `action_count == 15` always, making the <15 segfault unreachable (validator #8); §R1 archetype sharing under RFC-007's `boss.*` ids; `room` field + room-derived range checks (validator #7); dojo/room plumbing already shipped (worldgen `dojo_rooms`) |
 | 1024² world, LOD to 1 Hz/sleep | §R8: relative-tick timers, world-tick respawn on wake (crop pattern) |
 | Server-authoritative, first-node leader, cheap replication | §R8: ≤ 9 bytes of extra replicated state; kits are node-local static data |
 
@@ -545,7 +551,7 @@ the table). Checks, each with the constraint it defends:
    compromise; is a *short* full-immunity window (≤ trans.ticks ≤ 16) acceptable to the umbrella's
    §9 philosophy, or should even 0.5 be 1.0 with the transition simply being short? Needs a
    playtest, not an argument.
-2. **Ranged boss in a 10×7 room.** Squid's kit (Shoot + Reposition) may degenerate — either the
+2. **Ranged boss in a 10×7 room.** Squid's kit (Shoot + Retreat/Step kiting) may degenerate — either the
    player corners it trivially or the room is too small for range to matter. Options if so: a
    bigger room variant for ranged archetypes (12×9, worldgen change), or an ink `zone` ability
    that makes cornering costly. Decide after the first Squid kit playtest.
@@ -567,7 +573,7 @@ the table). Checks, each with the constraint it defends:
 
 - **Player abilities, loadouts, or the ability pipeline itself** — RFC-001.
 - **Telegraph/FX pixel standards, decal art, tint recipes** — RFC-006; this RFC only declares
-  classes and windows.
+  tiers, anchors, and windows.
 - **Damage formulas, resistances, build-up curves** — RFC-009; kits carry keys, never numbers.
 - **DQN internals, reward design, training schedules, checkpoint format** — RFC-007.
 - **The kit file format, loading vs codegen, schema versioning** — RFC-008.
@@ -578,3 +584,19 @@ the table). Checks, each with the constraint it defends:
 - **Elements beyond Fire/Ice/Rock/Thunder** — Plant/Water/Light/Darkness/Wind/Death exist as
   icons only and may appear in future-work notes only.
 - **Loot tables, Essence rewards, dungeon economy** — P4/P8 roadmap items, not authoring.
+
+## Review Record
+
+Votes: Reviewer-Opus **revise** (8 mustFix) · Reviewer-Sonnet **revise** (8 mustFix) — the same eight underlying issues; all verified against source and applied.
+
+- §R5 + validator #8: per-kit action enumeration replaced with RFC-007 §3's fixed 15-action table; `action_count == 15` always — fewer than 15 is the ASan-confirmed DQN sampler overflow (ARCHITECTURE.md §7).
+- §R2/§R3 + validator #5: nonexistent "telegraph class registry" replaced with RFC-006's real model — declared danger `tier` + anchor, required cues per §1.3, drawn shape derived via a new `shape.kind`→`TelegraphShape` mapping.
+- §R4 + validators #5/#6: RFC-006 §1.3's damage-tier wind-up floor threaded into the floor formula (`tier_min_windup`), with the declared tier ratchet-checked against RFC-009-resolved damage.
+- §R4: `kPlayerBaseSpeed` corrected to 6.0 (`kPlayerSpeed`, tiles.hpp:1089 — 3.5 was the Boar stat); both worked checks recomputed; dash `body_half_width` sourced from RFC-003's body table.
+- §R1/§R2 + validator #2: PoseCap gains non-directional `Attack`/`Charge`; manifest-recording and family-binding rules stated for the four plain-Attack sheets.
+- §R2 + validator #6: phase `modifiers` restricted to closed whitelist {`cooldown_scale`, `approach_speed_scale`} — no phase can dip below the readability floor.
+- §R1/§R2: archetype ids adopt RFC-007 §4's `boss.*` policy-id namespace verbatim.
+- Validator #7: flat 8-tile shape cap replaced with room-derived cap (⌊min(w,h)/2⌋+1) plus a corner-escape reachability check.
+- Minor (conceded by both): Summary pointer §R6→§R2 with active-phase generalization note; cooldown-vs-FSM timing comment; script verbs now map 1:1 onto RFC-007's table; primary-target selection cross-referenced to RFC-007 §2.
+
+Unresolved objections: none — every mustFix upheld by either reviewer was verified sound and applied; the two downgraded findings (multi-player targeting, cooldown formula) were resolved as the minor cross-reference fixes both reviewers settled on.
