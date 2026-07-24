@@ -650,11 +650,11 @@ plumbing is already there.
    "mất đồ mang theo" literally (all of it) — flagged in case playtesting finds a full wipe too harsh
    for a long resource-gathering trip that happened to end at a dungeon mouth.
 
-2. **Equipped-gear exemption, once equipment exists.** No "worn, not carried" concept exists in `src/`
-   today, so §3.6.5's rule is total-inventory by necessity, not by choice. When an equipment/durability
-   system eventually ships (unowned by any RFC today — see Non-goals), this RFC's ejection rule will
-   need revisiting to exempt worn gear the same way it already exempts XP — flagged now so that future
-   RFC does not have to rediscover the boundary.
+2. **Equipped-gear exemption — closed.** RFC-018 §4 shipped the equipment/durability system this
+   question anticipated and added a new `equipped_[]` array entirely outside the `items_[]` loop
+   §6.5's ruling zeroes; RECONCILIATION.md Ruling 17 confirms RFC-018's own stated position as canon —
+   `equipped_[]` is exempt from ejection's wipe, the same "worn, not carried" logic this RFC already
+   applies to XP. No change to §6.5's code or ruling text was needed; only this question closes.
 
 3. **Recoverable corpse vs. destruction (§3.6.7).** Decided against for v1 (destroyed, not recoverable)
    on simplicity grounds; flagged as reconsiderable if a softer "your bag waits at the entrance"

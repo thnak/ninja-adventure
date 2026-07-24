@@ -686,3 +686,135 @@ RFC-013/014/015/016 from "Proposed future RFCs" to their own finalized-set secti
 
 No RFC file required an edit — all four candidate contradictions checked out as already consistent or
 already self-reconciled within the RFCs' own text.
+
+---
+
+# Pass 5 — HUD, audio, balance & recovery set (post-finalization check, 2026-07-24)
+
+> Scope: RFC-011 (Combat HUD, Input & Cooldown UI), RFC-012 (Combat Audio & Sound Cue Standards),
+> RFC-017 (Balance Tuning & Test Harness), RFC-018 (Loot, Essence & Reward Tables), and RFC-024
+> (Leader Failure & Session Recovery — the first RFC filed outside the original reserved 001–023
+> numbering) — checked against each other and against the already-accepted set for genuine content
+> contradictions. Two of the four directed checks turned up nothing; the other two turned up a real
+> gap each, both already self-flagged by the RFC that found them rather than hidden.
+
+**Checked, no conflict found:**
+
+1. **RFC-011's HUD data needs against what RFC-015 actually replicates.** RFC-011 was drafted, then
+   corrected against the frozen `PublishedCreature`/`PublishedPlayerSelf` structs rather than the
+   wider byte budget RFC-002 originally sketched: its own §4 answers RFC-002 Open Question 4 "within
+   the actually replicated budget" (one `status` byte, not the two RFC-002's design assumed), and it
+   opens a new **Open Question 3** of its own naming the RFC-002-vs-RFC-015 discrepancy explicitly as
+   a follow-up for whoever next revises RFC-015's wire shape — not a silent mismatch. Every other
+   field RFC-011 reads (`hp`/`max_hp`/`kind`/`windup`/`boss_pose` for the boss bar; the existing
+   `status` byte for pips) is a field `PublishedCreature` (RFC-015 §2.2) already carries. No edit
+   required — RFC-011 already reconciled itself against RFC-015's real shape before finalizing.
+
+2. **RFC-017's proposed balance-conflict resolution procedure against how RECONCILIATION.md itself
+   already operates.** RFC-017 §5 names "the existing informal role that already produced
+   RECONCILIATION.md's sixteen rulings across four numbered passes" as the decision-maker, quotes
+   this file's own three-criterion preamble verbatim as the evidence standard, states plainly it
+   "does not replace the dual-model batch-review process" and "no relitigating Ruling 4 or any
+   existing RECONCILIATION.md entry," and extends (never replaces) "the ledger's existing
+   numbered-ruling format." Its two dual-model-debate carve-outs (a published Gate-passed RL
+   checkpoint's dependency, or Gate B's 0.80 ceiling itself) add a threshold this file's rulings never
+   needed before but do not contradict anything already on record. No edit required.
+
+**Checked, genuine gap found — ruled below:**
+
+3. Equipped-gear ejection exemption — RFC-013 vs. RFC-018 (Ruling 17).
+4. The ≤30s post-incident disclosure vs. RFC-016's "never a player-facing number" rule — RFC-016 vs.
+   RFC-024 (Ruling 18, closing RFC-024's own Open Question 8).
+
+---
+
+## Ruling 17 — equipped gear (`equipped_[]`) is exempt from RFC-013's ejection wipe, closing RFC-013 Open Question 2
+
+**Conflict.** RFC-013 §6.5 rules ejection "clears `items_[]` to zero, in full," reading GAME.md §3's
+"mất đồ mang theo" literally, and its own Open Question 2 flagged — before any equipment system
+existed — that "when an equipment/durability system eventually ships... this RFC's ejection rule will
+need revisiting to exempt worn gear the same way it already exempts XP." RFC-018 is that system: it
+adds a new `equipped_[EquipSlot::kCount]` array (§4) alongside `items_[]`, entirely outside the loop
+RFC-013 §6.5's code block zeroes, and states its own position in its Interactions table ("equipped
+gear is explicitly not cleared by ejection") while explicitly declining to close RFC-013's open
+question itself — deferring that to "RFC-013's editor." Left unruled, the two documents point at each
+other without either committing: `equipped_[]` would be ejection-wiped by neither an explicit rule nor
+an explicit exemption, an accidental gap rather than a decision.
+
+**Ruling.** `equipped_[]` is exempt from ejection's wipe, matching RFC-018's own stated position and
+closing RFC-013 Open Question 2 with that answer. `items_[]` continues to clear in full on ejection,
+unmodified — RFC-013 §6.5's code and ruling text needed no change, since `equipped_[]` was never
+inside the loop it describes; only the open question needed closing.
+
+**Rationale (evidence).**
+- *Internal soundness — the boundary RFC-013 itself drew.* RFC-013 already exempts XP/skill levels
+  from ejection on a "worn, not carried" logic (progression is not a bag item); worn *gear* is the
+  same category by the same logic RFC-013's own Open Question 2 anticipated, not a new argument.
+- *Tone guardrail.* Durability (RFC-018 §4.1) is the mechanism this RFC already assigns to gear loss
+  — a soft, player-caused, never-a-lockout curve. Adding a second, instant, all-or-nothing loss
+  channel (ejection) for the same equipment would double-punish the same stake GAME.md §0 already
+  argues against stacking, and would make a dungeon trip strictly worse for a geared player than an
+  ungeared one for no stated reason.
+- *Least churn.* No `src/` shape or RFC-013 normative text changes — `equipped_[]` living outside
+  the `items_[]` loop is already true; this ruling only removes the ambiguity of an unanswered
+  question sitting next to a shipped answer.
+
+**Files/sections edited.** RFC-013 (Open Question 2, closed with this ruling's citation).
+RFC-018 unedited — its own stated position is confirmed as canon, not revised.
+
+---
+
+## Ruling 18 — RFC-016 Tone Guardrail point 4 is narrowed to ordinary play; RFC-024's one-time post-incident disclosure is a stated exception, not a violation
+
+**Conflict.** RFC-016's Tone Guardrail Compliance point 4 states, unconditionally: "The ≤60-second
+bound (§6.3) is an internal engineering budget, never a player-facing number... under any
+circumstance." RFC-024 §6's incident-explanation copy discloses "you might lose up to the last 30
+seconds of movement" on demand after a leader-failure banner has already appeared — and RFC-024's own
+recovery ledger (§4) traces that 30s figure to the exact same source: `kProgressionCheckpointIntervalTicks
+= 300 ticks = 30s` (RFC-016 §6.3), "the number the ≤60s bar is actually about." RFC-024 §Tone Guardrail
+Compliance point 4 argues at length that its situation differs in kind from RFC-016's (a one-time,
+past-tense, post-incident disclosure the player already knows something is wrong when they read, vs.
+an ambient caveat attached to ordinary play) but explicitly declines to resolve the tension
+unilaterally, opening its own **Open Question 8** asking for reconciliation against RFC-016's authors.
+Read literally, "under any circumstance" in RFC-016 forbids exactly what RFC-024 §6 does.
+
+**Ruling.** RFC-016's point 4 is narrowed to what its own rationale was actually protecting against —
+an ambient, ongoing caveat during normal play (matching its sibling point 1's identical framing for
+the periodic-checkpoint cadence: "never displayed, to anyone, under any circumstance," said of a
+running "last saved Ns ago" indicator). It does not reach RFC-024's on-demand, past-tense,
+post-incident disclosure, which is the sole named exception. RFC-024's own honesty argument (§Tone
+Guardrail Compliance point 4) is accepted as the resolution to its Open Question 8, not merely as an
+unrebutted claim.
+
+**Rationale (evidence).**
+- *Hard constraint — GAME.md §0.* The guardrail's actual target is a countdown or caveat the player
+  is made to track *during play* ("nothing counts down behind the player's back"). A single sentence
+  answering a question the player has already asked, after an incident that already happened and is
+  already visible via RFC-024's banner, is retrospective, not a countdown — it is closer to the class
+  of things GAME.md's own tone welcomes (honest information on request) than the class it forbids
+  (ambient pressure). RFC-016's own point 2 draws exactly this distinction for deletion ("exclusively
+  player-initiated, explicit, and confirmed" is fine; unprompted/timed is not) — RFC-024's disclosure
+  is player-initiated in the same sense (reached via an explicit "what happened?" link, §4).
+- *Internal soundness.* Hiding the number here would not remove the drift, only the player's ability
+  to understand what a "the leader is gone" banner already told them was true — worse for trust, not
+  better, and inconsistent with RFC-024's own point 3 ruling ("never framed as the player's failure...
+  states a fact"), which requires telling the truth about what happened.
+- *Least churn.* One clause added to RFC-016's existing point 4; no renumbering, no change to §6.3's
+  actual cadence or arithmetic, no change to RFC-024's already-written copy.
+
+**Files/sections edited.** RFC-016 (Tone Guardrail Compliance point 4, narrowed with the named
+exception). RFC-024 (Open Questions 8, closed with this ruling's citation) unedited beyond that one
+line — its own argument stands as written.
+
+---
+
+## Files edited by pass 5
+
+- **RFC-013** — Open Question 2 closed, citing Ruling 17.
+- **RFC-016** — Tone Guardrail Compliance point 4 narrowed to ordinary play, citing Ruling 18.
+- **RFC-024** — Open Question 8 closed, citing Ruling 18.
+- **README.md** — removed RFC-011/012/017/018 from the Proposed future RFCs table (now empty, replaced
+  with a short note); added "The HUD, audio, balance & recovery set (finalized 2026-07-24)" section
+  covering RFC-011/012/017/018/024; corrected two now-stale "remain reserved by the proposed table
+  below" sentences in the earlier world/progression and map/character sections.
+- **RECONCILIATION.md** — this section.

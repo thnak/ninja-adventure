@@ -50,8 +50,9 @@ Build order (from the RFCs' declared dependencies — see IMPLEMENTATION_MAP.md)
 ## The world & progression set (finalized 2026-07-23)
 
 All three RFCs went through the same dual-model review as the combat set and landed as
-**accepted-with-revisions**. Numbering continues from RFC-019 — RFC-011..018 remain reserved by the
-proposed table below and are not renumbered or absorbed by this batch.
+**accepted-with-revisions**. Numbering continues from RFC-019 — RFC-011..018 were reserved at the
+time this set finalized and are not renumbered or absorbed by this batch; they were filed in the
+2026-07-24 HUD/audio/balance/recovery batch (see below).
 
 | RFC | Title | Status | Summary |
 |---|---|---|---|
@@ -62,8 +63,9 @@ proposed table below and are not renumbered or absorbed by this batch.
 ## The map & character set (finalized 2026-07-24)
 
 Both RFCs went through the same dual-model review as the earlier sets and landed as
-**accepted-with-revisions**. Numbering continues from RFC-021 — RFC-011..018 remain reserved by the
-proposed table below and are not renumbered or absorbed by this batch.
+**accepted-with-revisions**. Numbering continues from RFC-021 — RFC-011..018 were reserved at the
+time this set finalized and are not renumbered or absorbed by this batch; they were filed in the
+2026-07-24 HUD/audio/balance/recovery batch (see below).
 
 | RFC | Title | Status | Summary |
 |---|---|---|---|
@@ -84,6 +86,23 @@ and its "instanced maps do not survive a leader restart" policy.
 | [RFC-014](RFC-014-instance-realm-lifecycle.md) | Instance & Realm Lifecycle | accepted-with-revisions | `allocate_new()`: the `InstanceManager` spin-up/teardown machinery built on QuarkCpp's `declare_lazy`/`IdleTimeout` primitive, a sparse two-tier chunk-addressing scheme replacing `chunk_index()`'s dense formula, group join/deliberate-exit/disconnect/reconnect semantics, per-realm atlas refcounting, and an explicit ruling that the shipped 10×7 dojo boss room stays a room on the persistent `kInterior` map and does not migrate to a `MapSession` |
 | [RFC-015](RFC-015-client-replication-protocol.md) | Client Replication & Interest-Set Protocol | accepted-with-revisions | The project's first client-facing wire protocol: the interest set reuses the shipped `fan_beacons()` 5×5-chunk window rather than a second radius, packed wire projections for `Creature`/`Projectile`/`Effect`/`Player` with id-keyed delta encoding, inner/outer-band send cadence, a per-view byte budget that answers RFC-010's Open Question 5, a decoupled Map-marker channel satisfying RFC-021 §5.4, and a latency budget checked against RFC-006's telegraph lead times |
 | [RFC-016](RFC-016-persistence-save-format.md) | Persistence & Save-File Format | accepted-with-revisions | Commits RFC-008's placeholder "leader SQLite" to a real backend (QuarkCpp's `SqliteStore`): `Persistent<Snapshot, Batched>` for player progression/loadout/quest state, `Persistent<EventSourced, Sync>` for world-overlay events (building/crop/till-ground), an explicit ≤60-second recovery-drift arithmetic against ROADMAP.md P5's bar, RL-checkpoint storage and retention closing RFC-007's named gap, and the portable per-world save-directory contract ARCHITECTURE.md §2 asks for |
+
+## The HUD, audio, balance & recovery set (finalized 2026-07-24)
+
+All five RFCs went through the same dual-model review as the earlier sets and landed as
+**accepted-with-revisions**. RFC-011/012/017/018 fill the last four rows of the "Proposed future
+RFCs" table below (now removed from it); RFC-024 has no prior reservation — it is the first RFC
+added outside the original reserved 001–023 numbering, filling the leader-failure/session-recovery
+gap identified during this project's own gap review rather than one flagged in advance by an earlier
+RFC.
+
+| RFC | Title | Status | Summary |
+|---|---|---|---|
+| [RFC-011](RFC-011-combat-hud-input-cooldown.md) | Combat HUD, Input & Cooldown UI | accepted-with-revisions | A normative baseline for the already-shipped two-slot ability HUD (Disabled-icon cooldown convention) and boss HP bar (`draw_boss_bar`), extended with a status-pip answer to RFC-002's Open Question 4 inside RFC-015's actual 1-byte wire budget, a manual ability-loadout picker answering RFC-019's deferred call, and the key-rebinding spec closing the `screens.cpp:821` debt |
+| [RFC-012](RFC-012-combat-audio-sound-cues.md) | Combat Audio & Sound Cue Standards | accepted-with-revisions | The telegraph commit/imminent audio-cue catalog pairing RFC-006's visual danger tiers, keyed off RFC-015's exactly-once `WindupCommit` wire record, fit into RFC-008 §7.2's existing sound-map JSON format with an explicit precedence rule between `cast.sound` and the new `imminent_sound` field |
+| [RFC-017](RFC-017-balance-tuning-test-harness.md) | Balance Tuning & Test Harness | accepted-with-revisions | Extends the shipped `mmo_sim` smoke-test binary into a `--sweep`/`--gate-check` harness covering RFC-003/RFC-009's payload-vs-material tables and RFC-007's Gate A/B measurement protocol, plus a documented balance-conflict resolution procedure generalizing RECONCILIATION.md Ruling 4's `kIceBoltPower` precedent into a repeatable process |
+| [RFC-018](RFC-018-loot-essence-reward-tables.md) | Loot, Essence & Reward Tables | accepted-with-revisions | Replaces the two placeholder drop paths (flat boss XP+produce, monster-drops-nothing) with a data-driven loot/Essence/socket-gem contract, inventing the equipment/durability/socket data shape — an `items_[]` extension plus a new `equipped_[]` array — that RFC-016 will need to persist |
+| [RFC-024](RFC-024-leader-failure-recovery.md) | Leader Failure & Session Recovery | accepted-with-revisions | Names the accidental (not adversarial) leader-crash/disconnect gap ARCHITECTURE.md §2 accepted and never built detection for — heartbeat/timeout banner messaging, an honest recovery ledger built from RFC-016's actual save-file boundary, and a decision to specify manual restart/resume now that RFC-016 makes it viable while reaffirming automatic leader election stays deferred; explicitly excludes anti-cheat or hostile-leader defense per ARCHITECTURE.md's "kick is enough, Trusted is technical not defensive" philosophy |
 
 ## Review process
 
@@ -108,16 +127,9 @@ dangling references) and recorded every ruling, with rationale and the files it 
 
 ## Proposed future RFCs
 
-Gaps the finalized set references but never defines, plus systems the design docs require that no
-spec covers. Numbering continues from RFC-011. Each is something the finalized RFCs or the roadmap
-explicitly depends on — not speculative process.
-
-| Proposed | Title | Why it is needed |
-|---|---|---|
-| RFC-011 | Combat HUD, Input & Cooldown UI | RFC-006 declares UI/HUD out of scope, yet RFC-002 Q4 punts enemy-gauge visibility to "RFC-006 decides" — the decision has no owner. The two-slot kit, Disabled-icon cooldown convention, boss bars, and the key-rebinding debt from P0 need one spec |
-| RFC-012 | Combat Audio & Sound Cue Standards | RFC-006 Q6 explicitly proposes this ("RFC-006b"): telegraph commit/imminent audio cues are the natural pairing of the telegraph grammar but are unscoped, and the audit flagged audio wiring debt (melee plays `harvest.wav`). RFC-008 §7.2 already defines the sound-map format with no cue standards behind it |
-| RFC-017 | Balance Tuning & Test Harness | RFC-003 Q5 proposes a scripted payload-vs-material sweep harness and says "needs an owner; not blocking the spec." The RFC-002 Q6 / RFC-009 Q2 calibration conflict — two specs briefly disagreeing on freeze pacing before the series editor's reconciliation pass fixed `kIceBoltPower` at one value (RECONCILIATION.md ruling 4) — is the worked example for why a documented resolution procedure is needed *before* the next one. Pins the `mmo_sim` sweep format, the determinism-diff pattern, and RFC-007's Gate A/B measurement protocol |
-| RFC-018 | Loot, Essence & Reward Tables | RFC-005's non-goals punt "loot tables, Essence rewards, dungeon economy" to P4/P8, and monsters currently drop nothing by explicit deferral ("đặt một bảng tạm bây giờ là đặt nó hai lần"). Combat needs a data-driven drop contract — deterministic rolls, ring/tier scaling, Essence and socket-gem sources — before dungeons pay out |
+No proposed-but-undrafted RFCs remain as of the 2026-07-24 HUD/audio/balance/recovery batch —
+RFC-011/012/017/018 were the last four rows this table carried, and each is now filed (see "The
+HUD, audio, balance & recovery set" above). Future gaps get their own row here as they're found.
 
 Not proposed on purpose: modding/untrusted-pack sandboxing (explicitly excluded by RFC-008's
 non-goals — the pack is trusted repo content), PvP specs (off by default per GAME.md §11), and a

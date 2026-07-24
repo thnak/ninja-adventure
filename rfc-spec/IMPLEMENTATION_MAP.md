@@ -28,6 +28,9 @@
 | 14, 15 | Asset reuse, tint/filters | Renderer already layers (katana overlay, windup pulse, smoke 1.6×); raylib tint is one parameter. | Status→tint/overlay map. | RFC-006 |
 | 16 | Battlefield states | Camera shake exists; zone particles render closed-form from world clock. | Chunk-level state channel (earthquake: shake amp, aim scatter). | RFC-010, RFC-006 |
 | 17 | RL-friendly | **The seam is live**: `boss_policy(BossObs) → BossAction` pure function, built in F3 exactly so F4 can swap it. | RFC-007's 120-float observation vector (`kObsVersion`) + 15-action space (`kActionCount`) replacing today's `BossObs`; versioned checkpoints. | RFC-007 |
+| 18 | HUD, cooldown UI & key rebinding | Vitals bars (`draw_hud`, `screens.cpp:318-332`), the two-slot ability display with its Disabled-icon "greyed twin" convention + cooldown-wipe rectangle (`draw_ability_slots`, `screens.cpp:206-238`), and the boss HP bar (`draw_boss_bar`, `raylib_bridge.cpp:678-704`, called unconditionally at `:1773`) are all real, shipped code with no RFC behind them. Key rebinding is stubbed: `screens.cpp:821`'s own comment says "still owed." | Normative data-and-meaning contract for all four already-shipped elements; RFC-002 Q4 (ordinary-creature status gauges) answered within RFC-015's actually-frozen 1-byte budget, not RFC-002's originally-designed 2-byte one; a manual two-slot ability loadout picker (RFC-019 §5.4 hands this off by name); a key-rebind table + `client.cfg` storage. | RFC-011 |
+| 19 | Combat audio & telegraph sound standard | 10-entry `Sfx` enum shipped (`audio.hpp:17-29`); swing/cast/shoot already play distinct SFX (`client_main.cpp:559-561` — the RFC-006 Q6 "melee plays harvest.wav" bug is already fixed, not this RFC's to fix again). No telegraph commit/imminent/fizzle cues exist; every non-`kBlast` `EffectKind` collapses onto the single `kHit` impact cue; no voice-contention management for 20-50 concurrent players. | Tier A (engine fallback)/Tier B (`snd.*` authored override) cue split; 10 new `Sfx` entries; a per-`EffectKind` impact table; an alias-pool + priority + ducking voice-management pipeline; one new `imminent_sound` field on RFC-008 §7.6's `cast.telegraph` block. | RFC-012 |
+| 20 | Balance tuning process & test harness | `mmo_sim` is a real, shipped binary (`CMakeLists.txt:46-50`, `add_executable`/`add_test mmo_sim_smoke ... 600`) but only a smoke test today — no sweep, determinism-dump, or gate-check mode exists. | `--sweep` (the payload-vs-material effective-channel table RFC-003 Q5 left unowned), `--determinism-dump` (formalizes the cross-platform tile-for-tile check `ARCHITECTURE.md §2c` already proves by hand), `--gate-check`/`--gate-report` (a mechanical reader of RFC-007's Gate A/B thresholds), and a named conflict-resolution procedure extending `RECONCILIATION.md`'s numbered-ruling ledger (generalizing Ruling 4's worked `kIceBoltPower` precedent). | RFC-017 |
 
 ## The detailed set (status as of 2026-07-23)
 
@@ -54,6 +57,13 @@ that followed.
 001 (root) ──▶ 004 ──▶ 002 ──▶ 009 ──▶ 003 ──▶ 010 ──▶ 005 ──▶ 007 ──▶ F4 training
                                           006 (renderer-side, parallel from 002 on)
                                           008 (serialization, last — freezes formats)
+                                          011 (HUD — after 001/002/005/006 stabilize, plus
+                                               already-accepted RFC-015/016 outside this set)
+                                          012 (audio — after 006, the timing authority it keys
+                                               off; plus RFC-008's schema and RFC-015's wire shape)
+                                          017 (harness — tooling, not a pipeline stage; its
+                                               --sweep has nothing to sweep until 003/009 land,
+                                               its --gate-check needs 007's checkpoint format)
 ```
 
 - **001 + 004 are both Accepted and form the implementable core**: pipeline
@@ -65,6 +75,21 @@ that followed.
   surface-tag vocabularies must be pinned when 004/003 enumerate them.
 - **008 lands last on purpose**: serialization freezes what the other RFCs
   stabilize.
+- **011 is a normative-baseline-plus-three-new-features RFC, not a new pipeline
+  stage** — three of its four sections (vitals bars, ability slots, boss HP bar)
+  document already-shipped code; only the loadout picker and key rebinding are
+  new engineering, and both are additive on top of 001/002/005/019 without
+  touching pipeline order.
+- **012 depends on 006 for timing (the ARM→CHARGE→IMMINENT→IMPACT state
+  machine) and on 008 for the `snd.*` authoring surface it extends**, but adds
+  no new simulation-side state — it is a client-only cue-selection layer, so it
+  does not gate on 003/009/010 the way 006 itself does.
+- **017 can start any time but its four CLI modes gate independently**: `--sweep`
+  needs the RFC-003/RFC-009 material and damage-formula code it reads (not yet
+  built, per the umbrella table above); `--determinism-dump` and
+  `--gate-check`/`--gate-report` need only already-shipped `sim_main.cpp` output
+  and RFC-007's already-accepted checkpoint format, respectively, so those two
+  modes are implementable today independent of 003/009's landing.
 
 ## What this absorbs from the old board
 
@@ -137,3 +162,25 @@ schema migration to ADD it." RFC-013 and RFC-014 both flag RFC-018 (proposed, lo
 orthogonal rather than dependent — RFC-013 §Interactions: "RFC-018 governs what a creature
 *drops*; this RFC governs what a player *loses*. Neither reads the other's tables," and
 RFC-014's Non-goals excludes "loot/reward tables" from its own scope by name.
+
+## Loot, economy & leader-recovery set (RFC-018, RFC-024)
+
+> RFC-018 (Loot, Essence & Reward Tables) and RFC-024 (Leader Failure & Session Recovery), both
+> **Accepted (revised after review)** as of 2026-07-24, are not combat-engine-gap-shaped the way
+> RFC-001…010 or the HUD/audio/harness trio above are: RFC-018 is an economy/itemization system,
+> RFC-024 is an ops/infrastructure concern. They get their own small table rather than being
+> forced into the combat umbrella's numbering.
+
+### Gap table
+
+| Concept | Engine today | Gap | Owner |
+|---|---|---|---|
+| Loot/equipment/Essence economy | Bosses drop a flat 400 XP + 10 produce placeholder, explicitly commented as provisional ("P4 owns real loot tables," `chunk_actor.hpp:1332-1334`); ordinary monsters drop nothing, only wildlife grants 1 produce (`chunk_actor.hpp:1349-1352`); `items_[]` is a 4-kind stackable array only (`kItemKinds` = wood/stone/seed/produce, `tiles.hpp:357`) — RFC-013 §401-406 confirms "there is no separate equipped-gear concept yet." | New `ItemKind` ordinals (4 ore tiers, 24 grade-baked socket gems, Essence); the `EquipSlot`/`EquippedItem`/`SocketGem` data shape as genuinely new `PlayerActor` state; the material-tier table (`tier_damage_pm`/`tier_dr_bonus`/`tier_toughness_bonus`) RFC-021 §3.6 explicitly hands off; a new `loot.*` RFC-008 document domain; a deterministic per-contributor roll seed; a `GrantEquipment` protocol message. | RFC-018 |
+| Leader failure detection & session recovery | Zero election/heartbeat/quorum machinery anywhere in `src/` (grepped, no hits); `Tick{tick,world_ms,night}` already fans out unconditionally every tick from `MapDirector` (`protocol.hpp:23`, `map_director.hpp:70`) but is consumed for simulation timing, not liveness detection. `ARCHITECTURE.md §2` accepts, as a stated design choice, that the world simply stops when the leader dies, naming only a portable save file and periodic saves as mitigation — both now real via RFC-016. | A node-side `Tick`-timeout rule and a client-side content-independent liveness cadence (deliberately *not* keyed off `ChunkDelta` silence, which is legitimate during a quiet chill session); a `WorldClosing` graceful-shutdown broadcast; a client `Connected → LeaderUnreachable/HostClosed` state machine with tone-guardrail-safe copy; a recovery ledger assembled from RFC-016's save-exclusion rulings; a named "any friend can relaunch as the new leader" manual-restart flow. **Explicitly not built**: automatic/Byzantine-fault-tolerant election or any anti-cheat/hostile-leader defense — reaffirmed out of scope per `ARCHITECTURE.md §0 S1`/`§2`'s deliberate "kick is enough, Trusted is technical not defensive" posture, which this RFC does not contradict. | RFC-024 |
+
+### Build order
+
+RFC-018 depends only on already-accepted RFC-016/019/021/022; RFC-024 depends only on
+already-accepted RFC-014/015/016. Neither names the other as a dependency in either direction —
+they are independent of each other and of the HUD/audio/harness trio above, and may land in any
+order relative to one another.

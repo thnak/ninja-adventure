@@ -803,10 +803,14 @@ stop at per-account objective progress and do not attempt to own that ledger.
    countdown skipping ahead, a raid resetting to "no attack in progress," a besieged building coming
    back are all strictly better outcomes for the player than the alternative, so none of them need a
    mitigation, an apology message, or a "you lost progress" framing anywhere in the UI.
-4. **The ≤60-second bound (§6.3) is an internal engineering budget, never a player-facing number.**
-   Nothing in this RFC's design surfaces "your last 30 seconds might not have saved" to a player under
-   any circumstance — it is a property this RFC proves true of the system, not a caveat the player is
-   asked to manage or wait out.
+4. **The ≤60-second bound (§6.3) is an internal engineering budget, never an ambient player-facing
+   caveat during ordinary play.** Nothing in this RFC's own design surfaces "your last 30 seconds
+   might not have saved" as a running caveat, countdown, or thing the player is asked to manage or
+   wait out — it is a property this RFC proves true of the system, not a number attached to play as it
+   happens. The sole named exception is RFC-024's one-time, past-tense, on-demand disclosure made only
+   after a leader-failure incident has already occurred and already been banner-announced
+   (RECONCILIATION.md Ruling 18) — a retrospective answer to a question the player has already started
+   asking, not the ambient caveat this rule guards against.
 5. **RL checkpoint rotation (§8) never changes what a player already sees mid-fight.** RFC-007 §6.2's
    own rule — "live creatures never hot-swap weights mid-fight; a new generation applies from the next
    spawn" — is untouched by this RFC's storage/retention layer; rotation only affects which *file* the
