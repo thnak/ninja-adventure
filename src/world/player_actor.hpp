@@ -55,8 +55,8 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
     using protocol =
         Protocol<Tick, MoveIntent, Teleport, GrantItems, HurtPlayer, GrantVitals, GrantXp,
                  SetRespawn, BindAccount, Unbind, Rebind, SetMounted, SetInstanceReturn,
-                 Ask<SpendItems, bool>, Ask<GetPlayer, PlayerView>, Ask<PlanAttack, AttackPlan>,
-                 Ask<UseAbility, AbilityPlan>>;
+                 RestoreProgression, Ask<SpendItems, bool>, Ask<GetPlayer, PlayerView>,
+                 Ask<PlanAttack, AttackPlan>, Ask<UseAbility, AbilityPlan>>;
 
     // Set once at bring-up, before the engine starts.
     std::uint64_t id = 0;
@@ -272,6 +272,33 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         instance_return_y_ = r.y;
     }
 
+    // RFC-016 §4/§7: BindAccount's counterpart for a returning account — World::login() sends this
+    // instead of BindAccount whenever a saved PlayerProgression exists for the account. Restores
+    // every persisted field directly rather than the fixed starter pack; §5's already-respawned
+    // ruling for a checkpoint with hp<=0 is applied by the caller (world.hpp) before this arrives,
+    // so `r.hp` here is never <= 0 in practice.
+    void handle(const RestoreProgression& r) noexcept {
+        account_ = r.account;
+        map = r.map;
+        x_ = r.x;
+        y_ = r.y;
+        hp_ = r.hp;
+        mana_ = r.mana;
+        stamina_ = r.stamina;
+        deaths_ = r.deaths;
+        respawn_tx_ = r.respawn_tx;
+        respawn_ty_ = r.respawn_ty;
+        instance_return_map_ = r.return_map;
+        instance_return_x_ = r.return_x;
+        instance_return_y_ = r.return_y;
+        for (int i = 0; i < kItemKinds; ++i) items_[i] = r.items[i];
+        for (int i = 0; i < kSkillCount; ++i) {
+            level_[i] = r.level[i];
+            xp_[i] = r.xp[i];
+        }
+        publish();
+    }
+
     void handle(const SetMounted& m) noexcept {
         if (dead_ticks_ > 0) return;
         mounted_ = m.mounted;
@@ -477,6 +504,9 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         v.mounted = mounted_;
         v.respawn_tx = respawn_tx_;
         v.respawn_ty = respawn_ty_;
+        v.return_map = instance_return_map_;
+        v.return_x = instance_return_x_;
+        v.return_y = instance_return_y_;
         for (int i = 0; i < kItemKinds; ++i) v.items[i] = items_[i];
         for (int i = 0; i < kSkillCount; ++i) {
             v.skill_level[i] = level_[i];

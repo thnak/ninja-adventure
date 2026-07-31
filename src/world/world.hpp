@@ -18,9 +18,13 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
+#include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -36,6 +40,7 @@
 #include "world/instance_manager.hpp"
 #include "world/map_director.hpp"
 #include "world/map_system.hpp"
+#include "world/persistence.hpp"
 #include "world/player_actor.hpp"
 #include "world/protocol.hpp"
 #include "world/snapshot.hpp"
@@ -134,6 +139,106 @@ public:
     bool save_accounts(const char* path) const { return accounts_.save(path); }
     [[nodiscard]] const AccountStore& accounts() const noexcept { return accounts_; }
 
+    // --- RFC-016: persistence ------------------------------------------------------------------
+    //
+    // Opens (creating if missing) `<saves_root>/<world_name>/` — §2's directory layout: an
+    // unchanged accounts.dat (§3, relocated only), a progression/ FileStore root (§4), and an
+    // overlay/ FileStore root (§6). MUST be called after build() so the just-constructed (empty)
+    // ChunkActors already exist for recover_overlay() to fold recovered state into, before
+    // start() — the same cold, synchronous bring-up window build_bosses() already writes into.
+    bool open_save(const std::string& saves_root, const std::string& world_name) {
+        namespace fs = std::filesystem;
+        save_root_ = saves_root + "/" + world_name;
+        std::error_code ec;
+        fs::create_directories(save_root_, ec);
+        fs::create_directories(save_root_ + "/progression", ec);
+        fs::create_directories(save_root_ + "/overlay", ec);
+
+        const std::string manifest_path = save_root_ + "/manifest.dat";
+        WorldManifest m{};
+        if (!load_world_manifest(manifest_path.c_str(), m)) {
+            m.world_seed = kWorldSeed;
+            m.created_at_unix = static_cast<std::int64_t>(
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count());
+            std::snprintf(m.world_name, sizeof m.world_name, "%s", world_name.c_str());
+            (void)save_world_manifest(manifest_path.c_str(), m);
+        }
+
+        accounts_.load((save_root_ + "/accounts.dat").c_str());
+        progression_store_.open(save_root_ + "/progression");
+        overlay_store_.open(save_root_ + "/overlay");
+        recover_overlay();
+        return true;
+    }
+
+    // The "lúc thoát" half of §6.3's "periodic + on-exit" pair — unconditional, ignoring both
+    // cadence timers. Call once on clean shutdown.
+    void save_world_now() {
+        if (save_root_.empty()) return;
+        (void)accounts_.save((save_root_ + "/accounts.dat").c_str());
+        checkpoint_progression();
+    }
+
+    // §6.3: two independent cadences, self-rate-limited exactly like InstanceManager::sweep_idle
+    // (instance_manager.hpp) — cheap to call every tick; the caller does not need to track timing.
+    void run_periodic_persistence(std::int64_t world_ms) {
+        if (save_root_.empty()) return;
+        if (last_progression_checkpoint_ms_ < 0 ||
+            world_ms - last_progression_checkpoint_ms_ >= kProgressionCheckpointIntervalMs) {
+            checkpoint_progression();
+            last_progression_checkpoint_ms_ = world_ms;
+        }
+        if (last_overlay_compact_ms_ < 0 ||
+            world_ms - last_overlay_compact_ms_ >= kOverlaySnapshotIntervalMs) {
+            compact_overlay();
+            last_overlay_compact_ms_ = world_ms;
+        }
+    }
+
+    // §4.2: hp/mana/stamina/x/y (and, by this pass's simplification, everything else in the row)
+    // checkpointed on the periodic cadence for every currently bound session slot.
+    void checkpoint_progression() {
+        if (save_root_.empty()) return;
+        for (int slot = 0; slot < kMaxPlayers; ++slot) {
+            if (bound_[slot] == kNoAccount) continue;
+            const PlayerView v = player_view(slot);
+            if (!v.live()) continue;
+            progression_store_.save(bound_[slot], progression_of(v));
+        }
+    }
+
+    // §6.3 point 2: folds each touched persistent-band chunk's durable log into a compaction
+    // snapshot, bounding replay length on a future recovery. Reads the live published ChunkView
+    // rather than reaching into ChunkActor directly — the same lossy-but-sufficient channel the
+    // renderer already reads (snapshot.hpp).
+    void compact_overlay() {
+        for (const ChunkCoord& c : chunk_coords_) {
+            if (c.map >= kPersistentBandEnd) continue;  // §9: instanced band is out of scope
+            if (overlay_store_.touched().find(chunk_key(c)) == overlay_store_.touched().end()) {
+                continue;
+            }
+            ChunkViewPtr v = bus_.load(c);
+            if (!v) continue;
+            ChunkOverlaySnapshot snap;
+            snap.crops = v->crops;
+            snap.buildings = v->buildings;
+            for (int ly = 0; ly < kChunkTiles; ++ly) {
+                for (int lx = 0; lx < kChunkTiles; ++lx) {
+                    const std::size_t li = static_cast<std::size_t>(ly * kChunkTiles + lx);
+                    if (v->terrain[li] != static_cast<std::uint8_t>(Terrain::kDirt)) continue;
+                    const int gx = c.cx * kChunkTiles + lx;
+                    const int gy = c.cy * kChunkTiles + ly;
+                    if (terrain_of(kWorldSeed, c.map, gx, gy) == Terrain::kDirt) continue;  // natural
+                    snap.tilled.push_back(
+                        TilledTile{static_cast<std::uint16_t>(gx), static_cast<std::uint16_t>(gy)});
+                }
+            }
+            overlay_store_.compact(c, snap, overlay_store_.last_committed_seq(c));
+        }
+    }
+
     // Authenticate (or create), then bind the account to a free session slot. Returns the slot, or
     // -1 with `out` explaining why. Safe to call while the world is running: nothing is registered
     // here, only bound.
@@ -170,6 +275,20 @@ public:
                 instance_manager_.enter(last.map, id);
                 return slot;
             }
+        }
+
+        // RFC-016 §4/§7: a returning account gets its persisted progression back instead of the
+        // fixed starter pack. NOTE what this does not solve: within one still-running process, a
+        // non-instanced disconnect+reconnect already falls through to this same branch today
+        // (Unbind's own header comment names the gap — only the instanced-resume case above is
+        // wired) and always resets from SOME source; before this RFC that source was unconditionally
+        // the starter pack, which this branch now improves to "the last checkpoint" without
+        // attempting to fix same-process reconnect continuity itself (RFC-014/015's reconnect-
+        // detector territory, still not wired end-to-end — out of scope here).
+        if (std::optional<PlayerProgression> saved = progression_store_.load(id)) {
+            apply_recovery_defaults(*saved);  // §5: hp<=0 at last checkpoint loads as respawned
+            player_ref(slot).tell(restore_message(id, *saved));
+            return slot;
         }
 
         BindAccount b{};
@@ -476,11 +595,16 @@ public:
                CropKind k, std::int64_t now_ms) {
         if (!in_map(tx, ty)) return;
         chunk_ref(map, tx, ty).tell(PlantCrop{tx, ty, k, now_ms, player});
+        record_overlay(map, tx, ty,
+                        ChunkMutationEvent{OverlayEventKind::kPlantCrop, tx, ty,
+                                           static_cast<std::uint8_t>(k), now_ms, player});
     }
 
     void harvest(std::uint64_t player, std::uint16_t map, std::uint16_t tx, std::uint16_t ty) {
         if (!in_map(tx, ty)) return;
         chunk_ref(map, tx, ty).tell(HarvestAt{tx, ty, player});
+        record_overlay(map, tx, ty,
+                        ChunkMutationEvent{OverlayEventKind::kHarvestAt, tx, ty, 0, 0, player});
     }
 
     // Base expansion: reclaim a tile as farmland. Costs a little wood so it is a real choice
@@ -491,6 +615,8 @@ public:
             player_ref_by_key(player).ask<bool>(SpendItems{ItemKind::kWood, kTillCost}));
         if (!paid.has_value() || !paid.value()) return false;
         chunk_ref(map, tx, ty).tell(TillGround{tx, ty, player});
+        record_overlay(map, tx, ty,
+                        ChunkMutationEvent{OverlayEventKind::kTillGround, tx, ty, 0, 0, player});
         return true;
     }
 
@@ -504,6 +630,8 @@ public:
             quark::block_on(player_ref_by_key(player).ask<bool>(SpendItems{c.kind, c.count}));
         if (!paid.has_value() || !paid.value()) return false;
         chunk_ref(map, tx, ty).tell(UpgradeBuilding{tx, ty, player});
+        record_overlay(map, tx, ty,
+                        ChunkMutationEvent{OverlayEventKind::kUpgradeBuilding, tx, ty, 0, 0, player});
         return true;
     }
 
@@ -518,6 +646,9 @@ public:
             quark::block_on(player_ref_by_key(player).ask<bool>(SpendItems{c.kind, c.count}));
         if (!paid.has_value() || !paid.value()) return false;
         chunk_ref(map, tx, ty).tell(PlaceBuilding{tx, ty, k, player});
+        record_overlay(map, tx, ty,
+                        ChunkMutationEvent{OverlayEventKind::kPlaceBuilding, tx, ty,
+                                           static_cast<std::uint8_t>(k), 0, player});
         return true;
     }
 
@@ -665,6 +796,29 @@ private:
         return router_->get<ChunkActor>(chunk_key(chunk_of(map, x, y)));
     }
 
+    // RFC-016 §6.2/§9: the durable counterpart of `chunk_ref(...).tell(...)` — instanced-band maps
+    // are out of scope for durability by RFC-014's own default policy, so only persistent-band
+    // mutations are staged/committed.
+    void record_overlay(std::uint16_t map, std::uint16_t tx, std::uint16_t ty,
+                        const ChunkMutationEvent& e) {
+        if (map >= kPersistentBandEnd) return;
+        overlay_store_.record(chunk_of(map, static_cast<float>(tx), static_cast<float>(ty)), e);
+    }
+
+    // RFC-016 §6.4: called once by open_save(), right after build_chunks() has constructed every
+    // (empty) ChunkActor and before start() — the same cold, synchronous bring-up window
+    // build_bosses() already writes into directly.
+    void recover_overlay() {
+        for (const ChunkCoord& c : chunk_coords_) {
+            if (c.map >= kPersistentBandEnd) continue;
+            std::optional<ChunkOverlaySnapshot> snap = overlay_store_.recover(c);
+            if (!snap.has_value()) continue;
+            ChunkActor& ch = *chunks_[static_cast<std::size_t>(chunk_index(c))];
+            ch.apply_recovered_overlay(*snap);
+            ch.publish_now();
+        }
+    }
+
     // The whole roster is registered before `start()`, because `Engine::register_activation` is
     // cold-only (see player_actor.hpp). An unbound slot is inert — it ticks, ignores the tick, and
     // publishes an empty view that says `account == 0`.
@@ -792,6 +946,15 @@ private:
     quark::ActorRef<MapDirector> director_ref_{};
 
     InstanceManager instance_manager_;
+
+    // RFC-016: unopened (save_root_.empty()) until open_save() is called — every persistence
+    // method above is a no-op until then, matching load_accounts()'s own "missing file is not an
+    // error" tone for a headless run that never calls open_save() at all (sim_main.cpp's default).
+    std::string save_root_;
+    PlayerProgressionStore progression_store_;
+    WorldOverlayStore overlay_store_;
+    std::int64_t last_progression_checkpoint_ms_ = -1;
+    std::int64_t last_overlay_compact_ms_ = -1;
 };
 
 }  // namespace mmo

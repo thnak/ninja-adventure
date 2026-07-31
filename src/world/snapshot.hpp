@@ -48,6 +48,11 @@ struct PlayerView {
     bool mounted = false;
     std::uint16_t respawn_tx = 0;
     std::uint16_t respawn_ty = 0;
+    // RFC-016 §7: mirrors PlayerActor's own instance_return_map_/x_/y_ (RFC-013 §6.2) so
+    // World::checkpoint_progression() can persist the breadcrumb without a second ask type.
+    std::uint16_t return_map = 0;
+    std::uint16_t return_x = 0;
+    std::uint16_t return_y = 0;
     std::int32_t items[kItemKinds] = {};
     std::uint8_t skill_level[kSkillCount] = {};
     std::uint32_t skill_xp[kSkillCount] = {};

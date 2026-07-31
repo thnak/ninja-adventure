@@ -40,6 +40,7 @@
 #include "world/boss_kit.hpp"
 #include "world/combat_entity.hpp"
 #include "world/flow_field.hpp"
+#include "world/persistence.hpp"
 #include "world/physics.hpp"
 #include "world/player_actor.hpp"
 #include "world/protocol.hpp"
@@ -760,6 +761,24 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         bosses_.push_back(b);
         spawn_boss(bosses_.back());
     }
+
+    // RFC-016 §6.4: folds a recovered ChunkOverlaySnapshot into this chunk — called once at
+    // bring-up by World::recover_overlay(), AFTER generate_terrain() has already run and BEFORE
+    // the world starts ticking, so a recovered tilled tile always overwrites the seed-derived
+    // terrain underneath it, never the reverse (§6.4's own ordering rule).
+    void apply_recovered_overlay(const ChunkOverlaySnapshot& snap) noexcept {
+        crops_ = snap.crops;
+        buildings_ = snap.buildings;
+        for (const TilledTile& t : snap.tilled) {
+            if (!owns(t.tx, t.ty)) continue;
+            terrain_[static_cast<std::size_t>(local_tile_index(t.tx, t.ty))] = Terrain::kDirt;
+            ++tilled_;  // handle(TillGround)'s own counter — GetChunkStats reads it, not terrain_[]
+        }
+    }
+
+    // Test/tools accessor, mirroring GetChunkStats's own `tilled` field — for asserting
+    // apply_recovered_overlay() without needing a full engine+router+mailbox round trip.
+    [[nodiscard]] std::uint32_t tilled_count() const noexcept { return tilled_; }
 
     [[nodiscard]] bool owns(std::uint16_t tx, std::uint16_t ty) const noexcept {
         return tx / kChunkTiles == coord.cx && ty / kChunkTiles == coord.cy;

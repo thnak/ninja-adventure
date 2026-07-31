@@ -29,9 +29,6 @@ using namespace mmo;
 
 namespace {
 
-// Where the account table lives. One file beside the executable; P5 owns anything better.
-constexpr const char* kAccountsPath = "accounts.dat";
-
 // Per-machine connection state: which mode the player last chose (host vs join) and the leader
 // address they last typed. It sits beside accounts.dat and is treated the same way — machine state,
 // not source, so it is gitignored. Plain text and failure-tolerant on purpose: a missing or garbled
@@ -135,7 +132,10 @@ int main(int argc, char** argv) {
 
     World world;
     world.build(/*workers*/ 4);
-    world.load_accounts(kAccountsPath);
+    // RFC-016 §2/§3: one named save directory today (no multi-world menu exists yet — §2.2's
+    // create/load/delete UI is out of scope, see persistence.hpp's own header note); accounts.dat
+    // moves under it, unchanged format, exactly as §3 rules.
+    world.open_save("saves", "default");
     world.start();
 
     RaylibBridge bridge(1280, 720);
@@ -647,6 +647,9 @@ int main(int argc, char** argv) {
             ++steps;
         }
         if (steps == kMaxStepsPerFrame) accumulator = 0.0f;  // drop the debt rather than chase it
+        // RFC-016 §6.3: cheap to call every frame — self-rate-limited internally, a no-op until
+        // open_save() below has actually opened a save directory.
+        if (steps > 0) world.run_periodic_persistence(world.status().world_ms.load());
 
         // --- combat audio, driven by what the simulation published ---------------------------------
         // The renderer already reads effects out of the visible chunks; audio does the same, but a
@@ -767,7 +770,7 @@ int main(int argc, char** argv) {
                     me = world.key_of(slot);
                     shell.screen = ui::Screen::kPlaying;
                     shell.login_message = nullptr;
-                    world.save_accounts(kAccountsPath);
+                    world.save_world_now();
                     std::printf("signed in as '%s' (%s) -> slot %d\n", shell.name, describe(out),
                                 slot);
                     if (dev_level > 0) {
@@ -803,8 +806,12 @@ int main(int argc, char** argv) {
         }
     }
 
+    // §6.3/§ Multiplayer: the "lúc thoát" half of "periodic + on-exit saves" — the mechanism
+    // ARCHITECTURE.md §2 named and left unspecified. MUST run BEFORE stop(): checkpoint_progression()
+    // reads each player through a blocking ask(), which would hang forever once the engine's
+    // workers have already been told to stop answering.
+    if (world.accounts().size() > 0) world.save_world_now();
     world.stop();
-    if (world.accounts().size() > 0) world.save_accounts(kAccountsPath);
     std::printf("client exited cleanly\n");
     return 0;
 }

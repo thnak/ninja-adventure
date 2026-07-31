@@ -16,6 +16,11 @@ accounts.dat
 # Per-machine connection preference (host/join + last address), like accounts.dat: state, not source.
 client.cfg
 
+# RFC-016: the whole saves/<world_name>/ directory is per-machine state (accounts.dat, progression
+# and overlay durable logs, the world manifest) — the exportable save file a player moves around,
+# never source. accounts.dat above now lives inside this tree by default.
+/saves/
+
 # Measurement scratch from tools/study_examples.py and tools/mock_world.py — contact sheets and
 # derived JSON, all regenerable, none of it source.
 tools/_study/

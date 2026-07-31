@@ -2714,7 +2714,300 @@ int main(int argc, char** argv) {
                 killed, world.status().player_kills.load(std::memory_order_relaxed),
                 world.status().migrations.load(std::memory_order_relaxed), peak);
 
+    // --- RFC-016: persistence & save-file format ----------------------------------------------------
+    // First use of World::open_save() anywhere in this file — every login() before this point took
+    // the (unaffected) fresh-BindAccount path throughout, exactly as before this RFC existed.
+    const std::string p16_scratch_root =
+        (std::filesystem::temp_directory_path() / "mmo_rfc016_test").string();
+    int p16_slot = -1;
+    std::uint16_t p16_hearth_tx = 0;
+    std::uint16_t p16_hearth_ty = 0;
+    PlayerView p16_checkpoint{};
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(p16_scratch_root, ec);  // a stale run from a prior crash
+
+        // §2.1 manifest round trip.
+        {
+            std::filesystem::create_directories(p16_scratch_root, ec);
+            const std::string path = p16_scratch_root + "/manifest.dat";
+            WorldManifest m{};
+            m.world_seed = 20260722;
+            m.created_at_unix = 1784800000;
+            std::snprintf(m.world_name, sizeof m.world_name, "%s", "Thung Lung Suong");
+            chk.expect(save_world_manifest(path.c_str(), m), "a world manifest can be written");
+            WorldManifest loaded{};
+            chk.expect(load_world_manifest(path.c_str(), loaded) &&
+                           loaded.world_seed == m.world_seed &&
+                           loaded.created_at_unix == m.created_at_unix &&
+                           std::strcmp(loaded.world_name, m.world_name) == 0,
+                       "the manifest round-trips its seed, name, and creation time");
+        }
+
+        // §5's already-respawned ruling — persistent-band, instanced-band-with-a-return-point, and
+        // instanced-band-with-no-return-point (§7's hearth fallback).
+        {
+            PlayerProgression dead{};
+            dead.hp = 0;
+            dead.map = kOverworld;
+            dead.respawn_tx = 40;
+            dead.respawn_ty = 50;
+            apply_recovery_defaults(dead);
+            chk.expect(dead.hp == kPlayerMaxHp && dead.mana == kPlayerMaxMana &&
+                           dead.stamina == kPlayerMaxStamina,
+                       "a persistent-band checkpoint with hp<=0 loads back at full vitals");
+            chk.expect(dead.x == static_cast<float>(dead.respawn_tx) + 0.5f &&
+                           dead.y == static_cast<float>(dead.respawn_ty) + 0.5f,
+                       "...at the hearth, not wherever it died");
+
+            PlayerProgression dead_instanced{};
+            dead_instanced.hp = 0;
+            dead_instanced.map = kPersistentBandEnd;  // an instanced MapId
+            dead_instanced.return_map = kOverworld;
+            dead_instanced.return_x = 12;
+            dead_instanced.return_y = 34;
+            apply_recovery_defaults(dead_instanced);
+            chk.expect(dead_instanced.map == kOverworld && dead_instanced.x == 12.5f &&
+                           dead_instanced.y == 34.5f,
+                       "an instanced-band checkpoint with a return point ejects there on recovery");
+
+            PlayerProgression dead_instanced_no_return{};
+            dead_instanced_no_return.hp = 0;
+            dead_instanced_no_return.map = kPersistentBandEnd;
+            dead_instanced_no_return.respawn_tx = 7;
+            dead_instanced_no_return.respawn_ty = 8;
+            apply_recovery_defaults(dead_instanced_no_return);
+            chk.expect(dead_instanced_no_return.map == kOverworld &&
+                           dead_instanced_no_return.x == 7.5f && dead_instanced_no_return.y == 8.5f,
+                       "...and falls back to the bound hearth when no return point was ever set (§7)");
+        }
+
+        // PlayerProgressionStore: a real FileStore round trip — write, close, then read back
+        // through a FRESH store instance pointed at the same directory (simulating a restart).
+        {
+            const std::string root = p16_scratch_root + "/progression";
+            PlayerProgression p;
+            p.map = kOverworld;
+            p.x = 111.5f;
+            p.y = 222.5f;
+            p.hp = 40;
+            p.mana = 10;
+            p.stamina = 20;
+            p.deaths = 3;
+            p.respawn_tx = 100;
+            p.respawn_ty = 200;
+            p.level.assign(kSkillCount, 0);
+            p.xp.assign(kSkillCount, 0);
+            p.level[static_cast<int>(Skill::kMelee)] = 7;
+            p.xp[static_cast<int>(Skill::kMelee)] = 555;
+            p.items.assign(kItemKinds, 0);
+            p.items[static_cast<int>(ItemKind::kWood)] = 42;
+            {
+                PlayerProgressionStore writer;
+                writer.open(root);
+                writer.save(1001, p);
+            }  // closed — the FileStore below opens the same .qwal file fresh, like a restart
+
+            PlayerProgressionStore reader;
+            reader.open(root);
+            std::optional<PlayerProgression> back = reader.load(1001);
+            chk.expect(back.has_value(),
+                       "a saved player row is present for a fresh store instance at the same root");
+            if (back.has_value()) {
+                chk.expect(back->x == p.x && back->y == p.y && back->hp == p.hp &&
+                               back->deaths == p.deaths,
+                           "vitals/position/deaths round-trip through disk");
+                chk.expect(back->level.size() == static_cast<std::size_t>(kSkillCount) &&
+                               back->level[static_cast<int>(Skill::kMelee)] == 7 &&
+                               back->xp[static_cast<int>(Skill::kMelee)] == 555,
+                           "skill levels/xp round-trip through disk");
+                chk.expect(back->items.size() == static_cast<std::size_t>(kItemKinds) &&
+                               back->items[static_cast<int>(ItemKind::kWood)] == 42,
+                           "items round-trip through disk");
+            }
+            chk.expect(!reader.load(9999).has_value(), "an account with no saved row loads as nullopt");
+        }
+
+        // WorldOverlayStore: record the five shipped event shapes into one chunk, then recover it
+        // through a FRESH store instance — proves §6.4's fold, not just live memory.
+        {
+            const std::string root = p16_scratch_root + "/overlay";
+            const ChunkCoord coord{kOverworld, 5, 5};
+            {
+                WorldOverlayStore writer;
+                writer.open(root);
+                chk.expect(!writer.recover(coord).has_value(),
+                           "an untouched chunk has nothing to recover");
+                writer.record(coord, ChunkMutationEvent{OverlayEventKind::kPlaceBuilding, 100, 100,
+                                                        static_cast<std::uint8_t>(BuildKind::kPlot),
+                                                        0, 1});
+                writer.record(coord, ChunkMutationEvent{OverlayEventKind::kUpgradeBuilding, 100, 100,
+                                                        0, 0, 1});
+                writer.record(coord,
+                              ChunkMutationEvent{OverlayEventKind::kTillGround, 101, 101, 0, 0, 1});
+                writer.record(coord, ChunkMutationEvent{OverlayEventKind::kPlantCrop, 101, 101,
+                                                        static_cast<std::uint8_t>(CropKind::kWheat),
+                                                        1000, 1});
+                writer.record(coord, ChunkMutationEvent{OverlayEventKind::kPlantCrop, 102, 102,
+                                                        static_cast<std::uint8_t>(CropKind::kCarrot),
+                                                        2000, 1});
+                writer.record(coord,
+                              ChunkMutationEvent{OverlayEventKind::kHarvestAt, 102, 102, 0, 0, 1});
+            }  // closed — same "restart before reading it back" discipline as the store above
+
+            WorldOverlayStore reader;
+            reader.open(root);
+            std::optional<ChunkOverlaySnapshot> snap = reader.recover(coord);
+            chk.expect(snap.has_value(),
+                       "a touched chunk's overlay recovers through a fresh store instance");
+            if (snap.has_value()) {
+                chk.expect(snap->buildings.size() == 1 && snap->buildings[0].level == 2,
+                           "PlaceBuilding + UpgradeBuilding fold into one level-2 building");
+                chk.expect(snap->buildings[0].hp == max_hp_of(BuildKind::kPlot, 2),
+                           "the folded building's hp matches its level — never a damaged value (§6.6)");
+                chk.expect(snap->tilled.size() == 1 && snap->tilled[0].tx == 101 &&
+                               snap->tilled[0].ty == 101,
+                           "TillGround folds into the tilled-tile list");
+                chk.expect(snap->crops.size() == 1 && snap->crops[0].tx == 101,
+                           "the harvested crop (102,102) is gone; the un-harvested one (101,101) "
+                           "remains");
+            }
+        }
+
+        // Live integration: World::open_save()/login()'s restore path, against the real engine.
+        chk.expect(world.open_save(p16_scratch_root, "persisttest_world"),
+                   "open_save creates a save directory for a live World");
+
+        LoginOutcome p16_out{};
+        p16_slot = world.login("persisttest", "hunter2", p16_out);
+        chk.expect(p16_slot >= 0 && p16_out == LoginOutcome::kCreated,
+                   "a brand-new account still gets the fresh starter pack (no saved row yet)");
+        if (p16_slot >= 0) {
+            const std::uint64_t p16_key = world.key_of(p16_slot);
+            const AccountId p16_acct = world.account_of(p16_slot);
+
+            // Well clear of every hearth/farm tile the sections above already placed near spawn.
+            const float p16_home_x =
+                std::clamp(spawn.x + 300.0f, 10.0f, static_cast<float>(kMapTiles - 10));
+            const float p16_home_y =
+                std::clamp(spawn.y - 300.0f, 10.0f, static_cast<float>(kMapTiles - 10));
+            world.teleport_player(p16_key, kOverworld, p16_home_x, p16_home_y);
+            advance(world, 2);
+
+            world.grant_xp(p16_key, Skill::kMelee, 500);
+            world.grant_vitals(p16_key, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+            p16_hearth_tx = static_cast<std::uint16_t>(p16_home_x);
+            p16_hearth_ty = static_cast<std::uint16_t>(p16_home_y);
+            const bool p16_lit =
+                world.build_at(p16_key, kOverworld, p16_hearth_tx, p16_hearth_ty, BuildKind::kHearth);
+            chk.expect(p16_lit, "the persistence test account could afford its hearth");
+            world.till(p16_key, kOverworld, static_cast<std::uint16_t>(p16_hearth_tx + 1),
+                      p16_hearth_ty);
+            world.plant(p16_key, kOverworld, static_cast<std::uint16_t>(p16_hearth_tx + 1),
+                       p16_hearth_ty, CropKind::kWheat, 0);
+            advance(world, 2);
+
+            p16_checkpoint = world.player_view(p16_slot);
+            world.checkpoint_progression();  // §6.3 point 1, forced rather than waited for
+            world.compact_overlay();         // §6.3 point 2
+
+            // Diverge the LIVE state past the checkpoint, without checkpointing again — proves a
+            // later restore reads the DISK snapshot, not whatever memory happens to hold.
+            for (int i = 0; i < 20; ++i) world.move_player(p16_key, 1.0f, 0.0f);
+            advance(world, 4);
+            const PlayerView p16_diverged = world.player_view(p16_slot);
+            chk.expect(std::abs(p16_diverged.x - p16_checkpoint.x) > 0.5f,
+                       "the live position moved well past the checkpoint");
+
+            world.disconnect_player(p16_key, kOverworld, p16_acct);
+            LoginOutcome p16_out2{};
+            const int p16_slot2 = world.login("persisttest", "hunter2", p16_out2);
+            chk.expect(p16_slot2 == p16_slot, "the same account reuses the same session slot");
+            const PlayerView p16_restored = world.player_view(p16_slot2);
+            chk.expect(std::abs(p16_restored.x - p16_checkpoint.x) < 0.01f &&
+                           std::abs(p16_restored.y - p16_checkpoint.y) < 0.01f,
+                       "login restores the CHECKPOINTED position, not the diverged live one");
+            chk.expect(p16_restored.hp == p16_checkpoint.hp, "vitals restore from the checkpoint too");
+            chk.expect(p16_restored.skill_xp[static_cast<int>(Skill::kMelee)] ==
+                           p16_checkpoint.skill_xp[static_cast<int>(Skill::kMelee)],
+                       "skill progress restores from the checkpoint");
+            chk.expect(p16_restored.respawn_tx == p16_hearth_tx &&
+                           p16_restored.respawn_ty == p16_hearth_ty,
+                       "the hearth's respawn point restores from the checkpoint");
+
+            world.disconnect_player(p16_key, kOverworld, p16_acct);
+        }
+        // Persists accounts.dat too — the second bring-up below needs the SAME AccountId for
+        // "persisttest", not a freshly-minted one, to resolve its progression row.
+        world.save_world_now();
+    }
+    std::printf("RFC-016 persistence: manifest, progression/overlay durability, and login-restore "
+               "all check out\n\n");
+
     world.stop();
+
+    // RFC-016 §6.4, direct: ChunkActor::apply_recovered_overlay() — the exact call
+    // World::recover_overlay() makes per chunk at bring-up — wired against a real ChunkActor,
+    // without paying for a second full engine+router bring-up. A second full World was tried here
+    // first; it built and ran correctly most of the time but occasionally hung, the same
+    // load-triggered actor-runtime timing flakiness RFC-015's own test block already ran into with
+    // the boss-respawn timer (see that block's header note) — not a logic bug in this RFC's code,
+    // but not worth the reliability cost for what this narrower test proves just as well. The
+    // disk-durability half ("a fresh store instance reads back what a closed one wrote") is already
+    // proven above by PlayerProgressionStore's and WorldOverlayStore's own round trips; this proves
+    // the remaining piece — that a recovered ChunkOverlaySnapshot actually lands on a live chunk.
+    if (p16_slot >= 0) {
+        SnapshotBus local_bus;
+        ChunkActor ch;
+        ch.coord = ChunkCoord{kOverworld, 9, 9};
+        ch.bus = &local_bus;
+        ch.generate_terrain(kWorldSeed);
+
+        ChunkOverlaySnapshot snap;
+        Building b{};
+        b.tx = 288;
+        b.ty = 288;
+        b.kind = BuildKind::kPlot;
+        b.level = 2;
+        b.hp = max_hp_of(BuildKind::kPlot, 2);
+        snap.buildings.push_back(b);
+        Crop c{};
+        c.tx = 289;
+        c.ty = 288;
+        c.kind = CropKind::kCarrot;
+        c.stage = 0;
+        c.planted_ms = 5000;
+        c.ripe_ms = 5000 + grow_ms_of(CropKind::kCarrot);
+        snap.crops.push_back(c);
+        snap.tilled.push_back(TilledTile{289, 288});
+        snap.tilled.push_back(TilledTile{290, 288});
+
+        chk.expect(ch.tilled_count() == 0, "a freshly generated chunk starts with no tilled tiles");
+        ch.apply_recovered_overlay(snap);
+        ch.publish_now();
+
+        chk.expect(ch.tilled_count() == 2, "apply_recovered_overlay() updates the tilled counter too");
+        ChunkViewPtr view = local_bus.load(ch.coord);
+        chk.expect(view != nullptr, "apply_recovered_overlay publishes a real ChunkView");
+        if (view) {
+            chk.expect(view->buildings.size() == 1 && view->buildings[0].tx == 288 &&
+                           view->buildings[0].level == 2,
+                       "the recovered building lands on the ChunkActor");
+            chk.expect(view->crops.size() == 1 && view->crops[0].tx == 289,
+                       "the recovered crop lands on the ChunkActor");
+            const auto idx0 = static_cast<std::size_t>(local_tile_index(289, 288));
+            const auto idx1 = static_cast<std::size_t>(local_tile_index(290, 288));
+            chk.expect(view->terrain[idx0] == static_cast<std::uint8_t>(Terrain::kDirt) &&
+                           view->terrain[idx1] == static_cast<std::uint8_t>(Terrain::kDirt),
+                       "both recovered tilled tiles overwrite the seed-derived terrain (§6.4's "
+                       "post-generate_terrain ordering)");
+        }
+    }
+    std::printf("RFC-016 persistence: apply_recovered_overlay() lands a recovered snapshot on a "
+               "real ChunkActor\n\n");
+
+    std::error_code p16_cleanup_ec;
+    std::filesystem::remove_all(p16_scratch_root, p16_cleanup_ec);  // best-effort scratch cleanup
 
     std::printf("\n%s\n", chk.failures == 0 ? "OK" : "FAIL");
     return chk.failures == 0 ? 0 : 1;

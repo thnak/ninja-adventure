@@ -426,4 +426,29 @@ struct SetInstanceReturn {
     std::uint16_t y = 0;
 };
 
+// RFC-016 §4/§7: BindAccount's counterpart for a returning account — restores a persisted
+// progression row instead of handing out the fixed starter pack. Sent once, at login, in place of
+// BindAccount whenever World::login() finds a saved PlayerProgression for the account (world.hpp).
+// `items`/`level`/`xp` carry exactly kItemKinds/kSkillCount entries in that fixed enum order
+// (tiles.hpp) — plain C arrays, like every other message here, since messages in this codebase are
+// not (yet) QUARK_SERIALIZE-described; only world/persistence.hpp's own durable structs are.
+struct RestoreProgression {
+    std::uint32_t account = 0;
+    std::uint16_t map = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+    std::int16_t hp = 0;
+    std::int16_t mana = 0;
+    std::int16_t stamina = 0;
+    std::uint32_t deaths = 0;
+    std::uint16_t respawn_tx = 0;
+    std::uint16_t respawn_ty = 0;
+    std::uint16_t return_map = 0;
+    std::uint16_t return_x = 0;
+    std::uint16_t return_y = 0;
+    std::int32_t items[kItemKinds] = {};
+    std::uint8_t level[kSkillCount] = {};
+    std::uint32_t xp[kSkillCount] = {};
+};
+
 }  // namespace mmo
