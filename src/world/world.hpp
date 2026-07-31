@@ -33,7 +33,9 @@
 #include "world/account.hpp"
 #include "world/chunk_actor.hpp"
 #include "world/flow_field.hpp"
+#include "world/instance_manager.hpp"
 #include "world/map_director.hpp"
+#include "world/map_system.hpp"
 #include "world/player_actor.hpp"
 #include "world/protocol.hpp"
 #include "world/snapshot.hpp"
@@ -86,6 +88,13 @@ public:
 
         router_ = std::make_unique<quark::LocalRouter>(engine_->post_courier(), *pool_);
 
+        // RFC-014 §3.2: the shared, world-lifetime resources every ChunkActor needs — set once, cold,
+        // before ANY chunk (eager or lazily broker-constructed) can exist. See chunk_actor.hpp's own
+        // header note on why this is a process-wide pointer rather than a `wire()`/`ResourceScope` pass.
+        detail::g_shared_router = router_.get();
+        detail::g_shared_bus = &bus_;
+        detail::g_shared_status = &status_;
+
         // One multi-source BFS, before any actor exists: distance to the nearest VILLAGE from every
         // tile. Read-only from here on — see flow_field.hpp for why handing every chunk a pointer
         // to it does not reintroduce shared mutable state.
@@ -98,6 +107,19 @@ public:
         build_chunks();
         build_bosses();
         build_director();
+
+        // RFC-014 §3.2: declares the TYPE as lazily-activatable for the instanced band. Cold, once,
+        // no instance constructed by this call — the persistent band's 2048 chunks stay exactly as
+        // eagerly `register_actor`'d as they were before this line existed (verified against the
+        // real engine source: `router.get<A>()`'s existing fast path is untouched by declaring a
+        // type lazy; the lazy table is only consulted on a miss, which never happens for an
+        // already-registered persistent-band chunk).
+        (void)engine_->declare_lazy<ChunkActor>(nullptr, pool_->sink());
+
+        instance_manager_.router = router_.get();
+        instance_manager_.bus = &bus_;
+        instance_manager_.world_seed = kWorldSeed;
+        instance_manager_.director_ref = router_->get<MapDirector>(kDirectorKey);
     }
 
     void start() { engine_->start(); }
@@ -134,6 +156,22 @@ public:
             return -1;
         }
         bound_[slot] = id;
+
+        // RFC-014 §6 Reconnect: if this slot's last published position (untouched by an earlier
+        // Unbind — see player_actor.hpp's handler) sits inside a still-open, non-closing
+        // InstanceSession, resume in place instead of respawning fresh. An unbound slot that was
+        // never inside an instance (the ordinary case — `map` defaults to kOverworld, never
+        // `map_id_instanced`) always falls through to the fresh-spawn path below, unchanged.
+        const PlayerView last = player_view(slot);
+        if (map_id_instanced(last.map)) {
+            InstanceSession* resume = instance_manager_.find_session(last.map);
+            if (resume != nullptr && !instance_session_closing(resume->state)) {
+                player_ref(slot).tell(Rebind{id});
+                instance_manager_.enter(last.map, id);
+                return slot;
+            }
+        }
+
         BindAccount b{};
         b.account = id;
         // Open country, a good half-minute's walk from the nearest village. Not a farm, not a
@@ -149,7 +187,73 @@ public:
         return slot;
     }
 
+    // --- RFC-014: instance lifecycle, exposed for tests/tools ---------------------------------------
+    // No portal-step trigger detector exists yet (that is client/input-layer territory, not this
+    // RFC's — see instance_manager.hpp's own header note); these are the real, callable verbs a
+    // future trigger would invoke, exercised directly today the same way `teleport_player` already is.
+
+    [[nodiscard]] InstanceManager& instances() noexcept { return instance_manager_; }
+
+    // RFC-022 §2.3 resolve() + RFC-014 §3 allocate_new(), composed into one call: resolve the portal
+    // against currently-live sessions, allocate a fresh instance if the decision was
+    // kNeedsAllocation, then physically move the player there. Returns false if allocation was
+    // refused (kMaxConcurrentInstances) or the player key does not resolve.
+    bool use_portal(std::uint64_t player, const PortalDef& portal, GroupId group, AccountId account,
+                    MapDescriptor instanced_descriptor = {}) {
+        const std::vector<MapSession>& live = instance_manager_.live_sessions_for_resolve();
+        const ResolveResult r = resolve_portal(portal, live, group);
+        MapId target = 0;
+        float tx = portal.fixed_to_x + 0.5f;
+        float ty = portal.fixed_to_y + 0.5f;
+        MapId return_map = 0;
+        std::uint16_t return_x = 0, return_y = 0;
+        if (r.outcome == ResolveOutcome::kFound) {
+            target = r.session.map_id;
+            return_map = r.session.return_map;
+            return_x = r.session.return_x;
+            return_y = r.session.return_y;
+            if (map_id_instanced(target)) instance_manager_.enter(target, account);
+        } else {
+            const MapSession* s = instance_manager_.allocate_new(portal, group, instanced_descriptor,
+                                                                  account);
+            if (s == nullptr) return false;
+            target = s->map_id;
+            tx = 1.5f;  // an instance's own (0,0) chunk centre — no authored spawn point exists yet
+            ty = 1.5f;
+            return_map = s->return_map;
+            return_x = s->return_x;
+            return_y = s->return_y;
+        }
+        // RFC-013 §6.2: cache the session's return point on the player's own actor BEFORE the
+        // Teleport that lands them there — so a death on the very first tick after arrival still has
+        // a real ejection destination rather than reading the all-zero "unset" default.
+        if (map_id_instanced(target)) {
+            player_ref_by_key(player).tell(
+                SetInstanceReturn{static_cast<std::uint16_t>(return_map), return_x, return_y});
+        }
+        player_ref_by_key(player).tell(Teleport{target, tx, ty});
+        return true;
+    }
+
+    // RFC-014 §6 deliberate exit: leaves `present`, never `members` — see instance_manager.hpp.
+    // RFC-013 §6.8: also the bookkeeping call for a death-triggered ejection — "bookkept identically
+    // to Deliberate Exit, not Disconnect," per that RFC's own ruling, so no second method is added
+    // for it. Like a `kReturnPortal` crossing, nothing detects the moment to call this automatically
+    // yet (no portal-trigger or death-observer wiring exists — both are equally caller-invoked today,
+    // exercised directly by tests/tools, same as every other instance-lifecycle verb on this class).
+    void leave_instance(MapId map, AccountId account) { instance_manager_.leave_present(map, account); }
+
+    // RFC-014 §6 disconnect (data-level only — see Unbind's own header note).
+    void disconnect_player(std::uint64_t player, MapId map, AccountId account) {
+        instance_manager_.leave_present(map, account);
+        player_ref_by_key(player).tell(Unbind{});
+    }
+
+    // RFC-014 §3.5: call on a coarse cadence, not once per simulation tick.
+    void sweep_instances(std::int64_t world_ms) { instance_manager_.sweep_idle(world_ms); }
+
     [[nodiscard]] std::uint64_t key_of(int slot) const noexcept { return player_key(slot); }
+    [[nodiscard]] AccountId account_of(int slot) const noexcept { return bound_[slot]; }
 
     // One simulation step. The caller owns the pacing — a fixed-step loop in the headless runner, a
     // frame-rate-independent accumulator in the client.
@@ -484,6 +588,13 @@ public:
         player_ref_by_key(player).tell(GrantVitals{hp, mana, stamina});
     }
 
+    // Debug/tools: `GrantVitals`'s symmetric opposite, exercising the exact `HurtPlayer` message a
+    // creature's own strike sends (chunk_actor.hpp), without needing a staged fight to land it. Lets
+    // RFC-013's death/ejection contract be tested directly against a chosen amount and source.
+    void hurt_player(std::uint64_t player, std::int16_t amount, std::uint32_t source = 0) {
+        player_ref_by_key(player).tell(HurtPlayer{amount, source});
+    }
+
     // The generated world, for anything that needs to know where things ARE rather than what a
     // chunk currently holds: the renderer (which buildings to draw), the map exporter, the tests.
     [[nodiscard]] const WorldLayout& layout() const noexcept { return *layout_; }
@@ -679,6 +790,8 @@ private:
     std::unique_ptr<MapDirector> director_;
     std::unique_ptr<quark::Activation> director_act_;
     quark::ActorRef<MapDirector> director_ref_{};
+
+    InstanceManager instance_manager_;
 };
 
 }  // namespace mmo

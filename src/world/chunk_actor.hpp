@@ -104,18 +104,47 @@ inline constexpr std::uint16_t kCrushBlowImpulse = 260;
     return Channel::kNone;
 }
 
+// RFC-014 §3.2: the shared, world-lifetime resources (one router, one bus, one status per `World`)
+// every `ChunkActor` needs, whether eagerly registered (`World::build_chunks()`, which still assigns
+// `router`/`bus`/`status` explicitly afterward — redundant with the default member initializers
+// below, not incorrect) or lazily broker-constructed (`declare_lazy` + `PrimeInstanceChunk`, which
+// has no per-instance way to pass them — `protocol.hpp`'s own POD-only rule for messages rules out
+// carrying raw pointers on `PrimeInstanceChunk` itself). Set exactly once, cold, before the engine
+// starts — the identical "process-wide pointer, written once, read everywhere thereafter" shape
+// `tiles.hpp`'s own `detail::g_overlay` already uses and justifies at length, applied to three
+// pointers instead of one array. The full 004-Resources `Cached<T>`/`ResourceScope` system
+// (`QuarkCpp/include/quark/core/resource.hpp`) is the "real" engine-sanctioned mechanism for this,
+// but converting `ChunkActor`'s three raw-pointer fields into typed resource members is a broader
+// refactor of already-shipped, heavily-exercised code this pass does not take on.
+namespace detail {
+inline quark::LocalRouter* g_shared_router = nullptr;
+inline SnapshotBus* g_shared_bus = nullptr;
+inline WorldStatus* g_shared_status = nullptr;
+}  // namespace detail
+
+// RFC-014 §3.5: a type-level policy. Adding it here has ZERO effect on the persistent band —
+// `World::build_chunks()` still calls `quark::register_actor<ChunkActor>()` (spawn.hpp), which never
+// forwards `idle_timeout_ms_of<A>()` to `register_activation`'s `idle_ticks` parameter (verified
+// against the real engine source, not assumed) — so every eagerly-registered chunk stays hardcoded
+// to `idle_ticks=0`, immune to eviction, exactly as today. Only a `declare_lazy`'d, broker-
+// constructed instance (the instanced band, `InstanceManager::allocate_new`) reads this policy at
+// all, because only `Engine::handle_wake()` resolves `idle_timeout_ms_of<A>()` from the type's
+// compiled metadata. One `ChunkActor` type, two registration entry points, one asymmetric outcome —
+// not a per-band split of the type itself.
 struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<1>,
-                                 quark::DrainBudget<64>, quark::Placement<quark::HashById>> {
+                                 quark::DrainBudget<64>, quark::Placement<quark::HashById>,
+                                 quark::IdleTimeout<kInstanceChunkIdleTimeoutMs>> {
     using protocol =
         Protocol<Tick, CreatureEnter, ProjectileEnter, SpawnWave, PlayerBeacon, MeleeSwing,
                  CastSpell, LaunchArrow, AbilityStrike, SpawnEntity, PlantCrop, PlaceBuilding,
-                 UpgradeBuilding, TillGround, HarvestAt, Ask<GetChunkStats, ChunkStats>>;
+                 UpgradeBuilding, TillGround, HarvestAt, PrimeInstanceChunk,
+                 Ask<GetChunkStats, ChunkStats>>;
 
     // --- Wired once at bring-up, before the engine starts -----------------------------------------
     ChunkCoord coord{};
-    quark::LocalRouter* router = nullptr;
-    SnapshotBus* bus = nullptr;
-    WorldStatus* status = nullptr;
+    quark::LocalRouter* router = detail::g_shared_router;
+    SnapshotBus* bus = detail::g_shared_bus;
+    WorldStatus* status = detail::g_shared_status;
     const FlowField* flow = nullptr;  // read-only, never written after bring-up (see flow_field.hpp)
     // Fallback target when a creature is somewhere the flow field does not cover (an unreachable
     // pocket, an island): the settlement nearest to this chunk, resolved once at bring-up.
@@ -192,6 +221,25 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
     }
 
     void handle(const ProjectileEnter& e) noexcept { shots_.push_back(e.shot); }
+
+    // RFC-014 §3.2's "Option 2": the per-instance imperative setup a `declare_lazy`'d, broker-
+    // constructed `ChunkActor` needs but its type-level `wire()` hook has no natural way to receive
+    // (which coordinate this is, which map's seed to use). Mirrors `World::build_chunks()`'s own
+    // field-assignment exactly — `coord`/`router`/`bus`/`status`/terrain — with two deliberate
+    // omissions for an instanced chunk: no flow-field pointer (no per-instance flow field is built;
+    // creatures in an instance do not path toward a persistent-band village) and no wildlife seeding
+    // (an instance starts empty; population is RFC-023's job, not this RFC's). `router`/`bus`/
+    // `status` are not part of the message — they are process-wide, wired once by `InstanceManager`
+    // onto itself and passed through the SAME pointers every chunk already shares, never re-sent per
+    // chunk.
+    void handle(const PrimeInstanceChunk& p) noexcept {
+        coord = p.coord;
+        flow = nullptr;
+        home_x = 0.0f;
+        home_y = 0.0f;
+        generate_terrain(p.seed);
+        publish();
+    }
 
     // Soft state with a lease. An upsert, never a delete — see PlayerBeacon in protocol.hpp for why
     // the absence of a "player left" message is the point rather than an omission.

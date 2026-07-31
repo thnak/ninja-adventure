@@ -54,8 +54,9 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
                                   quark::Placement<quark::HashById, Require<Trusted>>> {
     using protocol =
         Protocol<Tick, MoveIntent, Teleport, GrantItems, HurtPlayer, GrantVitals, GrantXp,
-                 SetRespawn, BindAccount, SetMounted, Ask<SpendItems, bool>, Ask<GetPlayer, PlayerView>,
-                 Ask<PlanAttack, AttackPlan>, Ask<UseAbility, AbilityPlan>>;
+                 SetRespawn, BindAccount, Unbind, Rebind, SetMounted, SetInstanceReturn,
+                 Ask<SpendItems, bool>, Ask<GetPlayer, PlayerView>, Ask<PlanAttack, AttackPlan>,
+                 Ask<UseAbility, AbilityPlan>>;
 
     // Set once at bring-up, before the engine starts.
     std::uint64_t id = 0;
@@ -130,6 +131,25 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         publish();
     }
 
+    // RFC-014 §6: a connection dropped with no kReturnPortal use. Reverts the session slot to
+    // unbound WITHOUT touching position — the opposite of BindAccount's unconditional respawn/
+    // refill, and the whole point: a disconnected player's `x_`/`y_`/`map` are left exactly where
+    // they were, so a same-account reconnect (World::login()'s resume branch) can put them straight
+    // back rather than at the overworld spawn with reset resources. No client-facing disconnect
+    // DETECTOR exists yet (RFC-015's territory) — this handler is the data-level mechanism a future
+    // one would call, exercised directly by tests/tools today.
+    void handle(const Unbind&) noexcept {
+        account_ = 0;
+        publish();
+    }
+
+    // RFC-014 §6 Reconnect: re-arms the slot for `b.account` without touching `x_`/`y_`/`map`/vitals
+    // — the player materializes exactly where they logged out, inside the still-live session.
+    void handle(const Rebind& b) noexcept {
+        account_ = b.account;
+        publish();
+    }
+
     void handle(const MoveIntent& m) noexcept {
         // This used to clamp to the map and nothing else, on the argument that terrain is
         // chunk-owned state and a tier-A actor should hold none of it. The argument was about
@@ -197,6 +217,10 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
             dead_ticks_ = kRespawnTicks;
             ++deaths_;
             mounted_ = false;
+            // RFC-013 §6.1: decided once, at the moment of death, off `PlayerActor`'s own `map`
+            // field — no cross-actor lookup on the damage-resolution path. Consumed and cleared by
+            // respawn() at the end of the dead_ticks_ countdown.
+            pending_eject_ = map_id_instanced(map);
         } else if (head_.phase == AbilityPhase::kCast &&
                    static_cast<float>(h.amount) >= kCastPoiseFrac * static_cast<float>(kPlayerMaxHp)) {
             // Section 5 item 3 — poise-break: a single hit hard enough breaks a Cast outright.
@@ -237,6 +261,15 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
     void handle(const SetRespawn& r) noexcept {
         respawn_tx_ = r.tx;
         respawn_ty_ = r.ty;
+    }
+
+    // RFC-013 §6.2: caches a MapSession's return coordinates so death-time ejection never needs a
+    // cross-actor query. A zero-default (never sent, or sent with an all-zero triple) is treated by
+    // respawn() as "no sane position to resume at" and falls back to the bound hearth point (§7).
+    void handle(const SetInstanceReturn& r) noexcept {
+        instance_return_map_ = r.map;
+        instance_return_x_ = r.x;
+        instance_return_y_ = r.y;
     }
 
     void handle(const SetMounted& m) noexcept {
@@ -543,9 +576,38 @@ private:
     // penalty is the most reliable way to turn exploring into hoarding: players who fear losing a
     // backpack stop going anywhere with it. What death costs is the walk back, and out past the
     // second ring that is quite enough.
+    // RFC-013 §3.6/§6.5: forks on `pending_eject_`, decided once at the moment of death. Persistent-
+    // band death (the `else` branch) is byte-identical to the pre-RFC-013 function. Instanced-band
+    // death clears the full carried-item array and relocates to the session's return point — or, if
+    // that point was never wired (still the all-zero default), falls back to the bound hearth exactly
+    // as §7's general "no sane position to resume at" rule prescribes. Neither path touches xp_[]/
+    // level_[] — see §6.6: skills and unlocked abilities are never a death cost.
+    //
+    // DIVERGENCE from §6.5's literal listing: the RFC's own pseudocode never assigns `map`, deferring
+    // to "a Teleport... issued by the same caller" — but respawn() has no external caller (it fires
+    // from inside this actor's own Tick handler, at dead_ticks_ == 0), so there is no second message
+    // to send. Setting `map` directly here, the same field Teleport's own handler writes, is the
+    // minimal fix that makes ejection actually relocate the player rather than leaving them stranded
+    // on a MapId their instance's teardown sweep is about to garbage-collect out from under them.
     void respawn() noexcept {
-        x_ = static_cast<float>(respawn_tx_) + 0.5f;
-        y_ = static_cast<float>(respawn_ty_) + 0.5f;
+        if (pending_eject_) {
+            for (int i = 0; i < kItemKinds; ++i) items_[i] = 0;
+            const bool have_return =
+                instance_return_map_ != 0 || instance_return_x_ != 0 || instance_return_y_ != 0;
+            if (have_return) {
+                map = instance_return_map_;
+                x_ = static_cast<float>(instance_return_x_) + 0.5f;
+                y_ = static_cast<float>(instance_return_y_) + 0.5f;
+            } else {
+                map = kOverworld;
+                x_ = static_cast<float>(respawn_tx_) + 0.5f;
+                y_ = static_cast<float>(respawn_ty_) + 0.5f;
+            }
+            pending_eject_ = false;
+        } else {
+            x_ = static_cast<float>(respawn_tx_) + 0.5f;
+            y_ = static_cast<float>(respawn_ty_) + 0.5f;
+        }
         hp_ = kPlayerMaxHp;
         mana_ = kPlayerMaxMana;
         stamina_ = kPlayerMaxStamina;
@@ -577,6 +639,14 @@ private:
     bool mounted_ = false;
     std::uint16_t respawn_tx_ = 0;
     std::uint16_t respawn_ty_ = 0;
+    // RFC-013 §6.1/§6.2: decided once at the moment of death (`pending_eject_`), consumed once by
+    // respawn(). `instance_return_*` mirrors respawn_tx_/ty_'s own pattern — populated once, at entry
+    // to an instanced MapSession, by SetInstanceReturn (World::use_portal()) — and defaults to the
+    // all-zero triple respawn() reads as "unset" (§6.2's guard), never a genuine MapId-0/(0,0) target.
+    bool pending_eject_ = false;
+    std::uint16_t instance_return_map_ = 0;
+    std::uint16_t instance_return_x_ = 0;
+    std::uint16_t instance_return_y_ = 0;
     std::int64_t last_hurt_ms_ = -kCombatCooldownMs;
     std::int64_t last_regen_ms_ = 0;
     std::int64_t world_ms_ = 0;

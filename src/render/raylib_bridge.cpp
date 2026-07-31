@@ -381,18 +381,18 @@ inline constexpr int kFxCells = 11;   // cells across; kFxCells^2 particles per 
 
 // Which ambience a ring gets. The wetland is the swamp/desert ring — rain suits the swamp half and
 // is a reasonable lie over the desert half at this scale.
-enum class Weather : std::uint8_t { kLeaves, kRain, kSnow, kNone };
+enum class FxWeather : std::uint8_t { kLeaves, kRain, kSnow, kNone };
 
-[[nodiscard]] Weather weather_of(Ring r) {
+[[nodiscard]] FxWeather fx_weather_of(Ring r) {
     switch (r) {
         case Ring::kMeadow:
-        case Ring::kForest: return Weather::kLeaves;
-        case Ring::kWetland: return Weather::kRain;
-        case Ring::kSnow: return Weather::kSnow;
+        case Ring::kForest: return FxWeather::kLeaves;
+        case Ring::kWetland: return FxWeather::kRain;
+        case Ring::kSnow: return FxWeather::kSnow;
         case Ring::kWasteland:
         case Ring::kCount: break;
     }
-    return Weather::kNone;
+    return FxWeather::kNone;
 }
 
 }  // namespace
@@ -1088,9 +1088,9 @@ struct RaylibBridge::Impl {
 
     void draw_ambience(std::uint16_t map, float cam_x, float cam_y, double t) const {
         if (map != kOverworld) return;  // it does not snow indoors
-        const Weather w = weather_of(ring_of(kWorldSeed, static_cast<int>(cam_x / kTilePx),
+        const FxWeather w = fx_weather_of(ring_of(kWorldSeed, static_cast<int>(cam_x / kTilePx),
                                              static_cast<int>(cam_y / kTilePx)));
-        if (w == Weather::kNone) return;
+        if (w == FxWeather::kNone) return;
 
         // Snap the grid origin to the camera so the same number of particles is always in view.
         const float ox = std::floor(cam_x / kFxSpan) * kFxSpan - (kFxCells / 2) * kFxSpan;
@@ -1112,7 +1112,7 @@ struct RaylibBridge::Impl {
                 float py = oy + gy * kFxSpan + jy;
 
                 switch (w) {
-                    case Weather::kLeaves: {
+                    case FxWeather::kLeaves: {
                         // Drift on the wind and bob: slow, sideways, unhurried. This is the chill
                         // ring's whole personality in four lines.
                         px += static_cast<float>(t) * 22.0f * speed;
@@ -1124,7 +1124,7 @@ struct RaylibBridge::Impl {
                            std::sin(static_cast<float>(t) * 1.1f + phase) * 25.0f);
                         break;
                     }
-                    case Weather::kRain: {
+                    case FxWeather::kRain: {
                         py += static_cast<float>(t) * 620.0f * speed;
                         px += static_cast<float>(t) * 90.0f;
                         py = oy + std::fmod(py - oy + kFxSpan * kFxCells * 8.0f,
@@ -1139,7 +1139,7 @@ struct RaylibBridge::Impl {
                         }
                         break;
                     }
-                    case Weather::kSnow: {
+                    case FxWeather::kSnow: {
                         py += static_cast<float>(t) * 46.0f * speed;
                         px += std::sin(static_cast<float>(t) * 0.5f + phase) * 34.0f;
                         py = oy + std::fmod(py - oy + kFxSpan * kFxCells * 8.0f,
@@ -1151,7 +1151,7 @@ struct RaylibBridge::Impl {
                         }
                         break;
                     }
-                    case Weather::kNone: break;
+                    case FxWeather::kNone: break;
                 }
             }
         }

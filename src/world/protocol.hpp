@@ -12,10 +12,12 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 #include "world/abilities.hpp"
 #include "world/ability_pipeline.hpp"
 #include "world/combat_entity.hpp"
+#include "world/map_system.hpp"
 #include "world/tiles.hpp"
 
 namespace mmo {
@@ -375,5 +377,53 @@ struct ReportMigration {
 };
 
 struct GetWorldTick {};
+
+// --- RFC-014: instance lifecycle messages ---------------------------------------------------------
+
+// Sent once per chunk_key() in a freshly-allocated instance's chunk_edge x chunk_edge grid, by
+// InstanceManager::allocate_new() (RFC-014 §3.2-§3.3), doing the same imperative field-assignment
+// World::build_chunks() already does for the persistent band — Option 2 of RFC-014 §3.2's two
+// sketched wiring paths (declare_lazy's own wire() hook stays untouched; this message is the
+// per-instance setup instead, reusing the exact same setup code path, not a second one).
+struct PrimeInstanceChunk {
+    ChunkCoord coord{};
+    MapDescriptor descriptor{};
+    std::uint64_t seed = 0;
+};
+
+// InstanceManager tells MapDirector to add/remove a live instance's chunk coordinates from its
+// per-tick fan-out list (RFC-014 §3.4) — a MESSAGE, never a direct mutating call into
+// `MapDirector::chunks` (a plain, non-atomic `std::vector` `MapDirector`'s own handler concurrently
+// iterates; RFC-014's own Open Question 4, resolved during review as "must be a message").
+struct FanOutAdd {
+    std::vector<ChunkCoord> coords;
+};
+struct FanOutRemove {
+    std::vector<ChunkCoord> coords;
+};
+
+// A player's connection dropped with no kReturnPortal use (RFC-014 §6) — reverts the session slot
+// to unbound WITHOUT touching position, unlike `BindAccount`'s unconditional respawn-and-refill.
+// No client-facing network/disconnect layer exists yet (RFC-015's territory); this message is the
+// data-level mechanism a future disconnect detector would send.
+struct Unbind {};
+
+// The reconnect half of RFC-014 §6: re-arms an already-positioned slot for the SAME account without
+// touching position or vitals, unlike `BindAccount`'s unconditional fresh-spawn reset. Sent by
+// `World::login()`'s resume branch when a reconnecting account's last known map points at a still-
+// open `InstanceSession`.
+struct Rebind {
+    std::uint32_t account = 0;
+};
+
+// RFC-013 §6.2: caches a MapSession's return coordinates on the dying player's own actor, mirroring
+// SetRespawn exactly. Sent once by whichever call already lands a Teleport onto a freshly-joined-or-
+// created instanced MapSession (World::use_portal()), so death-time ejection (handle(HurtPlayer)) is
+// a single-actor operation — no cross-actor query into InstanceManager on the damage-resolution path.
+struct SetInstanceReturn {
+    std::uint16_t map = 0;
+    std::uint16_t x = 0;
+    std::uint16_t y = 0;
+};
 
 }  // namespace mmo

@@ -1218,6 +1218,205 @@ int main(int argc, char** argv) {
     const PlayerView empty_slot = world.player_view(kMaxPlayers - 1);
     chk.expect(!empty_slot.live(), "a slot nobody logged into is not a player");
 
+    // --- RFC-014: instance lifecycle, live against the real engine ---------------------------------
+    // No portal-step trigger detector exists (client/input-layer territory, not this RFC's), so this
+    // drives `World::use_portal`/`disconnect_player`/`sweep_instances` directly — the same real,
+    // callable verbs a future trigger would invoke, exercised the way `teleport_player` already is.
+    {
+        PortalDef portal{};
+        portal.id = 501;
+        portal.from_map = kOverworld;
+        portal.from_x = static_cast<std::uint16_t>(spawn.x);
+        portal.from_y = static_cast<std::uint16_t>(spawn.y);
+        portal.kind = PortalKind::kRealmGate;
+        portal.realm_type = RealmType::kChallenge;
+        portal.flavor = RealmFlavor::kDungeon;
+        portal.binding = PortalBinding::kAllocateOnUse;
+        portal.scope = SessionScope::kGroupInstance;
+
+        MapDescriptor desc{};
+        desc.chunk_edge = 2;
+        desc.biome = Ring::kForest;
+        desc.weather_mode = WeatherMode::kFixed;
+        desc.allow_free_build = false;
+
+        const AccountId acct = world.account_of(slot);
+        const bool ok1 = world.use_portal(me, portal, /*group*/ 1, acct, desc);
+        chk.expect(ok1, "use_portal allocates a fresh instance on first use");
+        const PlayerView in1 = world.player_view(slot);
+        chk.expect(map_id_instanced(in1.map), "the player lands on an instanced MapId");
+        const MapId target = in1.map;
+
+        InstanceSession* s1 = world.instances().find_session(target);
+        chk.expect(s1 != nullptr && s1->state == SessionState::kActive,
+                   "a fresh instance is ACTIVE immediately — priming is a synchronous barrier");
+        chk.expect(s1 != nullptr && s1->chunk_edge == 2,
+                   "the session records the descriptor's own chunk_edge");
+        chk.expect(s1 != nullptr && !s1->members.empty() && s1->members[0] == acct,
+                   "the requester is recorded as a member");
+
+        const ChunkStats cs = world.chunk_stats(ChunkCoord{target, 0, 0});
+        chk.expect(cs.creatures == 0,
+                   "a freshly primed instance chunk exists and answers — declare_lazy really "
+                   "activated it, empty since no population is authored yet");
+
+        // Rejoin: the SAME group reusing the SAME portal must land on the SAME session.
+        const bool ok2 = world.use_portal(me, portal, 1, acct, desc);
+        chk.expect(ok2, "rejoining the same group's open session succeeds");
+        chk.expect(world.player_view(slot).map == target,
+                   "the same group rejoins the SAME instance, never a fresh allocation");
+
+        // A different group using the identical portal gets its OWN instance.
+        const std::uint64_t other = world.key_of(slot2);
+        const AccountId acct2 = world.account_of(slot2);
+        const bool ok3 = world.use_portal(other, portal, 2, acct2, desc);
+        chk.expect(ok3, "a second group can use the same portal");
+        const MapId target2 = world.player_view(slot2).map;
+        chk.expect(map_id_instanced(target2) && target2 != target,
+                   "a different group gets a DIFFERENT instance, never the first group's");
+
+        // Disconnect: position preserved exactly, the slot goes unbound.
+        world.disconnect_player(me, target, acct);
+        chk.expect(!world.player_view(slot).live(), "a disconnected slot is unbound");
+        chk.expect(world.player_view(slot).map == target,
+                   "disconnect preserves position — it does not move the player");
+
+        // Reconnect: same account, same slot, resumes IN PLACE (not the overworld spawn).
+        LoginOutcome resumed_out{};
+        const int resumed_slot = world.login("thnak", "correct horse battery", resumed_out);
+        chk.expect(resumed_slot == slot, "reconnecting the same account takes back the same slot");
+        chk.expect(world.player_view(slot).live() && world.player_view(slot).map == target,
+                   "reconnecting resumes inside the still-open instance, not a fresh spawn");
+
+        // Teardown: empty `present`, sweep past the grace window, the session closes for good.
+        world.leave_instance(target, acct);
+        world.sweep_instances(1'000);
+        InstanceSession* idle = world.instances().find_session(target);
+        chk.expect(idle != nullptr && idle->state == SessionState::kIdle,
+                   "an empty session goes IDLE first, not closed immediately — the grace window");
+        world.sweep_instances(1'000 + kInstanceIdleGraceMs);
+        chk.expect(world.instances().find_session(target) == nullptr,
+                   "once the grace window elapses, the session is torn down and forgotten");
+        chk.expect(world.bus().load(ChunkCoord{target, 0, 0}) == nullptr,
+                   "the SnapshotBus block is released — a stale load for the closed map returns null");
+
+        world.teleport_player(me, kOverworld, spawn.x, spawn.y);
+        world.teleport_player(other, kOverworld, spawn.x, spawn.y);
+    }
+    std::printf("RFC-014 instance lifecycle: allocate/rejoin/group-isolation/disconnect/reconnect/"
+               "teardown all check out\n\n");
+
+    // --- RFC-013: vitals, death & recovery ----------------------------------------------------------
+    // Persistent-band death (hearth respawn, nothing lost) is unchanged by this RFC and already has
+    // its own dedicated regression further below (the "Death and respawn" section) — the fork this
+    // RFC adds never triggers for map < kPersistentBandEnd. This block covers the two contracts §6
+    // actually adds: instanced-band ejection to a session's real return point (with full item loss,
+    // untouched XP/levels), and §6.2's guard falling back to the bound hearth when a player's
+    // instance_return_* was never wired at all. Both run on FRESH, dedicated accounts rather than
+    // `me`/`slot` — ejection permanently zeroes carried items, and the rest of this suite (farming,
+    // hearth-building) depends on `me` still holding its starting wood/stone/seed.
+    {
+        PortalDef portal{};
+        portal.id = 502;
+        portal.from_map = kOverworld;
+        portal.from_x = static_cast<std::uint16_t>(spawn.x);
+        portal.from_y = static_cast<std::uint16_t>(spawn.y);
+        portal.kind = PortalKind::kRealmGate;
+        portal.realm_type = RealmType::kChallenge;
+        portal.flavor = RealmFlavor::kDungeon;
+        portal.binding = PortalBinding::kAllocateOnUse;
+        portal.scope = SessionScope::kSoloInstance;
+
+        MapDescriptor desc{};
+        desc.chunk_edge = 1;
+        desc.biome = Ring::kForest;
+        desc.weather_mode = WeatherMode::kFixed;
+        desc.allow_free_build = false;
+
+        LoginOutcome eject_out{};
+        const int eject_slot = world.login("ejecttest", "hunter2", eject_out);
+        chk.expect(eject_slot >= 0, "a dedicated account logs in for the ejection test");
+        if (eject_slot >= 0) {
+            const std::uint64_t eject_key = world.key_of(eject_slot);
+            const AccountId acct = world.account_of(eject_slot);
+            world.teleport_player(eject_key, kOverworld, spawn.x, spawn.y);
+            const PlayerView before = world.player_view(eject_slot);
+            chk.expect(before.items[static_cast<int>(ItemKind::kWood)] > 0,
+                       "the player carries something worth losing, going in");
+
+            const bool entered = world.use_portal(eject_key, portal, /*group*/ 3, acct, desc);
+            chk.expect(entered, "use_portal allocates a fresh solo instance for the ejection test");
+            const MapId target = world.player_view(eject_slot).map;
+            chk.expect(map_id_instanced(target), "landed on an instanced MapId");
+
+            world.hurt_player(eject_key, kPlayerMaxHp);
+            chk.expect(world.player_view(eject_slot).dead_ticks > 0,
+                       "a lethal hit starts the same death countdown as an overworld death");
+
+            advance(world, kRespawnTicks + 5);
+            const PlayerView ejected = world.player_view(eject_slot);
+            chk.expect(ejected.map == portal.from_map,
+                       "ejection lands the player back on the map they entered through");
+            chk.expect(std::fabs(ejected.x - (static_cast<float>(portal.from_x) + 0.5f)) < 0.01f &&
+                           std::fabs(ejected.y - (static_cast<float>(portal.from_y) + 0.5f)) < 0.01f,
+                       "ejection lands exactly at the session's cached return point");
+            chk.expect(ejected.items[static_cast<int>(ItemKind::kWood)] == 0 &&
+                           ejected.items[static_cast<int>(ItemKind::kStone)] == 0 &&
+                           ejected.items[static_cast<int>(ItemKind::kSeed)] == 0,
+                       "ejection clears every carried item, in full (§6.5)");
+            chk.expect(ejected.hp == kPlayerMaxHp && ejected.mana == kPlayerMaxMana &&
+                           ejected.stamina == kPlayerMaxStamina,
+                       "vitals restore to maximum, identically to an overworld respawn");
+            chk.expect(ejected.skill_level[static_cast<int>(Skill::kMelee)] ==
+                               before.skill_level[static_cast<int>(Skill::kMelee)] &&
+                           ejected.skill_xp[static_cast<int>(Skill::kMelee)] ==
+                               before.skill_xp[static_cast<int>(Skill::kMelee)],
+                       "XP and skill levels are never touched by ejection (§6.6)");
+            chk.expect(ejected.deaths > before.deaths,
+                       "ejection counts as a death, same counter as overworld");
+
+            world.leave_instance(target, acct);
+            world.sweep_instances(2'000);
+            world.sweep_instances(2'000 + kInstanceIdleGraceMs);
+
+            // Ejection lands this account back on the shared overworld spawn tile — the same tile
+            // `me`/`guest` wake on. Disconnect it (goes inert, stops beaconing) so it does not become
+            // a silent third watcher in the staged-fight section below, which counts exactly two.
+            world.disconnect_player(eject_key, world.player_view(eject_slot).map, acct);
+        }
+
+        // §6.2's guard: a player placed on an instanced map WITHOUT ever going through use_portal (so
+        // instance_return_map_/x_/y_ are still the all-zero default) must fall back to their own bound
+        // hearth on ejection, not trust the zero triple as a real destination.
+        LoginOutcome guard_out{};
+        const int guard_slot = world.login("ejectguard", "hunter2", guard_out);
+        chk.expect(guard_slot >= 0, "a third account logs in clean for the fallback guard test");
+        if (guard_slot >= 0) {
+            const std::uint64_t guard_key = world.key_of(guard_slot);
+            const PlayerView guard_before = world.player_view(guard_slot);
+            world.teleport_player(guard_key, kPersistentBandEnd, 2.5f, 2.5f);
+            chk.expect(map_id_instanced(world.player_view(guard_slot).map),
+                       "the guard test player sits on an instanced map with no SetInstanceReturn ever sent");
+            world.hurt_player(guard_key, kPlayerMaxHp);
+            advance(world, kRespawnTicks + 5);
+            const PlayerView guard_reborn = world.player_view(guard_slot);
+            chk.expect(guard_reborn.map == kOverworld,
+                       "an unset return point falls back to the overworld hearth, not the instanced map");
+            chk.expect(
+                std::fabs(guard_reborn.x - (static_cast<float>(guard_before.respawn_tx) + 0.5f)) < 0.01f &&
+                    std::fabs(guard_reborn.y - (static_cast<float>(guard_before.respawn_ty) + 0.5f)) <
+                        0.01f,
+                "the fallback lands exactly at the player's own bound hearth point (§7)");
+            chk.expect(guard_reborn.items[static_cast<int>(ItemKind::kWood)] == 0,
+                       "the fallback path still clears carried items — it is still an ejection");
+
+            // Same reason as ejecttest above: the fallback also lands on the shared spawn tile.
+            world.disconnect_player(guard_key, kOverworld, world.account_of(guard_slot));
+        }
+    }
+    std::printf("RFC-013 vitals/death/recovery: instanced ejection + return-point guard fallback "
+               "check out\n\n");
+
     // --- Wildlife ---------------------------------------------------------------------------------
     // Seeded from the chunk key at bring-up, never respawned. What matters is that it is (a) there
     // and (b) mostly not out to get you: if the whole map were hostile the disposition system would

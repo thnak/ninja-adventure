@@ -34,7 +34,8 @@ namespace mmo {
 
 struct MapDirector : quark::Actor<MapDirector, quark::Sequential, quark::Priority<0>,
                                   quark::Placement<quark::HashById, Require<Trusted>>> {
-    using protocol = Protocol<DirectorTick, Ask<GetWorldTick, std::uint64_t>>;
+    using protocol =
+        Protocol<DirectorTick, FanOutAdd, FanOutRemove, Ask<GetWorldTick, std::uint64_t>>;
 
     // Wired at bring-up.
     quark::LocalRouter* router = nullptr;
@@ -45,6 +46,25 @@ struct MapDirector : quark::Actor<MapDirector, quark::Sequential, quark::Priorit
     // Where raids come from. Filled from the world layout at bring-up; the director never reads the
     // layout itself, so it stays a plain list of tiles that could equally have arrived over a wire.
     std::vector<std::pair<int, int>> raid_sources;
+
+    // RFC-014 §3.4: `InstanceManager` mutates `chunks` only through these two messages, never by a
+    // direct call into this vector — `chunks` is plain, non-atomic state `handle(DirectorTick)`
+    // itself concurrently iterates every tick, so a raw cross-actor mutation would be an
+    // unsynchronized data race, not a benign style choice (`Require<Trusted>` co-location guarantees
+    // shared TRUST, not a shared shard or thread — `InstanceManager` and `MapDirector` are placed
+    // independently by `shard_of(ActorId)`). Persistent-band coordinates (the first `kChunkCount` of
+    // `chunks`, appended once at bring-up) are never touched by either handler.
+    void handle(const FanOutAdd& a) noexcept {
+        chunks.insert(chunks.end(), a.coords.begin(), a.coords.end());
+    }
+    void handle(const FanOutRemove& r) noexcept {
+        chunks.erase(std::remove_if(chunks.begin(), chunks.end(),
+                                    [&](const ChunkCoord& c) {
+                                        return std::find(r.coords.begin(), r.coords.end(), c) !=
+                                               r.coords.end();
+                                    }),
+                     chunks.end());
+    }
 
     void handle(const DirectorTick& d) noexcept {
         world_ms_ += d.dt_ms;

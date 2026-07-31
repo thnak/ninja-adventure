@@ -18,11 +18,14 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <shared_mutex>
+#include <unordered_map>
 #include <vector>
 
 #include "world/abilities.hpp"
 #include "world/battlefield.hpp"
 #include "world/combat_entity.hpp"
+#include "world/map_system.hpp"
 #include "world/telegraph.hpp"
 #include "world/tiles.hpp"
 
@@ -121,11 +124,33 @@ struct ChunkView {
 
 using ChunkViewPtr = std::shared_ptr<const ChunkView>;
 
-// A flat slot array indexed by `chunk_index`. Sized for the whole world at construction: chunk
-// count is a compile-time property of the world layout, so there is no growth path to race on.
+// RFC-014 §4: one block per currently-open instanced-band session, sized to THAT map's own
+// chunk_edge (RFC-022 §1.2) — not to the global kMapChunks (32), which would waste 32x the index
+// space for every instance smaller than the overworld (the second bug RFC-014's Motivation §3
+// names). `slots` is `chunk_edge²` atomics, the same atomic-publish shape the persistent band uses.
+struct InstanceChunkBlock {
+    std::uint8_t chunk_edge = 0;
+    std::vector<std::atomic<ChunkViewPtr>> slots;
+
+    explicit InstanceChunkBlock(std::uint8_t edge)
+        : chunk_edge(edge), slots(static_cast<std::size_t>(edge) * edge) {}
+};
+
+// A flat slot array for the PERSISTENT band, indexed by `chunk_index` (tiles.hpp — unchanged
+// formula), now sized to RFC-022 §1.1's fixed partition width (`kPersistentBandEnd * kChunksPerMap`)
+// rather than the live `kMapCount` — a static, trivially-small over-allocation (16,384 atomics vs.
+// today's 2,048) that means a future persistent MapId (2..15) needs no further redesign here — plus
+// a sparse per-instance map for the INSTANCED band (RFC-014 §4). `instance_blocks_` is genuinely
+// concurrently accessed: many `ChunkActor`s publish from worker threads while `InstanceManager`
+// registers/releases blocks from `World`'s own thread — `std::unordered_map` is not safe under that
+// without a guard, so a `shared_mutex` protects the MAP STRUCTURE (find/insert/erase) while the
+// atomics inside an already-found block need no lock at all, exactly like the persistent slots. The
+// RFC's own §4.2 pseudocode does not show this lock (it sketches the branch, not the concurrency
+// control) — added here because this engine's chunk actors are genuinely multi-threaded, not
+// documented by the RFC's own pseudocode, so noted as this file's own addition.
 class SnapshotBus {
 public:
-    SnapshotBus() : slots_(kChunkCount) {}
+    SnapshotBus() : slots_(static_cast<std::size_t>(kPersistentBandEnd) * kChunksPerMap) {}
 
     SnapshotBus(const SnapshotBus&) = delete;
     SnapshotBus& operator=(const SnapshotBus&) = delete;
@@ -133,22 +158,61 @@ public:
     // Called by the owning ChunkActor at the end of its tick. Release-ordered so a reader that
     // observes the pointer also observes every field the actor wrote into the view.
     void publish(ChunkCoord c, ChunkViewPtr v) noexcept {
-        slots_[static_cast<std::size_t>(chunk_index(c))].store(std::move(v),
-                                                               std::memory_order_release);
+        if (c.map < kPersistentBandEnd) {
+            slots_[static_cast<std::size_t>(chunk_index(c))].store(std::move(v),
+                                                                   std::memory_order_release);
+            return;
+        }
+        std::shared_lock lock(instance_mutex_);
+        auto it = instance_blocks_.find(c.map);
+        if (it == instance_blocks_.end()) return;  // stale publish after CLOSED — dropped, not UB
+        const int li = instance_local_index(c, it->second.chunk_edge);
+        if (li < 0 || static_cast<std::size_t>(li) >= it->second.slots.size()) return;
+        it->second.slots[static_cast<std::size_t>(li)].store(std::move(v), std::memory_order_release);
     }
 
     // Called by the renderer. May return null before a chunk has ticked once.
     [[nodiscard]] ChunkViewPtr load(ChunkCoord c) const noexcept {
-        return slots_[static_cast<std::size_t>(chunk_index(c))].load(std::memory_order_acquire);
+        if (c.map < kPersistentBandEnd) {
+            return slots_[static_cast<std::size_t>(chunk_index(c))].load(std::memory_order_acquire);
+        }
+        std::shared_lock lock(instance_mutex_);
+        auto it = instance_blocks_.find(c.map);
+        if (it == instance_blocks_.end()) return nullptr;
+        const int li = instance_local_index(c, it->second.chunk_edge);
+        if (li < 0 || static_cast<std::size_t>(li) >= it->second.slots.size()) return nullptr;
+        return it->second.slots[static_cast<std::size_t>(li)].load(std::memory_order_acquire);
     }
 
+    // Persistent-band only — every existing caller (`count_creatures`, `probe_main.cpp`) iterates
+    // exactly `kChunkCount` (the live `kMapCount`'s worth) of these, which is still correct: the
+    // array grew, but maps 0/1 still occupy indices [0, kChunkCount) exactly as before.
     [[nodiscard]] ChunkViewPtr load_index(int i) const noexcept {
         return slots_[static_cast<std::size_t>(i)].load(std::memory_order_acquire);
+    }
+
+    // RFC-014 §3.6 ALLOCATING / §3.5 CLOSED — called by InstanceManager, never by a ChunkActor.
+    // Registering twice for the same still-open MapId is a caller bug (asserted away by construction
+    // in InstanceManager: a MapId is only ever registered once, at allocation, per §3.1's "never
+    // reused" guarantee), so this simply overwrites — cheap insurance, not a silently-tolerated race.
+    void register_instance_block(MapId id, std::uint8_t chunk_edge) {
+        std::unique_lock lock(instance_mutex_);
+        instance_blocks_.erase(id);
+        instance_blocks_.emplace(id, InstanceChunkBlock{chunk_edge});
+    }
+
+    // RFC-014 §3.6 CLOSED. After this, any straggling publish for `id` is dropped (see `publish()`).
+    void release_instance_block(MapId id) {
+        std::unique_lock lock(instance_mutex_);
+        instance_blocks_.erase(id);
     }
 
 private:
     // `deque`-free: a vector of atomics sized once, never reallocated.
     std::vector<std::atomic<ChunkViewPtr>> slots_;
+
+    mutable std::shared_mutex instance_mutex_;
+    std::unordered_map<MapId, InstanceChunkBlock> instance_blocks_;
 };
 
 // The world-level state a client needs that is not per-chunk. Written by MapDirector, read by the
