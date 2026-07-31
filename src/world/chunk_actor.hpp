@@ -29,6 +29,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include "quark/core/actor.hpp"
@@ -136,9 +137,9 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
                                  quark::DrainBudget<64>, quark::Placement<quark::HashById>,
                                  quark::IdleTimeout<kInstanceChunkIdleTimeoutMs>> {
     using protocol =
-        Protocol<Tick, CreatureEnter, ProjectileEnter, SpawnWave, PlayerBeacon, MeleeSwing,
-                 CastSpell, LaunchArrow, AbilityStrike, SpawnEntity, PlantCrop, PlaceBuilding,
-                 UpgradeBuilding, TillGround, HarvestAt, PrimeInstanceChunk,
+        Protocol<Tick, CreatureEnter, CreatureContribEnter, ProjectileEnter, SpawnWave, PlayerBeacon,
+                 MeleeSwing, CastSpell, LaunchArrow, AbilityStrike, SpawnEntity, PlantCrop,
+                 PlaceBuilding, UpgradeBuilding, TillGround, HarvestAt, PrimeInstanceChunk,
                  Ask<GetChunkStats, ChunkStats>>;
 
     // --- Wired once at bring-up, before the engine starts -----------------------------------------
@@ -219,6 +220,16 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
     void handle(const CreatureEnter& e) noexcept {
         creatures_.push_back(e.creature);
         if (!players_.empty()) publish();
+    }
+
+    // RFC-019 §5.8: the companion to `CreatureEnter` — see `CreatureContribEnter`'s own comment.
+    // Per-(sender,receiver) FIFO guarantees this arrives immediately after the `CreatureEnter` it
+    // was sent alongside, so the creature is always already present in `creatures_` by the time
+    // this lands.
+    void handle(const CreatureContribEnter& e) noexcept {
+        std::array<Contribution, kMaxContributors> entries{};
+        for (std::size_t i = 0; i < kMaxContributors; ++i) entries[i] = e.entries[i];
+        ledgers_[e.creature_id] = entries;
     }
 
     void handle(const ProjectileEnter& e) noexcept { shots_.push_back(e.shot); }
@@ -902,6 +913,11 @@ private:
             }
             if (dmg <= 0) continue;
             c.hp = static_cast<std::int16_t>(c.hp - dmg);
+            // RFC-019 §5.8: an actively-ticking burn keeps its owner's assist-window entry rolling,
+            // the same as a live flurry of hits would — a burn that has been dealing damage every
+            // tick for longer than kAssistWindowTicks is still "someone currently fighting this,"
+            // not a stale tag from a fight that ended minutes ago.
+            record_contribution(c, c.dot_owner, Skill::kMagic);
             if (c.hp > 0) continue;
             // A DoT tick took the last point: credit the kill through the same path a direct strike
             // uses, crediting whoever last fed this creature's primary channel (RFC-002 §1's
@@ -1587,7 +1603,17 @@ private:
             if (owner == coord) continue;
             if (router != nullptr) {
                 router->get<ChunkActor>(chunk_key(owner)).tell(CreatureEnter{c});
+                // RFC-019 §5.8: the ledger travels too, as a second small message right behind
+                // CreatureEnter (per-(sender,receiver) FIFO — arrives in order, right after).
+                const auto lit = ledgers_.find(c.id);
+                if (lit != ledgers_.end()) {
+                    CreatureContribEnter ce{};
+                    ce.creature_id = c.id;
+                    for (std::size_t k = 0; k < kMaxContributors; ++k) ce.entries[k] = lit->second[k];
+                    router->get<ChunkActor>(chunk_key(owner)).tell(ce);
+                }
             }
+            ledgers_.erase(c.id);
             creatures_.erase(creatures_.begin() + static_cast<std::ptrdiff_t>(i));
             ++migrated;
         }
@@ -2363,6 +2389,7 @@ private:
         c.status = StatusState{};
         for (Gauge& g : c.gauges) g = Gauge{};
         c.dot_owner = 0;
+        ledgers_.erase(c.id);  // RFC-019 §5.8: an instance/leash reset clears the ledger too
         c.attack_cd = 0;
         c.facing = Facing::kDown;
         c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
@@ -2483,6 +2510,32 @@ private:
 
     // --- damage resolution ------------------------------------------------------------------------
 
+    // RFC-019 §5.8: update-or-insert `player`'s ledger entry for this creature. A repeat hit from an
+    // already-listed player just refreshes recency/branch — it does not add a second entry. A new
+    // contributor evicts whichever slot has the OLDEST `last_hit_tick`, which is always an empty
+    // slot (`player == 0`, `last_hit_tick == 0`) while one exists, since a real entry can never be
+    // older than "never touched." Keyed by creature id in `ledgers_` rather than a field on
+    // `Creature` — see `Creature`'s own comment (tiles.hpp) and `CreatureContribEnter` (protocol.hpp)
+    // for why.
+    void record_contribution(const Creature& c, std::uint64_t player, Skill skill) noexcept {
+        if (player == 0) return;
+        std::array<Contribution, kMaxContributors>& ledger = ledgers_[c.id];
+        int slot = -1;
+        for (int i = 0; i < static_cast<int>(kMaxContributors); ++i) {
+            if (ledger[i].player == player) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0) {
+            slot = 0;
+            for (int i = 1; i < static_cast<int>(kMaxContributors); ++i) {
+                if (ledger[i].last_hit_tick < ledger[slot].last_hit_tick) slot = i;
+            }
+        }
+        ledger[static_cast<std::size_t>(slot)] = Contribution{player, skill, static_cast<std::uint32_t>(tick_)};
+    }
+
     // The BOSS drops the design reward, flat and not ring-scaled: 400 XP into whichever skill struck
     // (or, for a DoT kill, `Skill::kMagic` — see step_status) the killing blow ("you level what you
     // use") plus 10 produce. This is a PLACEHOLDER — P4 owns real loot tables, and inventing a boss
@@ -2490,27 +2543,59 @@ private:
     // through the same GrantXp/GrantItems the rest of the game uses. step_bosses notices the body is
     // gone next tick and starts the respawn timer. Shared by `strike()` and `step_status()`'s DoT
     // path so a kill is credited identically regardless of what finished the creature off.
+    //
+    // RFC-019 §5.8: kill XP is no longer single-recipient. Every ledger entry still inside the
+    // assist window is a qualifying contributor and gets the FULL kill-XP amount into their own
+    // branch — not a divided share (GAME.md §11: abundance, not a split pool). This replaces the
+    // boss's flat-400 grant exactly the same way it replaces the general path's, per §5.8's own
+    // ruling that bosses are precisely the 2-4-player content this section protects. Item grants
+    // stay single-recipient — credited to `player`, the caller's own killing-blow/DoT-owner
+    // argument — per §5.8's explicit carve-out ("until RFC-018 specifies otherwise").
     void credit_kill(const Creature& c, std::uint64_t player, Skill skill) noexcept {
-        if (router == nullptr || player == 0) return;
-        if (c.kind == CreatureKind::kBoss) {
-            router->get<PlayerActor>(player).tell(GrantXp{skill, 400});
-            grant(player, GrantItems{ItemKind::kProduce, 10});
-            if (status != nullptr) status->player_kills.fetch_add(1, std::memory_order_relaxed);
-            return;
-        }
+        if (router == nullptr) return;
         const CreatureStats st = stats_of(c.kind);
-        // XP follows the ring, not just the species: killing a wasteland slime is genuinely harder
-        // than killing a meadow one, because it IS a harder slime (see `make_creature`).
         const auto ring = static_cast<std::uint32_t>(
             ring_of(world_seed_, static_cast<int>(c.x), static_cast<int>(c.y)));
-        router->get<PlayerActor>(player).tell(
-            GrantXp{skill, static_cast<std::uint32_t>(st.xp) * (1u + ring)});
-        // Wildlife is food. Monsters drop nothing yet — loot tables are P4, and inventing a
-        // placeholder one now would be inventing it twice.
-        if (st.faction == Faction::kWild) {
-            grant(player, GrantItems{ItemKind::kProduce, 1});
+        bool any_contributor = false;
+        const auto it = ledgers_.find(c.id);
+        if (it != ledgers_.end()) {
+            for (const Contribution& e : it->second) {
+                if (e.player == 0) continue;
+                if (static_cast<std::uint32_t>(tick_) - e.last_hit_tick > kAssistWindowTicks) continue;
+                any_contributor = true;
+                if (c.kind == CreatureKind::kBoss) {
+                    router->get<PlayerActor>(e.player).tell(GrantXp{e.skill, 400});
+                } else {
+                    // XP follows the ring, not just the species: killing a wasteland slime is
+                    // genuinely harder than killing a meadow one, because it IS a harder slime
+                    // (`make_creature`).
+                    router->get<PlayerActor>(e.player).tell(
+                        GrantXp{e.skill, static_cast<std::uint32_t>(st.xp) * (1u + ring)});
+                }
+            }
         }
-        if (status != nullptr) status->player_kills.fetch_add(1, std::memory_order_relaxed);
+        // A ledger miss (the caller's own hit fell outside every contributor's assist window, or
+        // this creature was killed by something that never went through record_contribution) still
+        // credits the caller directly — the shipped single-player guarantee this replaces must never
+        // regress into a silent zero just because the multiplayer ledger came up empty.
+        if (!any_contributor && player != 0) {
+            router->get<PlayerActor>(player).tell(
+                GrantXp{skill, (c.kind == CreatureKind::kBoss)
+                                   ? 400u
+                                   : static_cast<std::uint32_t>(st.xp) * (1u + ring)});
+        }
+        if (player != 0) {
+            if (c.kind == CreatureKind::kBoss) {
+                grant(player, GrantItems{ItemKind::kProduce, 10});
+            } else if (st.faction == Faction::kWild) {
+                // Wildlife is food. Monsters drop nothing yet — loot tables are P4, and inventing a
+                // placeholder one now would be inventing it twice.
+                grant(player, GrantItems{ItemKind::kProduce, 1});
+            }
+        }
+        if ((any_contributor || player != 0) && status != nullptr) {
+            status->player_kills.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     // The one place a creature loses HP to a player, so the one place a direct-hit kill can be
@@ -2565,6 +2650,7 @@ private:
             DefenderMitigation{{c.dr[0], c.dr[1]}, c.toughness});
         c.hp = static_cast<std::int16_t>(c.hp - dealt);
         provoke(c, player, /*by_attack*/ true);
+        record_contribution(c, player, skill);  // RFC-019 §5.8: every hit, not just the killing one
 
         if (c.hp > 0 && effective_impulse > 0) {
             float kb = knockback_tiles(effective_impulse, mass_of(c.tier), tphys.friction);
@@ -2748,6 +2834,11 @@ private:
         std::uint32_t killed = 0;
         for (std::size_t i = creatures_.size(); i-- > 0;) {
             if (creatures_[i].hp > 0) continue;
+            // RFC-019 §5.8: the ledger's cleanup point — every death reaches here regardless of
+            // whether it went through credit_kill (a wallslam kill, physics.hpp's own header note,
+            // carries no killer attribution and is never credited, but its ledger entry still needs
+            // to go, matching `dot_owner`'s own reset-on-death shape).
+            ledgers_.erase(creatures_[i].id);
             creatures_.erase(creatures_.begin() + static_cast<std::ptrdiff_t>(i));
             ++killed;
         }
@@ -2877,6 +2968,11 @@ private:
     std::vector<Building> buildings_;
     std::vector<PlayerBeacon> players_;  // soft state: who is near enough to matter
     std::vector<BossState> bosses_;      // the dojo bosses this chunk owns, one per dojo room (F3)
+    // RFC-019 §5.8: the multiplayer kill-credit ledger, keyed by Creature::id — not a field on
+    // Creature itself; see Creature's own comment (tiles.hpp) for why. Entries are removed the
+    // moment their creature is (reap_dead, the migration hand-off, boss_reset), so this never
+    // outlives the creature it is keyed by.
+    std::unordered_map<std::uint32_t, std::array<Contribution, kMaxContributors>> ledgers_;
     std::uint32_t tilled_ = 0;
     std::uint64_t world_seed_ = 0;
     std::uint64_t tick_ = 0;

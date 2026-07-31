@@ -54,9 +54,10 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
                                   quark::Placement<quark::HashById, Require<Trusted>>> {
     using protocol =
         Protocol<Tick, MoveIntent, Teleport, GrantItems, HurtPlayer, GrantVitals, GrantXp,
-                 SetRespawn, BindAccount, Unbind, Rebind, SetMounted, SetInstanceReturn,
-                 RestoreProgression, Ask<SpendItems, bool>, Ask<GetPlayer, PlayerView>,
-                 Ask<PlanAttack, AttackPlan>, Ask<UseAbility, AbilityPlan>>;
+                 RespecSkill, GrantEssence, SetRespawn, BindAccount, Unbind, Rebind, SetMounted,
+                 SetInstanceReturn, RestoreProgression, Ask<SpendItems, bool>,
+                 Ask<GetPlayer, PlayerView>, Ask<PlanAttack, AttackPlan>,
+                 Ask<UseAbility, AbilityPlan>>;
 
     // Set once at bring-up, before the engine starts.
     std::uint64_t id = 0;
@@ -246,15 +247,66 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
 
     // You level what you use. The cap is enforced HERE rather than at the point of spending,
     // because it is a property of the character and this actor is the only writer of one.
+    //
+    // RFC-019 §5.1: a branch that can no longer convert — fully maxed, or blocked by the global
+    // 34-point cap — drops further grants instead of banking them forever. Left unbounded, that
+    // overflow is exactly what §5.6's respec formula could otherwise launder into a free refund
+    // (farm a maxed branch, normally a no-op, then respec it for points it never legitimately
+    // earned). The one sanctioned exception is the Essence gate (§5.7) below, which lets banked XP
+    // sit at or above threshold ON PURPOSE while it waits — that state is reached via `convert_xp`,
+    // never via this early-out.
     void handle(const GrantXp& g) noexcept {
         const int s = static_cast<int>(g.skill);
         if (s < 0 || s >= kSkillCount || g.amount == 0) return;
+        if (level_[s] >= kMaxSkillLevel) return;      // fully maxed: drop, not bank
+        if (total_levels() >= kSkillPointCap) return;  // blocked by the global cap: drop, not bank
         xp_[s] += g.amount;
-        while (level_[s] < kMaxSkillLevel && total_levels() < kSkillPointCap &&
-               xp_[s] >= xp_for_level(level_[s])) {
-            xp_[s] -= xp_for_level(level_[s]);
-            ++level_[s];
-        }
+        convert_xp(s);
+        publish();
+    }
+
+    // RFC-019 §5.6: respec, at the player's own Hearth. One atomic action — no intermediate
+    // spendable balance, no separate currency. `from`'s committed value (xp_to_reach of its level)
+    // is priced using ONLY the level actually reached; any banked, uncommitted xp_[from] is
+    // discarded outright, which is what keeps GrantXp's overflow-closure above meaningful (farming a
+    // blocked branch for banked overflow gains nothing here either). 75% of the committed value is
+    // granted into `to` through the same convert_xp path any other grant uses — capped by `to`'s own
+    // ceiling and the global cap, any portion that doesn't fit simply forfeit. Resetting `from` also
+    // clears its Essence-gate progress: the levels that progress unlocked are gone, so re-earning
+    // them later re-pays the gate, the same as any other player who has never reached it.
+    void handle(const RespecSkill& r) noexcept {
+        if (account_ == 0 || dead_ticks_ > 0) return;
+        const int from = static_cast<int>(r.from);
+        const int to = static_cast<int>(r.to);
+        if (from < 0 || from >= kSkillCount || to < 0 || to >= kSkillCount) return;
+        if (level_[from] == 0) return;  // nothing invested, nothing to reset
+        // The Hearth this player set (SetRespawn, chunk_actor.hpp) is always on the overworld —
+        // respawn()'s own fresh-spawn branch assumes exactly that. "At your own Hearth" is checked
+        // against that same point, so no new building or cross-actor query is needed.
+        if (map != kOverworld) return;
+        const float ddx = x_ - (static_cast<float>(respawn_tx_) + 0.5f);
+        const float ddy = y_ - (static_cast<float>(respawn_ty_) + 0.5f);
+        if (ddx * ddx + ddy * ddy > kRespecRadiusTiles * kRespecRadiusTiles) return;
+
+        const std::uint32_t committed = xp_to_reach(level_[from]);
+        level_[from] = 0;
+        xp_[from] = 0;
+        essence_paid_[from] = 0;
+        xp_[to] += static_cast<std::uint32_t>(static_cast<std::uint64_t>(committed) *
+                                              kRespecRefundPm / 1000u);
+        convert_xp(to);
+        publish();
+    }
+
+    // RFC-019 §5.7: one unit of Essence spent against `skill`'s Tier IV gate. Re-attempts the
+    // level-up loop immediately in case XP was already banked past the threshold, waiting on
+    // exactly this.
+    void handle(const GrantEssence& g) noexcept {
+        const int s = static_cast<int>(g.skill);
+        if (s < 0 || s >= kSkillCount) return;
+        essence_paid_[s] = static_cast<std::uint8_t>(
+            std::min<int>(kEssenceGateTotal, essence_paid_[s] + g.amount));
+        convert_xp(s);
         publish();
     }
 
@@ -295,6 +347,7 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         for (int i = 0; i < kSkillCount; ++i) {
             level_[i] = r.level[i];
             xp_[i] = r.xp[i];
+            essence_paid_[i] = r.essence_paid[i];
         }
         publish();
     }
@@ -512,6 +565,7 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
             v.skill_level[i] = level_[i];
             v.skill_xp[i] = xp_[i];
             v.skill_next[i] = xp_for_level(level_[i]);
+            v.essence_paid[i] = essence_paid_[i];
         }
         // The fixed loadout, resolved from levels, plus each slot's remaining cooldown — everything
         // the HUD draws a slot from without asking. A slot whose school is still too low reports its
@@ -568,6 +622,25 @@ private:
         std::uint16_t n = 0;
         for (int i = 0; i < kSkillCount; ++i) n = static_cast<std::uint16_t>(n + level_[i]);
         return n;
+    }
+
+    // The one place xp_[s] ever converts to level_[s], shared by GrantXp and RespecSkill's refund
+    // so both obey the same ceiling, the same global cap, and the same Essence-gate precondition
+    // (RFC-019 §5.7): a level-up landing at 18/19/20 does not commit until essence_paid_[s] covers
+    // it. Banked XP past the threshold simply waits when it doesn't — the loop stops, xp_[s] stays
+    // at or above `xp_for_level(level_[s])`, and nothing is lost.
+    void convert_xp(int s) noexcept {
+        while (level_[s] < kMaxSkillLevel && total_levels() < kSkillPointCap &&
+               xp_[s] >= xp_for_level(level_[s])) {
+            const auto next_level = static_cast<std::uint8_t>(level_[s] + 1);
+            if (next_level >= kEssenceGateStartLevel) {
+                const std::uint8_t essence_needed =
+                    static_cast<std::uint8_t>(next_level - (kEssenceGateStartLevel - 1));
+                if (essence_paid_[s] < essence_needed) break;
+            }
+            xp_[s] -= xp_for_level(level_[s]);
+            ++level_[s];
+        }
     }
 
     [[nodiscard]] std::int16_t scaled(std::int16_t base, Skill s) const noexcept {
@@ -684,6 +757,8 @@ private:
     std::int32_t items_[kItemKinds] = {};
     std::uint8_t level_[kSkillCount] = {};
     std::uint32_t xp_[kSkillCount] = {};
+    // RFC-019 §5.7: Essence units spent against each branch's Tier IV gate (0..kEssenceGateTotal).
+    std::uint8_t essence_paid_[kSkillCount] = {};
     // Per-ability cooldown, keyed by AbilityId (not by slot, so the timer belongs to the move and
     // survives a future loadout-picker unchanged — with the fixed F1a loadout each slot maps to a
     // distinct ability, so this reads identically to per-slot). RFC-001 Section 8 stores cooldowns

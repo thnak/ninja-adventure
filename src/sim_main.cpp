@@ -3074,6 +3074,223 @@ int main(int argc, char** argv) {
     std::printf("RFC-008 data-driven skill definition: the generated combat pack loads, "
                "hash-verifies, and resolves real skill/entity documents by id\n\n");
 
+    // RFC-019 §5.1/§5.6/§5.7: progression's XP overflow-closure, respec, and the Essence gate — all
+    // on ONE new account. `kMaxPlayers == 8` is a fixed SESSION-SLOT count and `disconnect_player()`
+    // is data-level only (RFC-024's own finding, above: it never frees `bound_`), so this file's
+    // total distinct account count is a hard, permanent ceiling, not a per-test budget — by this
+    // point in the file exactly one slot remains, so every RFC-019 scenario below shares it, and the
+    // co-op ledger test after it reuses two ALREADY-logged-in accounts (`me`/`guest`) rather than
+    // minting new ones. Skills are chosen per sub-test so the running total never exceeds the
+    // 34-point cap except exactly where a sub-test means to hit it, and Melee is left untouched on
+    // this account so it stays available, fresh, for the ledger test's reuse below.
+    // `xp_to_reach`/`xp_for_level` are the shipped formulas themselves (tiles.hpp), not a parallel
+    // test-only model of them, so these assertions check the real conversion path.
+    {
+        LoginOutcome p19_out{};
+        const int p19_slot = world.login("rfc019progress", "hunter2", p19_out);
+        chk.expect(p19_slot >= 0, "the progression test account logs in (the file's last free slot)");
+        if (p19_slot >= 0) {
+            const std::uint64_t p19_key = world.key_of(p19_slot);
+            const int gate0 = kEssenceGateStartLevel - 1;  // 17: one short of the gate
+
+            // --- §5.7: the Essence gate — Magic climbs cleanly from 0 to 20, 20 of 34 points -------
+            world.grant_xp(p19_key, Skill::kMagic, xp_to_reach(static_cast<std::uint8_t>(gate0)));
+            advance(world, 1);
+            PlayerView v = world.player_view(p19_slot);
+            chk.expect(v.skill_level[static_cast<int>(Skill::kMagic)] == gate0 &&
+                           v.skill_xp[static_cast<int>(Skill::kMagic)] == 0,
+                       "Magic reaches level 17 exactly, one short of the Essence gate");
+
+            world.grant_xp(p19_key, Skill::kMagic, xp_for_level(static_cast<std::uint8_t>(gate0)));
+            advance(world, 1);
+            v = world.player_view(p19_slot);
+            chk.expect(v.skill_level[static_cast<int>(Skill::kMagic)] == gate0 &&
+                           v.skill_xp[static_cast<int>(Skill::kMagic)] ==
+                               xp_for_level(static_cast<std::uint8_t>(gate0)) &&
+                           v.essence_paid[static_cast<int>(Skill::kMagic)] == 0,
+                       "enough XP for level 18 banks AT the threshold and waits — no Essence paid "
+                       "yet, and nothing is lost while it does (§5.7)");
+
+            world.grant_essence(p19_key, Skill::kMagic, 1);
+            advance(world, 1);
+            v = world.player_view(p19_slot);
+            chk.expect(v.skill_level[static_cast<int>(Skill::kMagic)] == kEssenceGateStartLevel &&
+                           v.skill_xp[static_cast<int>(Skill::kMagic)] == 0 &&
+                           v.essence_paid[static_cast<int>(Skill::kMagic)] == 1,
+                       "one Essence unit unblocks the banked XP — level 18 commits immediately");
+
+            world.grant_xp(p19_key, Skill::kMagic, xp_for_level(kEssenceGateStartLevel));
+            advance(world, 1);
+            v = world.player_view(p19_slot);
+            chk.expect(v.skill_level[static_cast<int>(Skill::kMagic)] == kEssenceGateStartLevel &&
+                           v.essence_paid[static_cast<int>(Skill::kMagic)] == 1,
+                       "level 19 needs a SECOND Essence unit — one is not enough (1 unit per level)");
+
+            world.grant_essence(p19_key, Skill::kMagic, 2);
+            advance(world, 1);
+            v = world.player_view(p19_slot);
+            chk.expect(v.skill_level[static_cast<int>(Skill::kMagic)] ==
+                               kEssenceGateStartLevel + 1 &&
+                           v.essence_paid[static_cast<int>(Skill::kMagic)] == kEssenceGateTotal,
+                       "essence_paid caps at kEssenceGateTotal (3) and level 19 commits");
+
+            world.grant_xp(p19_key, Skill::kMagic, xp_for_level(kEssenceGateStartLevel + 1));
+            advance(world, 1);
+            v = world.player_view(p19_slot);
+            chk.expect(v.skill_level[static_cast<int>(Skill::kMagic)] == kMaxSkillLevel,
+                       "the gate is already fully paid — level 20 commits on XP alone");
+
+            // --- §5.1: a fully-maxed branch drops further grants instead of banking them forever ---
+            world.grant_xp(p19_key, Skill::kMagic, 5000);
+            advance(world, 1);
+            v = world.player_view(p19_slot);
+            chk.expect(v.skill_xp[static_cast<int>(Skill::kMagic)] == 0,
+                       "a grant to a fully-maxed branch is dropped, not banked (§5.1's overflow fix)");
+
+            // --- §5.1: a grant blocked by the GLOBAL cap is dropped too, even below max level -------
+            world.grant_xp(p19_key, Skill::kRanged, xp_to_reach(14));  // Magic 20 + Ranged 14 == 34
+            advance(world, 1);
+            v = world.player_view(p19_slot);
+            chk.expect(v.skill_level[static_cast<int>(Skill::kRanged)] == 14,
+                       "Ranged reaches exactly level 14, putting total levels at the 34-point cap");
+            world.grant_xp(p19_key, Skill::kCraft, 1000);
+            advance(world, 1);
+            v = world.player_view(p19_slot);
+            chk.expect(v.skill_level[static_cast<int>(Skill::kCraft)] == 0 &&
+                           v.skill_xp[static_cast<int>(Skill::kCraft)] == 0,
+                       "a grant to an under-max branch is STILL dropped once the global cap is hit");
+
+            // --- §5.6: respec, gated on standing at the player's own Hearth -------------------------
+            // Teleported well clear of every other test's hearth/farm tiles near the shared spawn
+            // point (same convention RFC-016's own persistence test already uses, above).
+            const float hx = std::floor(std::clamp(spawn.x + 300.0f, 10.0f,
+                                                   static_cast<float>(kMapTiles - 10))) +
+                            0.5f;
+            const float hy = std::floor(std::clamp(spawn.y + 300.0f, 10.0f,
+                                                   static_cast<float>(kMapTiles - 10))) +
+                            0.5f;
+            world.teleport_player(p19_key, kOverworld, hx, hy);
+            advance(world, 2);
+            const bool hearth_paid =
+                world.build_at(p19_key, kOverworld, static_cast<std::uint16_t>(hx),
+                               static_cast<std::uint16_t>(hy), BuildKind::kHearth);
+            advance(world, 2);
+            v = world.player_view(p19_slot);
+            chk.expect(hearth_paid && v.respawn_tx == static_cast<std::uint16_t>(hx) &&
+                           v.respawn_ty == static_cast<std::uint16_t>(hy),
+                       "the fresh starter pack affords a Hearth (20 of 25 stone) and it actually "
+                       "lands, moving the respawn point");
+
+            const std::uint32_t ranged_xp_before = v.skill_xp[static_cast<int>(Skill::kRanged)];
+            world.teleport_player(p19_key, kOverworld, hx + 50.0f, hy);  // outside kRespecRadiusTiles
+            advance(world, 1);
+            world.respec_skill(p19_key, Skill::kRanged, Skill::kCraft);
+            advance(world, 1);
+            v = world.player_view(p19_slot);
+            chk.expect(v.skill_level[static_cast<int>(Skill::kRanged)] == 14 &&
+                           v.skill_xp[static_cast<int>(Skill::kRanged)] == ranged_xp_before,
+                       "respec away from the Hearth is refused outright — nothing moved");
+
+            world.teleport_player(p19_key, kOverworld, hx, hy);  // back at the Hearth
+            advance(world, 1);
+            const std::uint32_t ranged_committed = xp_to_reach(14);
+            world.respec_skill(p19_key, Skill::kRanged, Skill::kCraft);
+            advance(world, 1);
+            v = world.player_view(p19_slot);
+            chk.expect(v.skill_level[static_cast<int>(Skill::kRanged)] == 0 &&
+                           v.skill_xp[static_cast<int>(Skill::kRanged)] == 0,
+                       "respec at the Hearth resets the `from` branch to 0/0");
+            auto total_xp_of = [&](Skill s) {
+                const int i = static_cast<int>(s);
+                return xp_to_reach(v.skill_level[i]) + v.skill_xp[i];
+            };
+            auto expected_refund_of = [](std::uint32_t committed) {
+                return static_cast<std::uint32_t>(static_cast<std::uint64_t>(committed) *
+                                                  kRespecRefundPm / 1000u);
+            };
+            const std::uint32_t craft_total_after = total_xp_of(Skill::kCraft);
+            const std::uint32_t ranged_refund = expected_refund_of(ranged_committed);
+            chk.expect(ranged_refund > 0 && craft_total_after == ranged_refund,
+                       "Craft's new total XP equals exactly 75% of Ranged's committed value — the "
+                       "other 25% is unconditionally forfeit, not banked anywhere (§5.6)");
+
+            // Respec also clears the RESET branch's Essence-gate progress (Magic was fully paid to
+            // kEssenceGateTotal above) — a fresh climb re-pays it. Ranged is the refund target this
+            // time (freed back to 0 by the respec just above), and its OWN essence_paid_ is still 0,
+            // so — a second real-world consequence of the same mechanic — the refunded XP converts
+            // only as far as Ranged's own Essence gate allows, banking the rest, never losing it.
+            const std::uint32_t magic_committed = xp_to_reach(kMaxSkillLevel);
+            world.respec_skill(p19_key, Skill::kMagic, Skill::kRanged);
+            advance(world, 1);
+            v = world.player_view(p19_slot);
+            chk.expect(v.skill_level[static_cast<int>(Skill::kMagic)] == 0 &&
+                           v.essence_paid[static_cast<int>(Skill::kMagic)] == 0,
+                       "respec resets essence_paid_ for the reset branch alongside its level");
+            const std::uint32_t ranged_total_after2 = total_xp_of(Skill::kRanged);
+            const std::uint32_t magic_refund = expected_refund_of(magic_committed);
+            chk.expect(magic_refund > 0 && ranged_total_after2 == magic_refund,
+                       "Ranged's new total XP equals exactly 75% of Magic's committed value too — "
+                       "conserved in full even though Ranged's own (unpaid) Essence gate blocks it "
+                       "from converting all the way, proving the wait banks rather than drops it");
+
+            // --- §5.8: the multiplayer contribution ledger ------------------------------------------
+            // A shared kill grants FULL kill XP to every recent contributor, not a divided share and
+            // not just whoever landed the killing blow. Reuses `p19_key` (this account's own Melee
+            // is untouched by every sub-test above) alongside `guest` — an ALREADY-logged-in account,
+            // per the account-budget note above — rather than minting a third new one; `guest`'s own
+            // Melee is likewise untouched (every earlier use of it casts spells or channels an
+            // ability, never swings), so a kill's Melee XP is a clean, detectable signal for both.
+            const float lx = std::floor(std::clamp(spawn.x + 340.0f, 10.0f,
+                                                    static_cast<float>(kMapTiles - 10))) +
+                             0.5f;
+            const float ly = std::floor(std::clamp(spawn.y + 370.0f, 10.0f,
+                                                    static_cast<float>(kMapTiles - 10))) +
+                             0.5f;
+            world.teleport_player(p19_key, kOverworld, lx, ly);
+            world.teleport_player(guest, kOverworld, lx, ly);
+            world.grant_vitals(p19_key, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+            world.grant_vitals(guest, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+            advance(world, 2);
+            world.spawn_one_at(static_cast<std::uint16_t>(lx), static_cast<std::uint16_t>(ly),
+                               CreatureKind::kSlime, kOverworld);
+            advance(world, 2);
+
+            const std::uint32_t kills_before =
+                world.status().player_kills.load(std::memory_order_relaxed);
+            const std::uint32_t p19_melee_xp_before =
+                world.player_view(p19_slot).skill_xp[static_cast<int>(Skill::kMelee)];
+            const std::uint32_t guest_xp_before =
+                world.player_view(slot2).skill_xp[static_cast<int>(Skill::kMelee)];
+
+            // `p19_key` lands ONE light swing (14 damage against a 30-hp slime — it survives) and
+            // never touches it again; `guest` alone finishes it off.
+            const bool tag_hit = world.swing(p19_key, /*heavy*/ false);
+            advance(world, 2);
+            chk.expect(tag_hit, "the tagging swing lands");
+            for (int i = 0; i < 4; ++i) {
+                world.swing(guest, /*heavy*/ true);
+                advance(world, 2);
+            }
+
+            const std::uint32_t kills_after =
+                world.status().player_kills.load(std::memory_order_relaxed);
+            chk.expect(kills_after > kills_before, "the slime died");
+
+            const PlayerView p19_after = world.player_view(p19_slot);
+            const PlayerView guest_after = world.player_view(slot2);
+            chk.expect(p19_after.skill_xp[static_cast<int>(Skill::kMelee)] > p19_melee_xp_before ||
+                           p19_after.skill_level[static_cast<int>(Skill::kMelee)] > 0,
+                       "the player who only tagged it — and never landed the killing blow — still "
+                       "gets full kill XP, from the shared contribution ledger (§5.8)");
+            chk.expect(guest_after.skill_xp[static_cast<int>(Skill::kMelee)] > guest_xp_before ||
+                           guest_after.skill_level[static_cast<int>(Skill::kMelee)] > 0,
+                       "the player who landed the killing blow also gets full kill XP, not a "
+                       "divided share between the two contributors");
+        }
+    }
+    std::printf("RFC-019 progression & co-op fairness: the Essence gate, XP overflow-closure, "
+               "respec, and the shared-kill contribution ledger (§5.1/§5.6/§5.7/§5.8) check out\n\n");
+
     world.stop();
 
     // RFC-016 §6.4, direct: ChunkActor::apply_recovered_overlay() — the exact call

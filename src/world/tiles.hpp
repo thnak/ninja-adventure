@@ -417,6 +417,26 @@ enum class Facing : std::uint8_t { kDown = 0, kUp = 1, kLeft = 2, kRight = 3 };
     return dy < 0.0f ? Facing::kUp : Facing::kDown;
 }
 
+// --- Skills (RFC-019) -------------------------------------------------------------------------
+// No classes: you level what you use (GAME.md §7). Pulled up here, ahead of `Creature`, because
+// the per-creature contribution ledger below (§5.8) needs to name a branch; the cap/curve
+// constants and formulas that use this enum stay at their original spot further down this file.
+enum class Skill : std::uint8_t { kMelee = 0, kRanged = 1, kMagic = 2, kCraft = 3, kCount = 4 };
+
+// RFC-019 §5.8: a bounded, LRU-overwritten record of who has recently landed a hit on this
+// creature, so a shared kill credits every contributor — not just whoever's blow happened to be
+// the killing one. Lives ON the creature (not chunk-local side state) so it survives the same
+// cross-chunk hand-off a mid-fight creature already gets (chunk_actor.hpp), the same reasoning
+// RFC-002's `dot_owner`/`gauges` already established for per-creature combat state.
+struct Contribution {
+    std::uint64_t player = 0;  // 0 = empty slot
+    Skill skill = Skill::kMelee;
+    std::uint32_t last_hit_tick = 0;  // absolute world tick — never a decrementing counter (I4)
+};
+// GAME.md §11's 2-4 player dungeon group, with headroom for one passer-by (tunable).
+inline constexpr std::size_t kMaxContributors = 4;
+inline constexpr std::uint32_t kAssistWindowTicks = 100;  // 10 s at 10 Hz (tunable)
+
 // A creature lives in map-global tile space. Its owning chunk is derived, never stored — so
 // migration is "recompute the owner and forward", with no field to forget to update.
 struct Creature {
@@ -495,6 +515,16 @@ struct Creature {
     // sprite (idle/walk/attack/charge) — the walk-only telegraph read (windup) is carried by `windup`
     // as for any creature. Zero (kIdle) for every non-boss creature, which never reads it.
     std::uint8_t boss_pose = 0;
+
+    // RFC-019 §5.8's contribution ledger is deliberately NOT a field here (DIVERGENCE from the
+    // RFC's own suggested storage). `Creature` is sent by value in `CreatureEnter` across the
+    // cross-chunk migration hand-off, whose payload rides QuarkCpp's fixed-size message pool cell
+    // (`MessagePool::kMaxPayload == 192` bytes) — and `sizeof(Creature)` already sits at exactly
+    // 192 with zero headroom, so any field added here breaks that `static_assert` outright. The
+    // ledger instead lives in `ChunkActor::ledgers_`, keyed by `Creature::id`, and is carried across
+    // migration by a second, small companion message sent right after `CreatureEnter` (see
+    // `step_creatures`'s hand-off) — preserving the RFC's real concern (a fight that crosses a
+    // chunk boundary keeps its contributors) without growing the wire-critical struct.
 };
 
 // An arrow or a bolt in flight, owned by the chunk it is currently over.
@@ -1061,7 +1091,8 @@ inline constexpr std::uint16_t kRespawnTicks = 30;
 // No classes: you level what you use (GAME.md §7). The cap is what keeps that from collapsing into
 // "everyone maxes everything by hour 40" — it forces a choice, which is what makes players in an
 // MMO worth having around each other.
-enum class Skill : std::uint8_t { kMelee = 0, kRanged = 1, kMagic = 2, kCraft = 3, kCount = 4 };
+// (`Skill` itself now lives just above `Creature`, so the per-creature contribution ledger — RFC-019
+// §5.8 — can be typed with it; every constant/formula below is unmoved and unchanged.)
 
 inline constexpr int kSkillCount = static_cast<int>(Skill::kCount);
 inline constexpr std::uint8_t kMaxSkillLevel = 20;
@@ -1074,11 +1105,34 @@ inline constexpr std::uint16_t kSkillPointCap = 34;  // total levels across all 
     return 40u * l * l;
 }
 
+// Cumulative XP to REACH `level` from 0 (RFC-019 §5.1) — derived from `xp_for_level`, not a second
+// formula: closed form of `Σ_{i=0}^{level-1} xp_for_level(i)`. Used by respec (§5.6) to price
+// resetting a branch off its committed value rather than its banked, uncommitted remainder.
+[[nodiscard]] inline constexpr std::uint32_t xp_to_reach(std::uint8_t level) noexcept {
+    const std::uint64_t l = level;
+    return static_cast<std::uint32_t>(40ull * l * (l + 1ull) * (2ull * l + 1ull) / 6ull);
+}
+
 // Every skill level is +6% on that skill's damage. Small enough that a level is not a gate, big
 // enough that twenty of them is a different character.
 [[nodiscard]] inline constexpr float skill_scale(std::uint8_t level) noexcept {
     return 1.0f + 0.06f * static_cast<float>(level);
 }
+
+// --- RFC-019 §5.6/§5.7: respec and the Essence gate --------------------------------------------
+// Respec: at the player's own Hearth (the same `respawn_tx_/ty_` a placed kHearth already sets,
+// §5.6 — "no new building, no village-tier dependency"), reset one branch and refund 75% of its
+// committed value into another, atomically, no timer, no travel beyond a point the player already
+// revisits to respawn.
+inline constexpr float kRespecRadiusTiles = 3.0f;      // "at" the Hearth — near it, not on it
+inline constexpr std::uint32_t kRespecRefundPm = 750;  // 75% refunded, per-mille (25% forfeit)
+
+// Essence gates the top three levels of every branch (Tier IV territory): 18->19->20 each cost
+// their XP as normal PLUS one more unit of Essence spent on that branch (3 total). Banked XP past
+// the threshold waits — it is never lost or overflowed — exactly like a chunk at 1 Hz still has its
+// state waiting when it wakes.
+inline constexpr std::uint8_t kEssenceGateStartLevel = 18;  // first level requiring Essence
+inline constexpr std::uint8_t kEssenceGateTotal = 3;        // 1 unit per level, 18->20
 
 // --- Simulation cadence --------------------------------------------------------------------------
 inline constexpr int kTicksPerSecond = 10;

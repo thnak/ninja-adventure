@@ -48,6 +48,16 @@ struct ProjectileEnter {
     Projectile shot{};
 };
 
+// RFC-019 §5.8's contribution ledger, carried across the SAME hand-off as `CreatureEnter` — as a
+// second, small companion message rather than a field on `Creature` itself, because `Creature` is
+// already sized exactly to QuarkCpp's `MessagePool::kMaxPayload` (192 bytes) with zero headroom
+// (see tiles.hpp's `Creature` comment). Per-(sender,receiver) FIFO means this always arrives right
+// after the `CreatureEnter` it follows, addressed by `creature_id` rather than embedded in it.
+struct CreatureContribEnter {
+    std::uint32_t creature_id = 0;
+    Contribution entries[kMaxContributors]{};
+};
+
 // The director asks the chunk that owns a stronghold to release `count` creatures around it. The
 // tile travels with the message rather than being recomputed here: the chunk would get the same
 // answer, but sending it keeps the chunk from having to know which of its tiles is a stronghold.
@@ -264,6 +274,24 @@ struct GrantXp {
     std::uint32_t amount = 0;
 };
 
+// RFC-019 §5.6: an atomic respec at the player's own Hearth. `from`'s committed value (`xp_to_reach`
+// of its current level) is reset to 0; 75% of that value lands in `to` immediately, through the
+// ordinary GrantXp level-up path, so it is capped by `to`'s own ceiling and the global 34-point cap
+// exactly like any other grant. Any banked, uncommitted XP in `from` is discarded outright, not
+// refunded — see PlayerActor::handle(const RespecSkill&).
+struct RespecSkill {
+    Skill from = Skill::kMelee;
+    Skill to = Skill::kMelee;
+};
+
+// RFC-019 §5.7: one unit of Essence spent against a branch's Tier IV gate (levels 18->20, 3 total).
+// Acquisition/spend UI is RFC-018's (proposed) territory; this message is the shape RFC-018's
+// eventual reward tables would call into — a one-time toggle per level-band, never a per-cast cost.
+struct GrantEssence {
+    Skill skill = Skill::kMelee;
+    std::uint8_t amount = 1;
+};
+
 // Lighting a hearth moves where you wake up.
 struct SetRespawn {
     std::uint16_t tx = 0;
@@ -437,9 +465,10 @@ struct SetInstanceReturn {
 // RFC-016 §4/§7: BindAccount's counterpart for a returning account — restores a persisted
 // progression row instead of handing out the fixed starter pack. Sent once, at login, in place of
 // BindAccount whenever World::login() finds a saved PlayerProgression for the account (world.hpp).
-// `items`/`level`/`xp` carry exactly kItemKinds/kSkillCount entries in that fixed enum order
-// (tiles.hpp) — plain C arrays, like every other message here, since messages in this codebase are
-// not (yet) QUARK_SERIALIZE-described; only world/persistence.hpp's own durable structs are.
+// `items`/`level`/`xp`/`essence_paid` carry exactly kItemKinds/kSkillCount entries in that fixed
+// enum order (tiles.hpp) — plain C arrays, like every other message here, since messages in this
+// codebase are not (yet) QUARK_SERIALIZE-described; only world/persistence.hpp's own durable
+// structs are.
 struct RestoreProgression {
     std::uint32_t account = 0;
     std::uint16_t map = 0;
@@ -457,6 +486,10 @@ struct RestoreProgression {
     std::int32_t items[kItemKinds] = {};
     std::uint8_t level[kSkillCount] = {};
     std::uint32_t xp[kSkillCount] = {};
+    // RFC-019 §5.7: how much of each branch's Tier IV Essence gate (levels 18->20, 3 total) has
+    // already been paid — must survive a restart or a returning specialist re-faces a gate they
+    // already cleared.
+    std::uint8_t essence_paid[kSkillCount] = {};
 };
 
 }  // namespace mmo

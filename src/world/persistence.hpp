@@ -139,10 +139,13 @@ struct PlayerProgression {
     std::vector<std::uint8_t> level;  // kSkillCount entries, Skill-enum order
     std::vector<std::uint32_t> xp;    // kSkillCount entries
     std::vector<std::int32_t> items;  // kItemKinds entries, ItemKind-enum order
+    // RFC-019 §5.7: Essence units spent against each branch's Tier IV gate — without this, a
+    // restart would silently re-lock levels 18-20 for a player who had already paid for them.
+    std::vector<std::uint8_t> essence_paid;  // kSkillCount entries
 };
 QUARK_SERIALIZE(PlayerProgression, (1, map), (2, x), (3, y), (4, hp), (5, mana), (6, stamina),
                 (7, deaths), (8, respawn_tx), (9, respawn_ty), (10, return_map), (11, return_x),
-                (12, return_y), (13, level), (14, xp), (15, items))
+                (12, return_y), (13, level), (14, xp), (15, items), (16, essence_paid))
 
 [[nodiscard]] inline PlayerProgression progression_of(const PlayerView& v) {
     PlayerProgression p;
@@ -161,6 +164,7 @@ QUARK_SERIALIZE(PlayerProgression, (1, map), (2, x), (3, y), (4, hp), (5, mana),
     p.level.assign(v.skill_level, v.skill_level + kSkillCount);
     p.xp.assign(v.skill_xp, v.skill_xp + kSkillCount);
     p.items.assign(v.items, v.items + kItemKinds);
+    p.essence_paid.assign(v.essence_paid, v.essence_paid + kSkillCount);
     return p;
 }
 
@@ -186,6 +190,9 @@ QUARK_SERIALIZE(PlayerProgression, (1, map), (2, x), (3, y), (4, hp), (5, mana),
     for (int i = 0; i < kSkillCount && i < static_cast<int>(p.level.size()); ++i) {
         r.level[i] = p.level[static_cast<std::size_t>(i)];
         r.xp[i] = (i < static_cast<int>(p.xp.size())) ? p.xp[static_cast<std::size_t>(i)] : 0;
+        r.essence_paid[i] = (i < static_cast<int>(p.essence_paid.size()))
+                                ? p.essence_paid[static_cast<std::size_t>(i)]
+                                : 0;
     }
     return r;
 }

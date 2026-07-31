@@ -57,6 +57,9 @@ struct PlayerView {
     std::uint8_t skill_level[kSkillCount] = {};
     std::uint32_t skill_xp[kSkillCount] = {};
     std::uint32_t skill_next[kSkillCount] = {};
+    // RFC-019 §5.7/§5.10: Essence units spent against each branch's Tier IV gate (0..3) — not
+    // derivable from XP alone, since a level-18+ branch can sit fully banked and waiting.
+    std::uint8_t essence_paid[kSkillCount] = {};
 
     // The two equipped ability slots, as the HUD needs to draw them without an `ask`. `ability` is
     // which ability the fixed loadout resolved each slot to (AbilityId::kCount if the school is not

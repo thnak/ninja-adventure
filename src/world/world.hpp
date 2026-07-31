@@ -728,6 +728,22 @@ public:
         player_ref_by_key(player).tell(GrantXp{skill, amount});
     }
 
+    // RFC-019 §5.6: respec at the player's own Hearth. No portal-step/UI trigger exists yet (that is
+    // RFC-011's Combat HUD territory) — this is the real, callable verb a future "respec" action
+    // would invoke, exercised directly here the same way `grant_xp` above already is. PlayerActor
+    // itself enforces the Hearth-proximity and Overworld-map preconditions; this is a thin
+    // passthrough, not a second copy of that logic.
+    void respec_skill(std::uint64_t player, Skill from, Skill to) {
+        player_ref_by_key(player).tell(RespecSkill{from, to});
+    }
+
+    // RFC-019 §5.7: debug/tools — hand a player Essence directly against one branch's Tier IV gate,
+    // so a staged scenario can clear a capstone without RFC-018's (proposed) challenge-realm reward
+    // path existing yet. Rides the same GrantEssence a future reward table would send.
+    void grant_essence(std::uint64_t player, Skill skill, std::uint8_t amount = 1) {
+        player_ref_by_key(player).tell(GrantEssence{skill, amount});
+    }
+
     // Debug/tools: top a player's bars up. Amounts ADD and are clamped to the maxima by the trusted
     // actor, so passing the maxima refills from any state. Used by the headless runner to start each
     // staged ability fight from full, so the test measures the ability rather than the wildlife.
