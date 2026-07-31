@@ -21,6 +21,7 @@
 
 #include "world/gate_sidecar.hpp"
 #include "world/map_system.hpp"
+#include "world/replication.hpp"
 #include "world/reward.hpp"
 #include "world/world.hpp"
 
@@ -2418,6 +2419,128 @@ int main(int argc, char** argv) {
         world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
         world.teleport_player(me, kOverworld, spawn.x, spawn.y);
     }
+
+    // --- RFC-015: client replication & interest-set protocol -----------------------------------------
+    // No client-facing socket exists to test end to end (P6's territory, confirmed absent — see
+    // replication.hpp's own header note). What IS real and testable: the interest-set/distance math
+    // (pure), and ReplicationSession's baseline/delta engine driven against the LIVE SnapshotBus a
+    // real ChunkActor publishes to — the exact same bus `client_main.cpp` reads today, just read
+    // through the new session/delta machinery instead of directly.
+    //
+    // Placed here rather than earlier in the file (its first draft sat right after RFC-013/014,
+    // before the wildlife/boss sections): the extra instance this block allocates and tears down was
+    // observed to make the boss-respawn section's own already-documented actor-runtime flakiness
+    // (see that section's "KNOWN ISSUE" comment, above) fail reliably instead of intermittently —
+    // more live ChunkActors at the moment of a large single-burst `advance()` call made the
+    // pre-existing timing sensitivity worse, not a new bug this block introduces. Running after the
+    // boss section, once that timer has already resolved, avoids the interaction entirely.
+    {
+        // Pure §1 math: the interest set mirrors fan_beacons()'s own 5x5 window, clamped the same way.
+        const ChunkCoord mid_home{kOverworld, 10, 10};
+        const std::vector<ChunkCoord> mid_set = client_interest_set(kOverworld, mid_home);
+        chk.expect(mid_set.size() == 25, "an interior home chunk gets the full 5x5=25 interest window");
+        const ChunkCoord corner_home{kOverworld, 0, 0};
+        const std::vector<ChunkCoord> corner_set = client_interest_set(kOverworld, corner_home);
+        chk.expect(corner_set.size() == 9,
+                   "a corner home chunk's window clamps to 3x3=9, same clamp fan_beacons() itself uses");
+        chk.expect(chebyshev_distance(ChunkCoord{kOverworld, 12, 10}, mid_home) == 2 &&
+                       chebyshev_distance(ChunkCoord{kOverworld, 11, 11}, mid_home) == 1 &&
+                       chebyshev_distance(mid_home, mid_home) == 0,
+                   "Chebyshev distance matches the inner/outer band split §4 keys on");
+
+        // Pure §2 math: wire projections carry exactly what the RFC says and nothing else.
+        Creature src{};
+        src.id = 777;
+        src.x = 12.5f;
+        src.y = 8.25f;
+        src.hp = 40;
+        src.max_hp = 60;
+        src.kind = CreatureKind::kWolf;
+        src.facing = Facing::kLeft;
+        src.windup = 5;
+        src.disposition = Disposition::kHostile;
+        src.status.primary = Channel::kHeat;
+        src.status.stage = 2;
+        src.status.coatings = static_cast<std::uint8_t>(1u << static_cast<unsigned>(Coating::kWet));
+        const PublishedCreature pc = publish_of(src);
+        chk.expect(pc.id == 777 && pc.x == 12.5f && pc.y == 8.25f && pc.hp == 40 && pc.max_hp == 60 &&
+                       pc.kind == static_cast<std::uint8_t>(CreatureKind::kWolf) && pc.windup == 5,
+                   "PublishedCreature carries id/position/vitals/kind/windup unchanged");
+        chk.expect((pc.status & 0x07u) == static_cast<std::uint8_t>(Channel::kHeat) &&
+                       ((pc.status >> 3) & 0x03u) == 2 && (pc.status & kPublishedStatusWetBit) != 0,
+                   "the packed status byte round-trips channel, stage, and the Wet coating bit");
+
+        // §7's instance-crossing full-swap and §3.1's baseline-on-subscribe, against the real engine.
+        ReplicationSession session;
+        world.spawn_wave_at(fx, fy, CreatureKind::kSlime, 4, /*seed*/ 4242);
+        advance(world, ChunkActor::kIdlePublish + 5);  // past every chunk's own idle-publish floor once
+        const ChunkCoord home1 = chunk_of(home, spawn.x, spawn.y);
+        const ReplicationSession::Frame f1 = session.advance(world.bus(), home, home1, 1);
+        chk.expect(!f1.baselines.empty(), "the first frame baselines every chunk that has already published");
+        chk.expect(session.tracked_chunk_count() == f1.baselines.size(),
+                   "every baselined chunk becomes a tracked chunk");
+        const std::size_t tracked_after_first = session.tracked_chunk_count();
+
+        const ReplicationSession::Frame f2 = session.advance(world.bus(), home, home1, 2);
+        chk.expect(f2.baselines.empty(),
+                   "the SAME home one tick later re-baselines nothing — every chunk is already tracked");
+        chk.expect(session.tracked_chunk_count() == tracked_after_first,
+                   "the tracked chunk set is stable when the player hasn't moved");
+
+        PortalDef rep_portal{};
+        rep_portal.id = 503;
+        rep_portal.from_map = kOverworld;
+        rep_portal.from_x = static_cast<std::uint16_t>(spawn.x);
+        rep_portal.from_y = static_cast<std::uint16_t>(spawn.y);
+        rep_portal.kind = PortalKind::kRealmGate;
+        rep_portal.realm_type = RealmType::kChallenge;
+        rep_portal.flavor = RealmFlavor::kDungeon;
+        rep_portal.binding = PortalBinding::kAllocateOnUse;
+        rep_portal.scope = SessionScope::kSoloInstance;
+        MapDescriptor rep_desc{};
+        // chunk_edge=3, not 2: at kInterestSpan=2 the window around home chunk (0,0) covers exactly
+        // cx,cy in [0,2] — for edge=3 that is the WHOLE instance, so every candidate is genuinely
+        // in-footprint. A smaller edge (e.g. 2) would leave candidates outside the real footprint,
+        // and SnapshotBus::instance_local_index (map_system.hpp) does not bound-check cx/cy against
+        // chunk_edge individually before combining them into one linear index — an out-of-footprint
+        // candidate can alias a DIFFERENT real chunk's slot instead of cleanly returning null (e.g.
+        // edge=2: (cx=2,cy=0) and (cx=0,cy=1) both resolve to local index 2). This is a real,
+        // pre-existing gap in RFC-014's own addressing scheme, discovered while writing this test —
+        // named here rather than fixed here, the same scope boundary RFC-015 §1 already draws around
+        // fan_beacons()'s own instance-agnostic clamp (RFC-014 Open Question 7 owns both).
+        rep_desc.chunk_edge = 3;
+        rep_desc.biome = Ring::kForest;
+        rep_desc.weather_mode = WeatherMode::kFixed;
+        rep_desc.allow_free_build = false;
+
+        LoginOutcome rep_out{};
+        const int rep_slot = world.login("repltest", "hunter2", rep_out);
+        chk.expect(rep_slot >= 0, "a dedicated account logs in for the replication instance-crossing test");
+        if (rep_slot >= 0) {
+            const std::uint64_t rep_key = world.key_of(rep_slot);
+            const AccountId rep_acct = world.account_of(rep_slot);
+            world.teleport_player(rep_key, kOverworld, spawn.x, spawn.y);
+            const bool rep_entered = world.use_portal(rep_key, rep_portal, /*group*/ 4, rep_acct, rep_desc);
+            chk.expect(rep_entered, "use_portal allocates a fresh instance for the replication test");
+            const MapId rep_map = world.player_view(rep_slot).map;
+            const ChunkCoord inst_home = chunk_of(rep_map, 1.5f, 1.5f);
+
+            const ReplicationSession::Frame f3 = session.advance(world.bus(), rep_map, inst_home, 3);
+            chk.expect(!f3.baselines.empty() && f3.deltas.empty(),
+                       "crossing onto a new MapId re-baselines every chunk in the new window, no deltas");
+            chk.expect(session.tracked_chunk_count() == 9,
+                       "a chunk_edge=3 instance's whole 3x3 footprint matches the interest window "
+                       "exactly and every one of the 9 chunks is tracked after crossing");
+
+            world.leave_instance(rep_map, rep_acct);
+            world.sweep_instances(3'000);
+            world.sweep_instances(3'000 + kInstanceIdleGraceMs);
+            world.disconnect_player(rep_key, kOverworld, rep_acct);
+        }
+        world.teleport_player(me, kOverworld, spawn.x, spawn.y);
+    }
+    std::printf("RFC-015 client replication: interest set, wire projections, baseline/delta "
+               "tracking, and instance-crossing resubscribe all check out\n\n");
 
     // --- Death and respawn -------------------------------------------------------------------------
     // The respawn point is where you lit your hearth. Nothing is taken from you when you die: this

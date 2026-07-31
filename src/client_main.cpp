@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -486,8 +487,21 @@ int main(int argc, char** argv) {
     // Audio bookkeeping for the sim-driven cues below. `effect_tick` remembers, per chunk, the last
     // published tick whose effects were already sounded, so a combo/hit cue fires once per event and
     // not once per render frame. `last_skill` mirrors the local player's levels so a level-up can be
-    // heard the frame it happens. Both are fixed-size and allocated once — no per-frame allocation.
-    std::vector<std::uint64_t> effect_tick(static_cast<std::size_t>(kChunkCount), ~0ull);
+    // heard the frame it happens.
+    //
+    // RFC-015 §3.4: this used to be a `std::vector` sized to `kChunkCount` (persistent maps 0/1
+    // only), indexed by `chunk_index(cc)` — which folds in `cc.map * kChunksPerMap`, so any instanced
+    // MapId (RFC-014, `map_id_instanced()`, >= 16) produced an index far past the vector's end, an
+    // out-of-bounds read/write. RFC-014 §4 named this vector by number as needing the same sparse
+    // scheme `SnapshotBus` adopted; unlike `SnapshotBus` this table has exactly one writer (this
+    // render loop, single-threaded) and a working set bounded to the ~25 chunks around one player, so
+    // a plain hash map keyed by `chunk_key()` already satisfies the underlying requirement — sparse,
+    // never a dense kChunkCount-sized array — without needing `SnapshotBus`'s persistent-array-plus-
+    // instance-block split, which exists to serve many concurrent `ChunkActor` writers this table
+    // never has. `try_emplace` seeds a newly-seen chunk with `~0ull`, matching the old vector's
+    // "never sounded yet" default exactly (plain `operator[]` would default to 0, indistinguishable
+    // from a real tick-0 publish).
+    std::unordered_map<std::uint64_t, std::uint64_t> effect_tick;
     std::uint8_t last_skill[kSkillCount] = {};
     std::uint32_t last_xp[kSkillCount] = {};  // rides the same snapshot to drift the "+N" XP motes
     bool have_skills = false;
@@ -653,7 +667,7 @@ int main(int argc, char** argv) {
                                         static_cast<std::uint16_t>(cy)};
                     ChunkViewPtr v = world.bus().load(cc);
                     if (!v) continue;
-                    std::uint64_t& seen = effect_tick[static_cast<std::size_t>(chunk_index(cc))];
+                    std::uint64_t& seen = effect_tick.try_emplace(chunk_key(cc), ~0ull).first->second;
                     if (v->tick == seen) continue;  // this simulation frame is already sounded
                     seen = v->tick;
                     for (const Effect& e : v->effects) {
