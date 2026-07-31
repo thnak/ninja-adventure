@@ -292,6 +292,11 @@ public:
             quark::block_on(player_ref_by_key(player).ask<AbilityPlan>(q));
         const AbilityPlan p = r.has_value() ? r.value() : AbilityPlan{};
         if (!p.ok) return false;
+        // RFC-001 Section 4: a payload only exists to dispatch once the head has reached Release
+        // in this very call (phase == kIdle — see AbilityPlan's comment). Every shipped ability has
+        // cast_ticks == 0 so this is always true today; a future cast-time ability would instead
+        // still be sitting in kCast/kChannel here, with nothing yet to fan out.
+        if (p.phase != AbilityPhase::kIdle) return true;
         const AbilityDef def = ability_def(p.ability);
         switch (def.kind) {
             case AbilityKind::kStrike: {
@@ -302,7 +307,7 @@ public:
                 s.shape = def.shape;
                 s.radius = def.radius;
                 s.damage = p.damage;
-                s.stun_ticks = def.stun_ticks;
+                s.stagger_power = def.stagger_power;
                 s.element = p.element;
                 s.skill = def.school;
                 // Nova's flash is the CURRENT element's own effect (a fire bloom, an ice burst),
@@ -346,17 +351,17 @@ public:
             }
             case AbilityKind::kZone: {
                 if (!in_map(p.x, p.y)) return false;
-                SpawnZone z{};
-                z.kind = def.zone_kind;
-                z.x = p.x;
-                z.y = p.y;
-                z.radius = def.radius;
-                z.ticks = def.zone_ticks;
-                z.player = player;
-                // Fanned to the 3x3 neighbourhood, the same as a swing (F2): a zone centred near a
-                // border reaches into its neighbours, and each recipient keeps the part that overlaps
-                // it. Under F1a this was a single tell to the centre chunk and the seam under-covered.
-                fan_to_neighbours(p.map, p.x, p.y, z);
+                // RFC-004: spawns a CombatEntity (kSmokeCloud/kWaterPool) instead of a Zone. Fanned to
+                // the 3x3 neighbourhood, the same as a swing (F2): a spawn centred near a border
+                // reaches into its neighbours, and each recipient keeps the part that overlaps it.
+                SpawnEntity se{};
+                se.kind = def.spawn_entity_kind;
+                se.x = p.x;
+                se.y = p.y;
+                se.team = Faction::kPlayer;
+                se.owner = player;
+                se.radius_override = def.radius;
+                fan_to_neighbours(p.map, p.x, p.y, se);
                 break;
             }
         }
@@ -444,21 +449,24 @@ public:
         chunk_ref(map, tx, ty).tell(w);
     }
 
-    // Debug/tools: drop a lingering zone directly, bypassing the ability gate the same way
+    // Debug/tools: drop a CombatEntity directly, bypassing the ability gate the same way
     // `spawn_wave_at` bypasses the director. Fanned to the neighbourhood exactly as the ability path
-    // does, so a staged scenario can prove the F2 seam fix — a zone on a chunk border reaching both
-    // sides — without first levelling a caster into RainCall.
-    void spawn_zone_at(ZoneKind kind, float x, float y, float radius, std::uint16_t ticks,
-                       std::uint16_t map = kOverworld) {
+    // does for non-blocking kinds, so a staged scenario can prove the F2 seam fix (a spawn on a chunk
+    // border reaching both sides) or exercise a blocking/always-hot/totem archetype no shipped
+    // ability produces yet, without first levelling a caster or authoring boss content.
+    void spawn_entity_at(EntityKind kind, float x, float y, float radius_override = 0.0f,
+                         bool boss_room = false, std::uint16_t map = kOverworld,
+                         Faction team = Faction::kPlayer, std::uint64_t owner = 0) {
         if (!in_map(x, y)) return;
-        SpawnZone z{};
-        z.kind = kind;
-        z.x = x;
-        z.y = y;
-        z.radius = radius;
-        z.ticks = ticks;
-        z.player = 0;
-        fan_to_neighbours(map, x, y, z);
+        SpawnEntity e{};
+        e.kind = kind;
+        e.x = x;
+        e.y = y;
+        e.team = team;
+        e.owner = owner;
+        e.radius_override = radius_override;
+        e.boss_room = boss_room;
+        fan_to_neighbours(map, x, y, e);
     }
 
     // Debug/tools: hand a player experience directly, so a staged scenario can reach the school

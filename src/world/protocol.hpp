@@ -14,6 +14,8 @@
 #include <cstdint>
 
 #include "world/abilities.hpp"
+#include "world/ability_pipeline.hpp"
+#include "world/combat_entity.hpp"
 #include "world/tiles.hpp"
 
 namespace mmo {
@@ -154,24 +156,35 @@ struct AbilityStrike {
     AbilityShape shape = AbilityShape::kRing;
     float radius = 0.0f;
     std::int16_t damage = 0;
-    std::uint16_t stun_ticks = 0;       // CrushBlow leaves the target stunned
-    Element element = Element::kNone;   // Nova leaves this element's status; kNone for melee
+    // CrushBlow's authored Stagger Power rider (RFC-002/009): on top of the derived contribution
+    // any heavy blow carries, this pushes CrushBlow toward Knockdown in one or two hits — the same
+    // ballpark the old flat `stun_ticks=20` gave, now paid for through the ladder like every other
+    // status instead of being a bespoke flag.
+    std::uint16_t stagger_power = 0;
+    Element element = Element::kNone;   // Nova feeds this element's channel; kNone for melee
     Skill skill = Skill::kMelee;        // which skill the kill credits — "you level what you use"
     EffectKind fx = EffectKind::kSlash; // the flash the chunk publishes where it lands
     std::uint64_t player = 0;
 };
 
-// Drop a lingering ZONE onto the map. The chunk that owns the centre adopts it (see `Zone`), steps
-// it down each tick, and applies its effect to the creatures it owns inside the radius. One message
-// for both zone abilities — SmokeBomb (kSmokeSuppress) and RainCall (kWet) — because a zone is a
-// zone; only the kind and the numbers differ.
-struct SpawnZone {
-    ZoneKind kind = ZoneKind::kWet;
+// Spawn a CombatEntity (RFC-004). The chunk that owns the centre adopts it (see `CombatEntity`),
+// steps it through arm -> active -> dying, and applies whatever collision/aura/vision the archetype
+// carries. Replaces the old `SpawnZone`: `kSmokeCloud`/`kWaterPool` are what SmokeBomb/RainCall now
+// spawn, with the same tier/fan-out rules SpawnZone had (see `entity_intersects_chunk`-style clipping
+// in chunk_actor.hpp). `x/y` are the exact float spawn point, matching `Zone`'s own shape — the chunk
+// tile-snaps them to a tile centre itself for a `Collision != kNone` kind (RFC-004 §4); non-blocking
+// kinds (auras, smoke) keep the float point as-is, exactly as a zone did. `radius_override` is an
+// aura/footprint radius override (0 = the archetype's own default); `boss_room` is RFC-005's
+// eviction-exemption flag — a real field, inert until boss authoring exists (no ability sets it
+// today).
+struct SpawnEntity {
+    EntityKind kind = EntityKind::kIceWall;
     float x = 0.0f;
     float y = 0.0f;
-    float radius = 0.0f;
-    std::uint16_t ticks = 0;
-    std::uint64_t player = 0;
+    Faction team = Faction::kPlayer;
+    std::uint64_t owner = 0;
+    float radius_override = 0.0f;
+    bool boss_room = false;
 };
 
 // Create an arrow. The chunk owns it from here (see `Projectile`).
@@ -191,7 +204,8 @@ struct ChunkStats {
     std::uint32_t hostile = 0;    // of those, how many are currently willing to fight the player
     std::uint32_t afflicted = 0;  // ... and how many are carrying an elemental status
     std::uint32_t projectiles = 0;
-    std::uint32_t zones = 0;      // lingering ability zones (smoke/rain) this chunk owns
+    std::uint32_t entities = 0;   // CombatEntity instances (RFC-004) this chunk owns
+    std::uint32_t scars = 0;      // terrain scars this chunk owns
     std::uint32_t effects = 0;    // live flashes — proves a verb/ability landed on THIS chunk
     std::uint32_t watchers = 0;   // players whose beacon this chunk currently holds
     std::uint32_t crops = 0;
@@ -310,6 +324,13 @@ struct AbilityPlan {
     std::uint16_t map = 0;  // and on which map — the fan-out target, as for AttackPlan
     float aim_x = 0.0f;     // echoed back so the world can aim FanVolley without re-reading the client
     float aim_y = 0.0f;
+    // RFC-001 Section 4: the head's phase AFTER this call. kIdle means Cast collapsed straight to
+    // Release in the same call (true for every shipped ability today, all cast_ticks = 0) and `x/y/
+    // facing/damage/element/aim_x/aim_y` above are a resolved payload ready to dispatch. Any other
+    // phase (kCast/kChannel) means the ability is still winding up — the world must NOT dispatch a
+    // chunk message yet. No shipped content reaches that branch yet, but the field makes it a
+    // defined "not yet" instead of a silent wrong dispatch.
+    AbilityPhase phase = AbilityPhase::kIdle;
 };
 
 struct GetPlayer {};

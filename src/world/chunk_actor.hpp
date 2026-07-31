@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bitset>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -35,7 +36,9 @@
 #include "quark/core/placement_policies.hpp"
 
 #include "world/boss.hpp"
+#include "world/combat_entity.hpp"
 #include "world/flow_field.hpp"
+#include "world/physics.hpp"
 #include "world/player_actor.hpp"
 #include "world/protocol.hpp"
 #include "world/snapshot.hpp"
@@ -69,7 +72,7 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
                                  quark::DrainBudget<64>, quark::Placement<quark::HashById>> {
     using protocol =
         Protocol<Tick, CreatureEnter, ProjectileEnter, SpawnWave, PlayerBeacon, MeleeSwing,
-                 CastSpell, LaunchArrow, AbilityStrike, SpawnZone, PlantCrop, PlaceBuilding,
+                 CastSpell, LaunchArrow, AbilityStrike, SpawnEntity, PlantCrop, PlaceBuilding,
                  UpgradeBuilding, TillGround, HarvestAt, Ask<GetChunkStats, ChunkStats>>;
 
     // --- Wired once at bring-up, before the engine starts -----------------------------------------
@@ -112,7 +115,7 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         expire_beacons();
 
         const bool empty = creatures_.empty() && crops_.empty() && buildings_.empty() &&
-                           shots_.empty() && effects_.empty() && zones_.empty();
+                           shots_.empty() && effects_.empty() && entities_.empty() && scars_.empty();
         // A chunk that owns a boss never takes the idle fast path: even while its boss is DEAD (its
         // body gone from creatures_) the respawn timer has to tick down, and that is step_bosses'.
         if (empty && bosses_.empty()) {
@@ -123,7 +126,8 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         Rng rng(chunk_key(coord) * 0x9E37'79B9'7F4A'7C15ull + t.tick);
         grow_crops();
         step_status();
-        step_zones();  // before creatures: a wet/smoke zone changes what they do this tick
+        step_entities();  // before creatures: an entity's aura/aggro-suppress changes what they do
+        step_scars();
         step_creatures(rng);
         step_projectiles();
         step_effects();
@@ -207,30 +211,60 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
             // A 180-degree arc in front of the player. Anything behind you is not hit, which is
             // what makes facing worth caring about and turning worth doing.
             if (d2 > 0.01f && (dx * fx + dy * fy) < 0.0f) continue;
-            const Combo combo = combo_of(c.status, s.heavy, /*by_projectile*/ false, Element::kNone);
+            // RFC-009 §4.8's normative strike-path order: detonate against the stage the target
+            // enters this hit WITH, then strike, then fold in this hit's OWN build-up (including
+            // the derived Stagger contribution below) — promotion from that gain is deferred to
+            // the next status_step() tick, never judged against the very hit that produced it.
+            const Combo combo = status_detonate(c.status, c.gauges, s.heavy, /*by_projectile*/ false,
+                                                /*by_shock_element*/ false, tick_);
             apply_combo_side_effects(combo, c, s.player);
-            strike(c, s.damage, combo, s.player, Skill::kMelee);
+            // RFC-003 §2.1: only a heavy swing carries authored impulse — a light tap never shoves.
+            if (s.heavy) {
+                strike(c, s.damage, combo, s.player, Skill::kMelee, fx, fy, kHeavyMeleeImpulse);
+            } else {
+                strike(c, s.damage, combo, s.player, Skill::kMelee);
+            }
+            if (c.hp > 0) {
+                status_gain(c.status, c.gauges,
+                           BuildupPacket{Channel::kStagger, derived_stagger_power(s.damage, s.heavy, false),
+                                         0, s.player},
+                           mult_pm_of(c.material, c.tier, Channel::kStagger), tick_);
+            }
         }
+        // RFC-004 §7: the same arc also hits Active, destroyable entities in reach — friendly fire
+        // is always on for entities (a wall does not dodge, and you must be able to break your own).
+        strike_entities_in_shape(s.x, s.y, s.reach, fx, fy, /*front_only*/ true, s.damage,
+                                 Element::kNone, s.heavy);
     }
 
     void handle(const CastSpell& s) noexcept {
-        const Status st = status_of(s.element);
+        const Channel ch = channel_of(s.element);
         if (owns_point(s.x, s.y)) add_effect(s.x, s.y, effect_of(s.element));
         for (Creature& c : creatures_) {
             const float dx = c.x - s.x;
             const float dy = c.y - s.y;
             if (dx * dx + dy * dy > s.radius * s.radius) continue;
-            // Ice landing on something already wet freezes it solid rather than merely chilling it:
-            // the status the spell leaves depends on the status it found. This is the one place two
-            // schools interact without a physical blow, and it is what makes rain matter (P7).
-            const Combo combo = combo_of(c.status, false, false, s.element);
+            // RFC-003 §8: standing on a tile with effective Conductivity >= 50 (open water, deep
+            // marsh) counts as Wet for Conduct's coating test — a one-tick synthetic coat is enough
+            // to satisfy `status_detonate`'s check below, and it decays away on its own if unused.
+            if (terrain_phys(terrain_at(static_cast<int>(c.x), static_cast<int>(c.y))).conductivity >=
+                50) {
+                status_coat(c.status, CoatingPacket{Coating::kWet, 1});
+            }
+            // A spell detonates whatever ladder currently holds the primary slot (e.g. Fire vs an
+            // active Freeze breaks it early via X1, folded inside status_gain below) before it
+            // feeds its own channel's build-up — RFC-002 never lets a spell read a banked, non-
+            // primary gauge, which is what keeps chaining a decision.
+            const Combo combo =
+                status_detonate(c.status, c.gauges, false, false, s.element == Element::kShock, tick_);
             apply_combo_side_effects(combo, c, s.player);
             strike(c, s.damage, combo, s.player, Skill::kMagic);
-            if (c.hp > 0) {
-                c.status = st;
-                c.status_ticks = status_ticks_of(st);
+            if (c.hp > 0 && ch != Channel::kNone) {
+                status_gain(c.status, c.gauges, BuildupPacket{ch, kSpellPower, 0, s.player},
+                           mult_pm_of(c.material, c.tier, ch), tick_);
+                c.dot_owner = s.player;
             }
-            if (combo == Combo::kConduct) chain_shock(c, s.damage, s.player);
+            if (combo == Combo::kConduct) chain_shock(c, s.player);
         }
     }
 
@@ -277,70 +311,135 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
             if (best < creatures_.size()) {
                 Creature& c = creatures_[best];
                 add_effect(c.x, c.y, s.fx);
-                strike(c, s.damage, Combo::kNone, s.player, s.skill);
-                if (c.hp > 0 && s.stun_ticks > 0) {
-                    c.stun_ticks = static_cast<std::uint8_t>(s.stun_ticks);
+                // RFC-003 §2.1: CrushBlow is authored as a heavy, weighted blow — it carries impulse.
+                strike(c, s.damage, Combo::kNone, s.player, s.skill, fx, fy, kCrushBlowImpulse);
+                if (c.hp > 0) {
+                    // RFC-009 §4.5: CrushBlow's old flat `stun_ticks=20` migrates to a large
+                    // authored Stagger rider, on top of the derived contribution any heavy blow
+                    // already carries — together they reach Knockdown in one or two hits, same as
+                    // the old stun did.
+                    const std::uint32_t total =
+                        static_cast<std::uint32_t>(derived_stagger_power(s.damage, /*heavy*/ true, false)) +
+                        s.stagger_power;
+                    status_gain(c.status, c.gauges,
+                               BuildupPacket{Channel::kStagger,
+                                             static_cast<std::uint16_t>(std::min<std::uint32_t>(1000, total)),
+                                             0, s.player},
+                               mult_pm_of(c.material, c.tier, Channel::kStagger), tick_);
                 }
             }
+            // RFC-004 §7: entities join the same hit loop as creatures — no single-nearest
+            // precision is needed here, since entity damage carries no combo/stun bookkeeping.
+            strike_entities_in_shape(s.x, s.y, s.radius, fx, fy, /*front_only*/ true, s.damage,
+                                     s.element, /*heavy*/ false);
             return;
         }
 
         // A ring around the caster (WhirlCleave, Nova). The flash goes at the caster whether or not
         // it connects — a whiff is information, exactly as a plain swing's arc is.
         if (owns_point(s.x, s.y)) add_effect(s.x, s.y, s.fx);
-        const Status st = status_of(s.element);
+        const Channel ch = channel_of(s.element);
         for (Creature& c : creatures_) {
             if (c.hp <= 0) continue;
             const float dx = c.x - s.x;
             const float dy = c.y - s.y;
             if (dx * dx + dy * dy > s.radius * s.radius) continue;
             if (s.element != Element::kNone) {
-                // Nova is a big CastSpell: it detonates a wet target for Conduct and leaves its own
-                // element's status on the survivors — the same interaction the cast path has.
-                const Combo combo = combo_of(c.status, false, false, s.element);
+                // RFC-003 §8: same standing-in-water extension as CastSpell.
+                if (terrain_phys(terrain_at(static_cast<int>(c.x), static_cast<int>(c.y))).conductivity >=
+                    50) {
+                    status_coat(c.status, CoatingPacket{Coating::kWet, 1});
+                }
+                // Nova is a big CastSpell: it detonates a wet target for Conduct and feeds its own
+                // channel's build-up on the survivors — the same interaction the cast path has.
+                const Combo combo = status_detonate(c.status, c.gauges, false, false,
+                                                    s.element == Element::kShock, tick_);
                 apply_combo_side_effects(combo, c, s.player);
                 strike(c, s.damage, combo, s.player, s.skill);
-                if (c.hp > 0) {
-                    c.status = st;
-                    c.status_ticks = status_ticks_of(st);
+                if (c.hp > 0 && ch != Channel::kNone) {
+                    status_gain(c.status, c.gauges, BuildupPacket{ch, kSpellPower, 0, s.player},
+                               mult_pm_of(c.material, c.tier, ch), tick_);
+                    c.dot_owner = s.player;
                 }
-                if (combo == Combo::kConduct) chain_shock(c, s.damage, s.player);
+                if (combo == Combo::kConduct) chain_shock(c, s.player);
             } else {
+                // WhirlCleave: a light, non-heavy blow — still derives a small Stagger contribution
+                // like any physical hit (RFC-009 §4.5), just no combo detection (matches CrushBlow's
+                // own kFront branch, which never attempted one either).
                 strike(c, s.damage, Combo::kNone, s.player, s.skill);
+                if (c.hp > 0) {
+                    status_gain(c.status, c.gauges,
+                               BuildupPacket{Channel::kStagger, derived_stagger_power(s.damage, false, false),
+                                             0, s.player},
+                               mult_pm_of(c.material, c.tier, Channel::kStagger), tick_);
+                }
             }
         }
+        strike_entities_in_shape(s.x, s.y, s.radius, 0.0f, 0.0f, /*front_only*/ false, s.damage,
+                                 s.element, /*heavy*/ false);
     }
 
-    // Adopt a lingering zone (F2 seam fix). The message is now fanned to the 3x3 neighbourhood like a
-    // swing, and EVERY chunk whose area the circle touches keeps a copy — so a zone centred on a
-    // border wets (or blinds) creatures on BOTH sides, not just the owning chunk's. Each copy is
-    // clipped to its own chunk for free: step_zones only ever touches creatures THIS chunk owns, so
-    // the shared circle applies to each creature exactly once, by exactly the chunk that owns it. The
-    // F1a version adopted only at the centre and under-covered the seam.
-    void handle(const SpawnZone& z) noexcept {
-        if (!zone_intersects_chunk(z.x, z.y, z.radius)) return;
-        if (zones_.size() >= kMaxZones) return;
-        zones_.push_back(Zone{z.kind, z.x, z.y, z.radius, z.ticks});
-        // The throw is a one-shot puff; the lingering haze is the zone loop the renderer runs. Only
-        // the chunk that owns the CENTRE throws it, or a border zone would puff up to nine times.
-        if (owns_point(z.x, z.y) && z.kind == ZoneKind::kSmokeSuppress) {
-            add_effect(z.x, z.y, EffectKind::kSmoke);
+    // Spawn a CombatEntity (RFC-004). Blocking kinds are a single tile-snapped footprint, so only the
+    // chunk that OWNS that exact tile may accept one (RFC-004 §4 — no fan-out for a wall segment).
+    // Non-blocking kinds (auras, smoke) keep the F2 seam fix a Zone had: fanned to the 3x3
+    // neighbourhood, each chunk keeping its own copy clipped to what its area overlaps.
+    void handle(const SpawnEntity& e) noexcept {
+        const EntityDef def = entity_def(e.kind);
+        const bool blocking = def.collision != Collision::kNone;
+        float sx = e.x;
+        float sy = e.y;
+        if (blocking) {
+            const auto tx = static_cast<std::uint16_t>(e.x);
+            const auto ty = static_cast<std::uint16_t>(e.y);
+            if (!owns(tx, ty)) return;
+            // Spawn-validity (§4): walkable terrain, and no existing blocker already on the tile.
+            if (!is_walkable(terrain_at(tx, ty)) ||
+                block_bits_.test(static_cast<std::size_t>(local_tile_index(tx, ty)))) {
+                return;
+            }
+            sx = static_cast<float>(tx) + 0.5f;
+            sy = static_cast<float>(ty) + 0.5f;
+        } else {
+            const float r = e.radius_override > 0.0f ? e.radius_override : def.default_radius;
+            if (!entity_intersects_chunk(e.x, e.y, r)) return;
+        }
+        // Always-hot restriction (§2/§5): kThunderTotem/kFallingRock may only be authored into
+        // boss-room/dojo content. No RFC-005 authoring concept exists yet, so this backstops on the
+        // cheapest real proxy available — a chunk that owns a boss — exactly like the RFC's own
+        // "verb-side check is the backstop" framing. No ability or boss content spawns either kind
+        // today; this path is exercised only by synthetic tests.
+        if ((e.kind == EntityKind::kThunderTotem || e.kind == EntityKind::kFallingRock) &&
+            bosses_.empty()) {
+            return;
+        }
+        if (entities_.size() >= kMaxEntities) {
+            if (!e.boss_room) return;  // refusal, not eviction, is the default
+            std::size_t oldest = 0;
+            for (std::size_t i = 1; i < entities_.size(); ++i) {
+                if (entities_[i].state_tick < entities_[oldest].state_tick) oldest = i;
+            }
+            entities_.erase(entities_.begin() + static_cast<std::ptrdiff_t>(oldest));
+        }
+        entities_.push_back(make_entity(e.kind, sx, sy, e.team, e.owner, e.radius_override));
+        // The throw is a one-shot puff; the lingering FX is entity_def's own arm_fx. Only the chunk
+        // that owns the CENTRE throws it, or a border spawn would puff up to nine times.
+        if (blocking == false && owns_point(e.x, e.y) && e.kind == EntityKind::kSmokeCloud) {
+            add_effect(e.x, e.y, EffectKind::kSmoke);
         }
     }
 
-    // Does a circle (a zone) overlap this chunk's tile rectangle? Standard circle-vs-AABB: the
-    // closest point of the rectangle to the centre is the clamped centre, and the circle reaches the
-    // rectangle iff that point is within the radius. This is the whole of the F2 seam fix on the sim
-    // side — a chunk simply ignores a zone that does not reach into it.
-    [[nodiscard]] bool zone_intersects_chunk(float zx, float zy, float r) const noexcept {
+    // Does a circle (a non-blocking entity's footprint) overlap this chunk's tile rectangle?
+    // Standard circle-vs-AABB, mirrors the F2 seam fix a Zone used to need — a chunk simply ignores a
+    // spawn that does not reach into it.
+    [[nodiscard]] bool entity_intersects_chunk(float ex, float ey, float r) const noexcept {
         const float x0 = static_cast<float>(coord.cx * kChunkTiles);
         const float y0 = static_cast<float>(coord.cy * kChunkTiles);
         const float x1 = x0 + static_cast<float>(kChunkTiles);
         const float y1 = y0 + static_cast<float>(kChunkTiles);
-        const float nx = std::clamp(zx, x0, x1);
-        const float ny = std::clamp(zy, y0, y1);
-        const float dx = zx - nx;
-        const float dy = zy - ny;
+        const float nx = std::clamp(ex, x0, x1);
+        const float ny = std::clamp(ey, y0, y1);
+        const float dx = ex - nx;
+        const float dy = ey - ny;
         return dx * dx + dy * dy <= r * r;
     }
 
@@ -436,7 +535,8 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         ChunkStats s{};
         s.creatures = static_cast<std::uint32_t>(creatures_.size());
         s.projectiles = static_cast<std::uint32_t>(shots_.size());
-        s.zones = static_cast<std::uint32_t>(zones_.size());
+        s.entities = static_cast<std::uint32_t>(entities_.size());
+        s.scars = static_cast<std::uint32_t>(scars_.size());
         s.effects = static_cast<std::uint32_t>(effects_.size());
         s.watchers = static_cast<std::uint32_t>(players_.size());
         s.crops = static_cast<std::uint32_t>(crops_.size());
@@ -444,7 +544,9 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         s.tilled = tilled_;
         for (const Creature& c : creatures_) {
             if (c.disposition == Disposition::kHostile || c.anger_ticks > 0) ++s.hostile;
-            if (c.status != Status::kNone) ++s.afflicted;
+            // "Afflicted" is any status at all — a ladder primary OR a coexisting coating (Wet no
+            // longer has a primary slot of its own under RFC-002, so this must check both).
+            if (c.status.primary != Channel::kNone || c.status.coatings != 0) ++s.afflicted;
         }
         for (const Building& b : buildings_) s.building_levels += b.level;
         s.tick = tick_;
@@ -580,6 +682,10 @@ private:
         c.damage = static_cast<std::int16_t>(static_cast<float>(st.damage) * ring_damage_scale(ring));
         c.kind = kind;
         c.disposition = st.disposition;
+        const DefenderProfile def = defender_of(kind);
+        c.material = def.material;
+        c.tier = def.tier;
+        c.toughness = tier_toughness(def.tier);
         if (wanders) {
             c.home_tx = static_cast<std::uint16_t>(tx);
             c.home_ty = static_cast<std::uint16_t>(ty);
@@ -628,68 +734,346 @@ private:
         }
     }
 
-    // --- elemental status -------------------------------------------------------------------------
+    // --- elemental status (RFC-002/009) -------------------------------------------------------------
+    // Every status_gain call below computes its `mult_pm` from the creature's own material/tier via
+    // `mult_pm_of` (combat_math.hpp) — RFC-009's real gain formula, no longer an identity stand-in.
+    // The uniform Power anchor RFC-009 §4.5 calibrates for Ice (`kIceBoltPower = 600`) applied to
+    // all four elements alike — P2's own status-duration table was already symmetric across
+    // schools, so this preserves that symmetry rather than inventing per-element splits.
+    static constexpr std::uint16_t kSpellPower = 600;
+
+    // RFC-003 §2.1/§10: authored impulse for the two hit shapes that already carry an explicit
+    // "this is a heavy/authored blow" flag today (physics.hpp's header note: no multi-channel
+    // payload exists yet to author this per skill in data, so it is a compile-time constant here,
+    // mirroring `kSpellPower`'s own posture). 220 is the RFC's own §10 worked-example value.
+    static constexpr std::uint16_t kHeavyMeleeImpulse = 220;
+    static constexpr std::uint16_t kCrushBlowImpulse = 260;
+
+    [[nodiscard]] static constexpr Channel channel_of(Element e) noexcept {
+        switch (e) {
+            case Element::kFire: return Channel::kHeat;
+            case Element::kIce: return Channel::kCold;
+            case Element::kEarth: return Channel::kEarth;
+            case Element::kShock: return Channel::kShock;
+            case Element::kNone:
+            case Element::kCount: break;
+        }
+        return Channel::kNone;
+    }
+
+    // RFC-009 §4.5's derived-Stagger rule, simplified to a single-channel proxy: this engine has one
+    // flat `damage` scalar per hit, not RFC-003's unbuilt 7-channel taxonomy (Crush/Explosion/
+    // Damage/Pierce), so a heavy blow is treated as pure Crush-weight (1000‰), a light melee blow as
+    // Damage-weight (200‰), and an arrow as Pierce-weight (100‰) — spells contribute none, matching
+    // the RFC's own table.
+    [[nodiscard]] static constexpr std::uint16_t derived_stagger_power(std::int16_t damage, bool heavy,
+                                                                       bool by_projectile) noexcept {
+        if (damage <= 0) return 0;
+        const std::uint32_t weight_pm = heavy ? 1000u : (by_projectile ? 100u : 200u);
+        return static_cast<std::uint16_t>((static_cast<std::uint32_t>(damage) * weight_pm) / 1000u);
+    }
+
     void step_status() noexcept {
         for (Creature& c : creatures_) {
-            if (c.status_ticks == 0) {
-                c.status = Status::kNone;
-                continue;
+            if (c.hp <= 0) continue;
+            const StepResult r = status_step(c.status, c.gauges, /*dticks*/ 1, tick_,
+                                             tier_terminal_dur_pm(c.tier));
+            std::int16_t dmg = r.dot_damage;
+            if (r.combust) {
+                // Heat's terminal (Combust) bursts for min(15% max_hp, 60) as it resolves — this
+                // header cannot compute that (no access to max_hp), so status_step only reports the
+                // event and this caller applies it.
+                dmg = static_cast<std::int16_t>(dmg + std::min<std::int32_t>(60, (c.max_hp * 15) / 100));
             }
-            --c.status_ticks;
-            // Damage over time, applied every fifth tick rather than every tick. Twice a second is
-            // legible; ten times a second is a number blurring, and it makes burn strictly better
-            // than every other school at any duration.
-            if ((c.status == Status::kBurning || c.status == Status::kShocked) && tick_ % 5 == 0) {
-                c.hp = static_cast<std::int16_t>(c.hp - (c.status == Status::kBurning ? 3 : 2));
-            }
-            if (c.status_ticks == 0) c.status = Status::kNone;
+            if (dmg <= 0) continue;
+            c.hp = static_cast<std::int16_t>(c.hp - dmg);
+            if (c.hp > 0) continue;
+            // A DoT tick took the last point: credit the kill through the same path a direct strike
+            // uses, crediting whoever last fed this creature's primary channel (RFC-002 §1's
+            // `dot_owner`) rather than leaving it silently uncredited.
+            credit_kill(c, c.dot_owner, Skill::kMagic);
         }
     }
 
-    // --- zones ------------------------------------------------------------------------------------
-    // Step every lingering zone down one tick and apply what it does to the creatures this chunk
-    // owns inside it. kWet re-marks each tick, so a creature that just wandered in is a conductor and
-    // one that stays does not dry out mid-storm — but it never overwrites a status a player set on
-    // purpose (frozen/burning), only bare ground or an existing wetting. kSmokeSuppress strips target
-    // and anger here; the "cannot re-acquire" half is enforced in step_creatures, which is where
-    // targeting happens.
-    void step_zones() noexcept {
-        for (std::size_t i = zones_.size(); i-- > 0;) {
-            Zone& z = zones_[i];
-            if (z.ticks_left == 0) {
-                zones_.erase(zones_.begin() + static_cast<std::ptrdiff_t>(i));
+    // --- combat entities (RFC-004) -----------------------------------------------------------------
+
+    [[nodiscard]] CombatEntity make_entity(EntityKind kind, float x, float y, Faction team,
+                                           std::uint64_t owner, float radius_override) noexcept {
+        const EntityDef def = entity_def(kind);
+        CombatEntity ce{};
+        // Same chunk-local-monotonic-OR-chunk-key scheme as creatures/projectiles (make_creature,
+        // handle(LaunchArrow)).
+        ce.id = ++next_id_ | (static_cast<std::uint32_t>(chunk_key(coord)) << 12);
+        ce.kind = kind;
+        ce.state = EntityState::kArming;
+        ce.team = team;
+        ce.hp = def.base_hp;
+        ce.x = x;
+        ce.y = y;
+        ce.radius = radius_override > 0.0f ? radius_override : def.default_radius;
+        ce.owner = owner;
+        ce.state_tick = tick_;
+        return ce;
+    }
+
+    // Any creature or player standing on the footprint tile? The anti-trap rule (§4) tests this
+    // exactly once, at the kArming -> kActive transition of a blocking entity.
+    [[nodiscard]] bool footprint_occupied(float x, float y) const noexcept {
+        const int tx = static_cast<int>(x);
+        const int ty = static_cast<int>(y);
+        for (const Creature& c : creatures_) {
+            if (c.hp <= 0) continue;
+            if (static_cast<int>(c.x) == tx && static_cast<int>(c.y) == ty) return true;
+        }
+        for (const PlayerBeacon& p : players_) {
+            if (p.hp <= 0) continue;
+            if (static_cast<int>(p.x) == tx && static_cast<int>(p.y) == ty) return true;
+        }
+        return false;
+    }
+
+    // RFC-002 §8's aura apply: feed `def.aura_channel`'s build-up or refresh `def.aura_coating` on
+    // every creature in radius that `aura_affects` selects. There is no "bare ground or an existing
+    // match only" gate any more (the old Status stand-in's rule) — the one-slot promotion algorithm
+    // (status.hpp) is itself the replacement: an aura's gain simply accumulates in its own gauge,
+    // and it only becomes primary by out-accumulating whatever currently holds the slot.
+    void apply_aura(const CombatEntity& e, const EntityDef& def) noexcept {
+        const float r2 = e.radius * e.radius;
+        for (Creature& c : creatures_) {
+            if (c.hp <= 0) continue;
+            if (def.aura_affects == AuraAffects::kEnemiesOfTeam &&
+                stance_between(e.team, stats_of(c.kind).faction) != Stance::kHostile) {
                 continue;
             }
-            --z.ticks_left;
-            const float r2 = z.radius * z.radius;
-            for (Creature& c : creatures_) {
-                if (c.hp <= 0) continue;
-                const float dx = c.x - z.x;
-                const float dy = c.y - z.y;
-                if (dx * dx + dy * dy > r2) continue;
-                if (z.kind == ZoneKind::kWet) {
-                    if (c.status == Status::kNone || c.status == Status::kWet) {
-                        c.status = Status::kWet;
-                        c.status_ticks = status_ticks_of(Status::kWet);
+            const float dx = c.x - e.x;
+            const float dy = c.y - e.y;
+            if (dx * dx + dy * dy > r2) continue;
+            if (def.aura_kind == AuraKind::kChannel) {
+                status_gain(c.status, c.gauges,
+                           BuildupPacket{def.aura_channel, def.aura_gain, 0, e.owner},
+                           mult_pm_of(c.material, c.tier, def.aura_channel), tick_);
+                if (e.owner != 0) c.dot_owner = e.owner;
+            } else if (def.aura_kind == AuraKind::kCoating) {
+                status_coat(c.status, CoatingPacket{def.aura_coating, def.aura_coating_ticks});
+            }
+        }
+    }
+
+    // Marks an entity kDying and — unless this was an interception/anti-trap whiff, which stamp/spawn
+    // nothing (§3) — applies its death products. Products only STAGE here; they are pushed to
+    // `entities_` once this whole step_entities() pass is done (see the `pending` vector below),
+    // because pushing mid-loop could reallocate the vector out from under other live references.
+    struct PendingSpawn {
+        EntityKind kind;
+        float x, y;
+        Faction team;
+        std::uint64_t owner;
+    };
+
+    void kill_entity(CombatEntity& e, const EntityDef& def, bool apply_products,
+                    std::vector<PendingSpawn>& pending) noexcept {
+        e.state = EntityState::kDying;
+        e.state_tick = tick_;
+        if (!apply_products) return;
+        if (def.death_scar != ScarKind::kNone) {
+            stamp_scar(static_cast<int>(e.x), static_cast<int>(e.y), def.death_scar);
+        }
+        if (def.death_spawn != EntityKind::kCount) {
+            pending.push_back(PendingSpawn{def.death_spawn, e.x, e.y, e.team, e.owner});
+        }
+    }
+
+    // Rebuilds the two derived occupancy bitmaps from scratch. Cheap (kMaxEntities=16) and called
+    // only on an entity state change, never every tick — never published, always recomputed by
+    // whichever consumer needs it (RFC-004 §4's "derived, not stored" discipline).
+    void rebuild_occupancy_bits() noexcept {
+        block_bits_.reset();
+        vision_bits_.reset();
+        const int cx0 = coord.cx * kChunkTiles;
+        const int cy0 = coord.cy * kChunkTiles;
+        for (const CombatEntity& e : entities_) {
+            if (e.state != EntityState::kActive) continue;
+            const EntityDef def = entity_def(e.kind);
+            if (def.collision != Collision::kNone) {
+                const auto tx = static_cast<int>(e.x);
+                const auto ty = static_cast<int>(e.y);
+                if (owns(static_cast<std::uint16_t>(tx), static_cast<std::uint16_t>(ty))) {
+                    block_bits_.set(static_cast<std::size_t>(local_tile_index(tx, ty)));
+                }
+            }
+            if (def.blocks_vision) {
+                for (int ly = 0; ly < kChunkTiles; ++ly) {
+                    for (int lx = 0; lx < kChunkTiles; ++lx) {
+                        const float tcx = static_cast<float>(cx0 + lx) + 0.5f;
+                        const float tcy = static_cast<float>(cy0 + ly) + 0.5f;
+                        if (circle_covers_tile(tcx, tcy, e.x, e.y, e.radius)) {
+                            vision_bits_.set(static_cast<std::size_t>(ly * kChunkTiles + lx));
+                        }
                     }
-                } else {  // kSmokeSuppress
-                    c.target = 0;
-                    c.anger_ticks = 0;
                 }
             }
         }
     }
 
-    // Is this point under a smoke zone? Cheap and usually a no-op — most chunks hold no zone, and the
-    // caller guards on `zones_.empty()` before asking.
-    [[nodiscard]] bool in_suppress_zone(float px, float py) const noexcept {
-        for (const Zone& z : zones_) {
-            if (z.kind != ZoneKind::kSmokeSuppress) continue;
-            const float dx = px - z.x;
-            const float dy = py - z.y;
-            if (dx * dx + dy * dy <= z.radius * z.radius) return true;
+    // Step every entity through arm -> active -> dying -> removed. Called before creatures, the same
+    // position step_zones held: an active kSmokeCloud/aura changes what a creature does this tick.
+    void step_entities() noexcept {
+        std::vector<PendingSpawn> pending;
+
+        for (std::size_t i = entities_.size(); i-- > 0;) {
+            CombatEntity& e = entities_[i];
+            const EntityDef def = entity_def(e.kind);
+
+            if (e.state == EntityState::kArming) {
+                // (a) Intercepted: checked every tick, not only at arm elapse — a projectile can
+                // kill a hittable-while-arming kFallingRock before its telegraph finishes.
+                const bool intercepted = def.hittable_while_arming && e.hp <= 0;
+                const bool arm_done = tick_ >= e.state_tick + def.arm_ticks;
+                if (!intercepted && !arm_done) continue;
+                // (b) The anti-trap whiff: only meaningful for a blocking kind, only at arm elapse.
+                const bool occupied = !intercepted && arm_done && def.collision != Collision::kNone &&
+                                      footprint_occupied(e.x, e.y);
+                if (next_state_after_arm(def, intercepted, occupied) == EntityState::kDying) {
+                    kill_entity(e, def, /*apply_products=*/!intercepted && !occupied, pending);
+                    rebuild_occupancy_bits();
+                    continue;
+                }
+                e.state = EntityState::kActive;
+                e.state_tick = tick_;
+                e.expire_tick = tick_ + def.life_ticks;
+                e.next_aura_tick = tick_;
+                rebuild_occupancy_bits();
+                // Falls through to run this tick's Active-phase logic immediately below — matches
+                // the old zone's "wets what it owns inside the circle" same-tick behaviour for a
+                // zero-arm-tick kind like kWaterPool.
+            }
+
+            if (e.state == EntityState::kActive) {
+                if (e.kind == EntityKind::kSmokeCloud) {
+                    // kSmokeCloud's aggro-suppress is a kind-keyed special case, not table-driven —
+                    // "drop target and cannot re-acquire" is not a Status. Reproduces
+                    // ZoneKind::kSmokeSuppress's exact behaviour; the "cannot re-acquire" half is
+                    // still enforced in step_creatures via in_suppress_cloud().
+                    const float r2 = e.radius * e.radius;
+                    for (Creature& c : creatures_) {
+                        if (c.hp <= 0) continue;
+                        const float dx = c.x - e.x;
+                        const float dy = c.y - e.y;
+                        if (dx * dx + dy * dy > r2) continue;
+                        c.target = 0;
+                        c.anger_ticks = 0;
+                    }
+                } else if (def.aura_period > 0 && tick_ >= e.next_aura_tick) {
+                    apply_aura(e, def);
+                    e.next_aura_tick = tick_ + def.aura_period;
+                }
+                const bool dead = def.destroyable && e.hp <= 0;
+                if (dead || tick_ >= e.expire_tick) {
+                    kill_entity(e, def, /*apply_products=*/true, pending);
+                    rebuild_occupancy_bits();
+                }
+                continue;
+            }
+
+            // kDying: inert, waiting out its death FX.
+            if (tick_ >= e.state_tick + effect_life_of(def.death_fx)) {
+                entities_.erase(entities_.begin() + static_cast<std::ptrdiff_t>(i));
+            }
+        }
+
+        // Apply staged death-spawn products now that the loop above is done mutating `entities_` by
+        // index — pushing mid-loop could reallocate the vector out from under the `e` references above.
+        for (const PendingSpawn& p : pending) {
+            if (entities_.size() >= kMaxEntities) break;  // refusal, not eviction, applies here too
+            entities_.push_back(make_entity(p.kind, p.x, p.y, p.team, p.owner, 0.0f));
+        }
+    }
+
+    // Is this point under an Active smoke cloud? Cheap and usually a no-op — most chunks hold no
+    // entity, and the caller guards on `entities_.empty()` before asking.
+    [[nodiscard]] bool in_suppress_cloud(float px, float py) const noexcept {
+        for (const CombatEntity& e : entities_) {
+            if (e.kind != EntityKind::kSmokeCloud || e.state != EntityState::kActive) continue;
+            const float dx = px - e.x;
+            const float dy = py - e.y;
+            if (dx * dx + dy * dy <= e.radius * e.radius) return true;
         }
         return false;
+    }
+
+    // Damage to an entity is deliberately dumber than to a creature (RFC-004 §7): no statuses, no
+    // combos, no build-up — just the v1 element multiplier stand-in.
+    void strike_entity(CombatEntity& e, std::int16_t damage, Element element, bool heavy) noexcept {
+        if (damage <= 0 || e.hp <= 0) return;
+        const float scale = entity_damage_scale(e.kind, element, heavy);
+        const auto dealt = static_cast<std::int16_t>(static_cast<float>(damage) * scale);
+        e.hp = static_cast<std::int16_t>(e.hp - dealt);
+    }
+
+    // Shared by MeleeSwing's arc and AbilityStrike's kFront/kRing shapes — "no third loop is added"
+    // (§7): entities join the two hit loops that already exist rather than getting one of their own.
+    void strike_entities_in_shape(float cx, float cy, float radius, float fx, float fy,
+                                  bool front_only, std::int16_t damage, Element element,
+                                  bool heavy) noexcept {
+        for (CombatEntity& e : entities_) {
+            if (e.state != EntityState::kActive || !entity_def(e.kind).destroyable) continue;
+            const float dx = e.x - cx;
+            const float dy = e.y - cy;
+            const float d2 = dx * dx + dy * dy;
+            if (d2 > radius * radius) continue;
+            if (front_only && d2 > 0.01f && (dx * fx + dy * fy) < 0.0f) continue;
+            strike_entity(e, damage, element, heavy);
+        }
+    }
+
+    // --- the terrain scar layer (RFC-004 §8) --------------------------------------------------------
+
+    [[nodiscard]] ScarKind scar_kind_at(int tx, int ty) const noexcept {
+        if (tx / kChunkTiles != coord.cx || ty / kChunkTiles != coord.cy) return ScarKind::kNone;
+        const auto ltx = static_cast<std::uint8_t>(tx % kChunkTiles);
+        const auto lty = static_cast<std::uint8_t>(ty % kChunkTiles);
+        for (const Scar& s : scars_) {
+            if (s.tx == ltx && s.ty == lty) return s.kind;
+        }
+        return ScarKind::kNone;
+    }
+
+    // Stamp (or escalate) a scar at a map-global tile this chunk owns. §8.4's ladder: a scarring
+    // impact within `kEscalateWindow` of the existing mark's `made_tick` upgrades it one step;
+    // outside the window, or with no existing mark, it (re-)stamps `kCracked`.
+    void stamp_scar(int tx, int ty, ScarKind kind) noexcept {
+        if (kind == ScarKind::kNone) return;
+        const auto ltx = static_cast<std::uint8_t>(tx % kChunkTiles);
+        const auto lty = static_cast<std::uint8_t>(ty % kChunkTiles);
+        for (Scar& s : scars_) {
+            if (s.tx != ltx || s.ty != lty) continue;
+            s.kind = escalate(s.kind, s.made_tick, tick_);
+            s.made_tick = tick_;
+            s.heal_tick = tick_ + heal_ticks_of(s.kind);
+            return;
+        }
+        const Scar fresh{ltx, lty, ScarKind::kCracked, tick_ + heal_ticks_of(ScarKind::kCracked), tick_};
+        if (scars_.size() >= kMaxScars) {
+            // Full: the oldest mark (smallest made_tick) is overwritten (§8's own rule).
+            std::size_t oldest = 0;
+            for (std::size_t i = 1; i < scars_.size(); ++i) {
+                if (scars_[i].made_tick < scars_[oldest].made_tick) oldest = i;
+            }
+            scars_[oldest] = fresh;
+            return;
+        }
+        scars_.push_back(fresh);
+    }
+
+    // Lazily fast-forward every scar's heal ladder and drop the ones that have fully healed. Bounded
+    // by severity levels per scar (see `heal_lazy`), never by elapsed ticks — the "wake" contract.
+    void step_scars() noexcept {
+        for (std::size_t i = scars_.size(); i-- > 0;) {
+            scars_[i] = heal_lazy(scars_[i], tick_);
+            if (scars_[i].kind == ScarKind::kNone) {
+                scars_.erase(scars_.begin() + static_cast<std::ptrdiff_t>(i));
+            }
+        }
     }
 
     // --- creatures ---------------------------------------------------------------------------------
@@ -709,10 +1093,18 @@ private:
 
             if (c.attack_cd > 0) --c.attack_cd;
             if (c.anger_ticks > 0 && --c.anger_ticks == 0) c.target = 0;
-            if (c.stun_ticks > 0) {
-                --c.stun_ticks;
+            // Stagger's terminal (Knockdown) is the ladder's flat stun — status_step (step_status,
+            // called earlier this tick) already owns its countdown; this is only the gate.
+            if (c.status.primary == Channel::kStagger && c.status.stage == 3) {
                 c.windup = 0;  // a stun interrupts a committed swing — the telegraph is cancelled (F2)
                 continue;      // a stunned creature does not move, turn or strike
+            }
+
+            // RFC-003 §5: a Displaced creature is mid-slide — it does not steer, turn or strike this
+            // tick either, exactly like a committed wind-up or a Knockdown.
+            if (c.kb_ticks_left > 0) {
+                step_knockback(c);
+                continue;
             }
 
             // A creature that has committed to a swing is frozen mid-telegraph (F2): it does not
@@ -724,10 +1116,10 @@ private:
                 continue;
             }
 
-            // Inside a smoke zone a creature is blinded: it drops what it was chasing and cannot pick
+            // Inside a smoke cloud a creature is blinded: it drops what it was chasing and cannot pick
             // up prey again while it stands there. It still wanders and still flees — the suppression
             // is of AGGRESSION, not of movement.
-            const bool suppressed = !zones_.empty() && in_suppress_zone(c.x, c.y);
+            const bool suppressed = !entities_.empty() && in_suppress_cloud(c.x, c.y);
             if (suppressed) {
                 c.target = 0;
                 c.anger_ticks = 0;
@@ -791,7 +1183,17 @@ private:
             dx += (rng.unit() - 0.5f) * 0.35f;
             dy += (rng.unit() - 0.5f) * 0.35f;
 
-            const float speed = st.speed * status_speed_scale(c.status);
+            // RFC-004 §8.5: speed = base x status x scar, floored at kMinScarSpeed so stacked
+            // partial slows never become a de-facto root — but Frozen (an explicit, intentional
+            // root) is exempt from that floor, not composed with it.
+            const float status_mult = speed_scale_of(c.status);
+            float speed_mult = status_mult;
+            if (status_mult > 0.001f) {
+                const float scar_mult =
+                    scar_speed_scale(scar_kind_at(static_cast<int>(c.x), static_cast<int>(c.y)));
+                speed_mult = std::max(status_mult * scar_mult, kMinScarSpeed);
+            }
+            const float speed = st.speed * speed_mult;
             if (speed <= 0.001f) continue;  // frozen solid
 
             // Try the full step, then slide along each axis. Without the slide a creature that
@@ -810,10 +1212,28 @@ private:
                 ny = c.y + step_y;
             } else {
                 // Every way forward is blocked. If a BUILDING is what is blocking it, break that
-                // building — this is the entire reason a perimeter works.
-                attack_blocking_building(c, step_x, step_y);
+                // building — this is the entire reason a perimeter works. If a CombatEntity is
+                // blocking instead, RFC-004 §7's blocked-repath counter takes over: only after
+                // kBlockedRepathTicks consecutive refusals does it deal contact damage, mirroring
+                // `attack_blocking_building`'s own shape rather than the wind-up/strike machinery (a
+                // deliberate simplification of §7's "same machinery" language). Wildlife re-rolls its
+                // wander instead of ever attacking a blocker.
+                if (CombatEntity* blocker = blocking_entity(c.x, c.y, step_x, step_y)) {
+                    if (st.faction == Faction::kWild) {
+                        c.blocked_ticks = 0;
+                        c.wander_cd = 0;
+                    } else if (++c.blocked_ticks >= kBlockedRepathTicks &&
+                              entity_def(blocker->kind).destroyable &&
+                              stance_between(st.faction, blocker->team) == Stance::kHostile) {
+                        strike_entity(*blocker, c.damage, Element::kNone, false);
+                        c.blocked_ticks = 0;
+                    }
+                } else {
+                    attack_blocking_building(c, step_x, step_y);
+                }
                 continue;  // terrain-boxed instead; the jittered heading will differ next tick
             }
+            c.blocked_ticks = 0;
 
             // Facing is derived from the step actually taken, not the step intended — a creature
             // sliding along a wall should face where it is going.
@@ -975,6 +1395,10 @@ private:
         c.damage = kBossDamage;
         c.kind = CreatureKind::kBoss;
         c.disposition = Disposition::kHostile;
+        const DefenderProfile def = defender_of(CreatureKind::kBoss);
+        c.material = def.material;
+        c.tier = def.tier;
+        c.toughness = tier_toughness(def.tier);
         c.facing = Facing::kDown;
         c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
         creatures_.push_back(c);
@@ -1002,8 +1426,7 @@ private:
         if (c.attack_cd > 0) --c.attack_cd;
 
         // Stun cancels a committed wind-up or dash, exactly as it does for any creature (F2).
-        if (c.stun_ticks > 0) {
-            --c.stun_ticks;
+        if (c.status.primary == Channel::kStagger && c.status.stage == 3) {
             c.windup = 0;
             c.windup_target = 0;
             b.charging = 0;
@@ -1173,7 +1596,7 @@ private:
         float dy = ty - c.y;
         const float len = std::sqrt(dx * dx + dy * dy);
         if (len < 0.01f) return;
-        const float sp = speed * status_speed_scale(c.status);
+        const float sp = speed * speed_scale_of(c.status);
         if (sp <= 0.001f) return;  // frozen solid
         const float dt = static_cast<float>(kTickMs) / 1000.0f;
         float nx = c.x + (dx / len) * sp * dt;
@@ -1245,9 +1668,10 @@ private:
         c.y = static_cast<float>(b.spawn_ty) + 0.5f;
         c.windup = 0;
         c.windup_target = 0;
-        c.stun_ticks = 0;
-        c.status = Status::kNone;
-        c.status_ticks = 0;
+        // RFC-002 §9: an instance/leash reset clears status wholesale, the same as sleep teardown.
+        c.status = StatusState{};
+        for (Gauge& g : c.gauges) g = Gauge{};
+        c.dot_owner = 0;
         c.attack_cd = 0;
         c.facing = Facing::kDown;
         c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
@@ -1282,14 +1706,49 @@ private:
                 const float dx = c.x - p.x;
                 const float dy = c.y - p.y;
                 if (dx * dx + dy * dy > 0.42f) continue;  // ~0.65 tiles
-                const Combo combo = combo_of(c.status, false, /*by_projectile*/ true, Element::kNone);
+                const Combo combo = status_detonate(c.status, c.gauges, false, /*by_projectile*/ true,
+                                                    /*by_shock_element*/ false, tick_);
                 apply_combo_side_effects(combo, c, p.owner);
                 strike(c, p.damage, combo, p.owner, Skill::kRanged);
+                if (c.hp > 0) {
+                    status_gain(c.status, c.gauges,
+                               BuildupPacket{Channel::kStagger,
+                                             derived_stagger_power(p.damage, false, true), 0, p.owner},
+                               mult_pm_of(c.material, c.tier, Channel::kStagger), tick_);
+                }
                 if (combo == Combo::kBlast) splash(c.x, c.y, 2.0f, p.damage / 2, p.owner);
                 hit = true;
                 break;
             }
             if (hit) {
+                shots_.erase(shots_.begin() + static_cast<std::ptrdiff_t>(i));
+                continue;
+            }
+
+            // RFC-004 §7: a kGroundAndShot Active entity stops the arrow (you can shoot OVER a
+            // spike, but not THROUGH an ice wall); a kArming kFallingRock is hittable specifically
+            // by projectiles — the only way to intercept it before it lands.
+            bool hit_entity = false;
+            for (CombatEntity& e : entities_) {
+                const EntityDef edef = entity_def(e.kind);
+                if (e.state == EntityState::kActive && edef.collision == Collision::kGroundAndShot &&
+                    static_cast<int>(e.x) == static_cast<int>(p.x) &&
+                    static_cast<int>(e.y) == static_cast<int>(p.y)) {
+                    strike_entity(e, p.damage, p.element, false);
+                    hit_entity = true;
+                    break;
+                }
+                if (e.state == EntityState::kArming && edef.hittable_while_arming) {
+                    const float dx = e.x - p.x;
+                    const float dy = e.y - p.y;
+                    if (dx * dx + dy * dy <= kFallingRockHitRadius * kFallingRockHitRadius) {
+                        strike_entity(e, p.damage, p.element, false);
+                        hit_entity = true;
+                        break;
+                    }
+                }
+            }
+            if (hit_entity) {
                 shots_.erase(shots_.begin() + static_cast<std::ptrdiff_t>(i));
                 continue;
             }
@@ -1315,24 +1774,15 @@ private:
 
     // --- damage resolution ------------------------------------------------------------------------
 
-    // The one place a creature loses HP to a player, so the one place a kill can be credited.
-    void strike(Creature& c, std::int16_t damage, Combo combo, std::uint64_t player,
-                Skill skill) noexcept {
-        if (c.hp <= 0 || damage <= 0) return;
-        const auto dealt =
-            static_cast<std::int16_t>(static_cast<float>(damage) * combo_damage_scale(combo));
-        c.hp = static_cast<std::int16_t>(c.hp - dealt);
-        if (combo != Combo::kNone) {
-            c.status = Status::kNone;  // detonating a status consumes it
-            c.status_ticks = 0;
-        }
-        provoke(c, player, /*by_attack*/ true);
-        if (c.hp > 0 || router == nullptr || player == 0) return;
-        // The BOSS drops the design reward, flat and not ring-scaled: 400 XP into whichever skill
-        // struck the killing blow ("you level what you use") plus 10 produce. This is a PLACEHOLDER —
-        // P4 owns real loot tables, and inventing a boss loot table now would be inventing it twice —
-        // but it credits the right skill and pays out through the same GrantXp/GrantItems the rest of
-        // the game uses. step_bosses notices the body is gone next tick and starts the respawn timer.
+    // The BOSS drops the design reward, flat and not ring-scaled: 400 XP into whichever skill struck
+    // (or, for a DoT kill, `Skill::kMagic` — see step_status) the killing blow ("you level what you
+    // use") plus 10 produce. This is a PLACEHOLDER — P4 owns real loot tables, and inventing a boss
+    // loot table now would be inventing it twice — but it credits the right skill and pays out
+    // through the same GrantXp/GrantItems the rest of the game uses. step_bosses notices the body is
+    // gone next tick and starts the respawn timer. Shared by `strike()` and `step_status()`'s DoT
+    // path so a kill is credited identically regardless of what finished the creature off.
+    void credit_kill(const Creature& c, std::uint64_t player, Skill skill) noexcept {
+        if (router == nullptr || player == 0) return;
         if (c.kind == CreatureKind::kBoss) {
             router->get<PlayerActor>(player).tell(GrantXp{skill, 400});
             grant(player, GrantItems{ItemKind::kProduce, 10});
@@ -1352,6 +1802,110 @@ private:
             grant(player, GrantItems{ItemKind::kProduce, 1});
         }
         if (status != nullptr) status->player_kills.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // The one place a creature loses HP to a player, so the one place a direct-hit kill can be
+    // credited. `combo` no longer touches status here — RFC-002's `status_detonate` already
+    // consumed/updated the ladder BEFORE this is called (see the strike-path order in every
+    // handler above), so this function is purely damage + credit, matching RFC-009 §4.4/§4.8's
+    // split between combo detection and the damage step.
+    //
+    // RFC-003 wiring: `impulse` is an authored physics scalar (0 = none — every existing call site
+    // keeps working unchanged), pushing the target along the unit direction (`impulse_dir_x/y`,
+    // typically the attack's own facing). Two RFC-003 terrain rules apply to every strike
+    // unconditionally, impulse or not: slip mitigation (§6 — a low-grip/ice tile softens the blow)
+    // and, only when an impulse was authored, the mud rule's force-transfer bonus (§6 — momentum the
+    // terrain suppresses hurts instead).
+    void strike(Creature& c, std::int16_t damage, Combo combo, std::uint64_t player, Skill skill,
+                float impulse_dir_x = 0.0f, float impulse_dir_y = 0.0f,
+                std::uint16_t impulse = 0) noexcept {
+        if (c.hp <= 0 || damage <= 0) return;
+        const TerrainPhys tphys = terrain_phys(terrain_at(static_cast<int>(c.x), static_cast<int>(c.y)),
+                                               scar_kind_at(static_cast<int>(c.x), static_cast<int>(c.y)));
+        std::int32_t adj_damage = damage;
+        if (slip_applies(tphys.grip)) adj_damage = (adj_damage * kSlipMitigationPm) / 1000;
+
+        std::uint16_t effective_impulse = 0;
+        if (impulse > 0) {
+            effective_impulse = transmit_impulse(impulse, c.material);
+            adj_damage += force_transfer_crush(effective_impulse, kb_terrain_pm(tphys.friction), tphys.grip);
+        }
+
+        // RFC-009 §4.4's five-step formula: M_outer (the combo scale, Shatter ignoring DR), DR
+        // stacking, flat toughness, chip floor. `dr`/`toughness` are real per-creature fields
+        // (`combat_math.hpp`'s `DefenderMitigation`); DR sources (gear/stance/cover) don't exist yet
+        // so `dr` is always `{0,0}` this pass — the mechanism is real, the content is not.
+        const auto dealt = resolve_damage(
+            static_cast<std::int16_t>(std::clamp<std::int32_t>(adj_damage, 0, 32000)), combo,
+            DefenderMitigation{{c.dr[0], c.dr[1]}, c.toughness});
+        c.hp = static_cast<std::int16_t>(c.hp - dealt);
+        provoke(c, player, /*by_attack*/ true);
+
+        if (c.hp > 0 && effective_impulse > 0) {
+            const float kb = knockback_tiles(effective_impulse, mass_of(c.tier), tphys.friction);
+            if (kb >= kFlinchTiles) {
+                // §5: "new knockback replaces remaining" — this simply overwrites all three fields.
+                c.kb_dx = impulse_dir_x * kb;
+                c.kb_dy = impulse_dir_y * kb;
+                c.kb_ticks_left = kKbTicks;
+            }
+        }
+
+        if (c.hp > 0) return;
+        credit_kill(c, player, skill);
+    }
+
+    // RFC-003 §5: advance one tick of a Displaced creature's slide. Moves `(kb_dx,kb_dy)/kb_ticks_left`
+    // along the remaining vector and re-checks walkability. A blocked next tile converts the
+    // undelivered momentum into Crush harm (WallSlam) against the creature and, if the obstacle is a
+    // destructible CombatEntity, against it too; against plain impassable terrain it instead runs the
+    // §7 stress test, which may scar the tile.
+    //
+    // Called from a `continue`d branch of `step_creatures`'s loop, so a slide does not (this tick)
+    // reach the normal end-of-loop cross-chunk hand-off — a creature displaced within
+    // `kKnockbackCap` tiles of an owning chunk's edge briefly holds a position outside its owner
+    // until its NEXT ordinary movement tick catches the hand-off. §5's own text sanctions exactly
+    // this class of soft cross-chunk debt ("a lost message drops the remainder — acceptable soft
+    // state") for the slide-across-a-seam case; this is the same tolerance, one tick later.
+    void step_knockback(Creature& c) noexcept {
+        const float step_x = c.kb_dx / static_cast<float>(c.kb_ticks_left);
+        const float step_y = c.kb_dy / static_cast<float>(c.kb_ticks_left);
+        const float nx = c.x + step_x;
+        const float ny = c.y + step_y;
+        if (passable(nx, ny)) {
+            c.x = nx;
+            c.y = ny;
+            c.kb_dx -= step_x;
+            c.kb_dy -= step_y;
+            --c.kb_ticks_left;
+            if (c.kb_ticks_left == 0) {
+                c.kb_dx = 0.0f;
+                c.kb_dy = 0.0f;
+            }
+            return;
+        }
+
+        const float remaining = std::sqrt(c.kb_dx * c.kb_dx + c.kb_dy * c.kb_dy);
+        const std::int16_t slam = wallslam_crush(remaining, mass_of(c.tier));
+        c.hp = static_cast<std::int16_t>(c.hp - slam);
+        if (c.hp > 0) {
+            if (CombatEntity* e = blocking_entity(c.x, c.y, step_x, step_y)) {
+                strike_entity(*e, slam, Element::kNone, /*heavy*/ true);
+            } else if (in_map(nx, ny)) {
+                const auto tx = static_cast<int>(nx);
+                const auto ty = static_cast<int>(ny);
+                if (owns(static_cast<std::uint16_t>(tx), static_cast<std::uint16_t>(ty)) &&
+                    stress_converts(static_cast<std::uint16_t>(slam),
+                                    terrain_phys(terrain_at(tx, ty)).stability)) {
+                    stamp_scar(tx, ty, ScarKind::kCracked);
+                }
+            }
+        }
+        // A slam that finishes the creature carries no killer attribution (physics.hpp header note);
+        // `reap_dead()` collects it next cycle same as any other zero-hp creature.
+        c.kb_dx = 0.0f;
+        c.kb_dy = 0.0f;
+        c.kb_ticks_left = 0;
     }
 
     // Anger, and the memory of it. Getting hit always provokes; being crowded provokes only a
@@ -1392,7 +1946,13 @@ private:
         // job of the signature mechanic's feedback, and it is worth exactly one shared sprite.
         if (combo != Combo::kNone) add_effect(c.x, c.y, EffectKind::kBlast);
         switch (combo) {
-            case Combo::kCrush: c.stun_ticks = 20; break;
+            // RFC-002 §7: Crush no longer applies a flat stun — it applies Stagger BUILD-UP, which
+            // is what makes it fair across scale (RFC-009 §4.6). `c` is still alive here (combo
+            // detection runs before the strike that may kill it).
+            case Combo::kCrush:
+                status_gain(c.status, c.gauges, BuildupPacket{Channel::kStagger, 800, 0, player},
+                           mult_pm_of(c.material, c.tier, Channel::kStagger), tick_);
+                break;
             // Arcing off a shocked target feeds mana back to whoever struck it, which is what makes
             // Shock the school that sustains a mixed build rather than one that only spends.
             case Combo::kArc: grant_vitals(player, GrantVitals{0, 10, 0}); break;
@@ -1403,16 +1963,23 @@ private:
         }
     }
 
-    // Conduct: the shock jumps to every WET creature near the one it landed on. Being wet is the
-    // conductor, so a rainstorm (P7) will turn this from a combo into a strategy.
-    void chain_shock(const Creature& from, std::int16_t damage, std::uint64_t player) noexcept {
+    // Conduct (RFC-002 §7): the struck target's own hit already ran the full detonate/strike/gain
+    // sequence above — this is the CHAIN, a one-shot Shock gain to every OTHER Wet creature nearby,
+    // whose Wet is then consumed. Not a second direct-damage strike (the old P2 hand-wire's shape);
+    // being wet is the conductor, so a rainstorm (P7) turns this from a combo into a strategy.
+    void chain_shock(const Creature& from, std::uint64_t player) noexcept {
         constexpr float kChainRadius = 4.0f;
+        constexpr auto kWetBit = static_cast<std::uint8_t>(1u << static_cast<std::uint8_t>(Coating::kWet));
         for (Creature& c : creatures_) {
-            if (c.id == from.id || c.hp <= 0 || c.status != Status::kWet) continue;
+            if (c.id == from.id || c.hp <= 0 || (c.status.coatings & kWetBit) == 0) continue;
             const float dx = c.x - from.x;
             const float dy = c.y - from.y;
             if (dx * dx + dy * dy > kChainRadius * kChainRadius) continue;
-            strike(c, damage, Combo::kConduct, player, Skill::kMagic);
+            status_gain(c.status, c.gauges, BuildupPacket{Channel::kShock, kThreshold1, 0, player},
+                       mult_pm_of(c.material, c.tier, Channel::kShock), tick_);
+            c.dot_owner = player;
+            c.status.coatings = static_cast<std::uint8_t>(c.status.coatings & ~kWetBit);
+            c.status.coating_ticks[static_cast<std::uint8_t>(Coating::kWet)] = 0;
         }
     }
 
@@ -1467,7 +2034,7 @@ private:
         if (!in_map(fx, fy)) return false;
         const int tx = static_cast<int>(fx);
         const int ty = static_cast<int>(fy);
-        return is_walkable(terrain_at(tx, ty)) && !building_blocks(tx, ty);
+        return is_walkable(terrain_at(tx, ty)) && !building_blocks(tx, ty) && !entity_blocks(tx, ty);
     }
 
     // Hit whichever solid building sits on the tile the creature wanted to move onto. Checks the
@@ -1491,6 +2058,25 @@ private:
         }
     }
 
+    // RFC-004 §7: whichever Active, collision-bearing entity sits on the tile a creature's move was
+    // refused onto. Same probe order as `attack_blocking_building`. Returns a pointer (not a strike)
+    // because the caller decides whether the creature is even willing to attack it (hostility, the
+    // blocked-repath counter) — unlike a building, which every monster contests on first contact.
+    [[nodiscard]] CombatEntity* blocking_entity(float cx, float cy, float step_x, float step_y) noexcept {
+        const float probes[3][2] = {{cx + step_x, cy + step_y}, {cx + step_x, cy}, {cx, cy + step_y}};
+        for (const auto& pr : probes) {
+            if (!in_map(pr[0], pr[1])) continue;
+            const auto tx = static_cast<int>(pr[0]);
+            const auto ty = static_cast<int>(pr[1]);
+            for (CombatEntity& e : entities_) {
+                if (e.state != EntityState::kActive) continue;
+                if (entity_def(e.kind).collision == Collision::kNone) continue;
+                if (static_cast<int>(e.x) == tx && static_cast<int>(e.y) == ty) return &e;
+            }
+        }
+        return nullptr;
+    }
+
     // Is a solid building standing on this tile? Only this chunk's buildings are visible, so a wall
     // sitting exactly on a chunk border does not block creatures arriving from the far side. Bases
     // are built well inside a chunk in practice; the general fix is a neighbour-summary message,
@@ -1500,6 +2086,13 @@ private:
             if (b.tx == tx && b.ty == ty) return blocks_movement(b.kind);
         }
         return false;
+    }
+
+    // Same same-chunk-only visibility as `building_blocks` — the seam gap documented there (P3's
+    // neighbour-summary message is the general fix) applies here too.
+    [[nodiscard]] bool entity_blocks(int tx, int ty) const noexcept {
+        if (tx / kChunkTiles != coord.cx || ty / kChunkTiles != coord.cy) return false;
+        return block_bits_.test(static_cast<std::size_t>(local_tile_index(tx, ty)));
     }
 
     [[nodiscard]] bool occupied(std::uint16_t tx, std::uint16_t ty) const noexcept {
@@ -1530,7 +2123,8 @@ private:
         v->creatures = creatures_;
         v->shots = shots_;
         v->effects = effects_;
-        v->zones = zones_;
+        v->entities = entities_;
+        v->scars = scars_;
         v->crops = crops_;
         v->buildings = buildings_;
         bus->publish(coord, std::move(v));
@@ -1540,7 +2134,12 @@ private:
     std::vector<Creature> creatures_;
     std::vector<Projectile> shots_;
     std::vector<Effect> effects_;
-    std::vector<Zone> zones_;
+    std::vector<CombatEntity> entities_;
+    std::vector<Scar> scars_;
+    // Derived from `entities_`, rebuilt on any entity state change (rebuild_occupancy_bits) — never
+    // published, never stored beyond this chunk's own tick (RFC-004 §4's "derived, not stored").
+    std::bitset<kChunkTiles * kChunkTiles> block_bits_;
+    std::bitset<kChunkTiles * kChunkTiles> vision_bits_;
     std::vector<Crop> crops_;
     std::vector<Building> buildings_;
     std::vector<PlayerBeacon> players_;  // soft state: who is near enough to matter

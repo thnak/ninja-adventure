@@ -72,11 +72,25 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         world_ms_ = t.world_ms;
         if (account_ == 0) return;  // unbound slot: inert, and not published
 
-        // Ability cooldowns. This is the first per-slot timer the sim has ever held — the basic
-        // verbs are rationed by stamina alone, but an ability's whole shape is that it is powerful
-        // AND scarce, and scarcity is a cooldown. Ticked while dead too, so it is not a free reset.
-        for (std::uint16_t& cd : ability_cd_) {
-            if (cd > 0) --cd;
+        // RFC-001 Section 2 (T2/T3/T4): while a head is mid-Cast/Channel, its clock is the caster's
+        // own tick — this is what makes head phases progress "on the caster's ticks" per Section 4's
+        // LOD rule (a player's actor always ticks, so a Cast never stalls). No shipped ability
+        // reaches this branch (every `cast_ticks == 0` collapses inside the `Ask<UseAbility>` call
+        // that starts it), but it is the same `advance_head()` that call uses, exercised here for
+        // whatever future content actually holds a Cast open across a tick boundary.
+        if (head_.phase == AbilityPhase::kCast || head_.phase == AbilityPhase::kChannel) {
+            const AbilityDef def = ability_def(static_cast<AbilityId>(head_.ability));
+            advance_head(head_, def.cast_ticks, /*has_channel=*/false, /*channel_max_ticks=*/0);
+            if (head_.phase == AbilityPhase::kRelease) {
+                // T5/T6: cooldown starts, head clears. Dispatching the resolved payload to chunks
+                // has no consumer yet when Release is reached HERE rather than inside the admission
+                // call — `World` only drains a payload from the `AbilityPlan` it gets back from that
+                // one ask (see `world.hpp::use_ability`'s `phase == kIdle` gate). Wiring a second,
+                // asynchronous hand-off is deliberately left for whichever RFC ships the first
+                // ability with `cast_ticks > 0`, since nothing today can exercise it end-to-end.
+                ready_at_tick_[head_.ability] = tick_ + def.cooldown;
+                head_ = AbilityHead{};
+            }
         }
 
         if (dead_ticks_ > 0) {
@@ -132,6 +146,14 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         // at any angle stops dead rather than sliding along it, and with a village made of
         // rectangles that is most of the time.
         if (account_ == 0 || dead_ticks_ > 0) return;
+        // RFC-001 Section 5 (T12, voluntary cancel): moving during a Cast cancels it when the
+        // ability says so (`move_cancels`, true for every shipped ability today). Unreached in
+        // practice while every ability collapses Cast->Release inside its own admission call, but a
+        // real cast-time ability would be rooted right up until this fires.
+        if (head_.phase == AbilityPhase::kCast && (m.dx != 0.0f || m.dy != 0.0f)) {
+            const AbilityDef def = ability_def(static_cast<AbilityId>(head_.ability));
+            if (def.move_cancels) interrupt_head();
+        }
         const float nx = std::clamp(x_ + m.dx, 0.0f, static_cast<float>(kMapTiles) - 1.0f);
         const float ny = std::clamp(y_ + m.dy, 0.0f, static_cast<float>(kMapTiles) - 1.0f);
         if (passable(nx, y_)) x_ = nx;
@@ -168,9 +190,24 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         hp_ = static_cast<std::int16_t>(std::max(0, hp_ - h.amount));
         last_hurt_ms_ = world_ms_;
         if (hp_ == 0) {
+            // RFC-001 Section 5 item 1 — death is the highest-priority interrupt and the simplest:
+            // no refund bookkeeping, no stagger. The caster is gone and respawns with a clean slate
+            // regardless (see `respawn()`), so there is nothing for `apply_interrupt` to compute.
+            head_ = AbilityHead{};
             dead_ticks_ = kRespawnTicks;
             ++deaths_;
             mounted_ = false;
+        } else if (head_.phase == AbilityPhase::kCast &&
+                   static_cast<float>(h.amount) >= kCastPoiseFrac * static_cast<float>(kPlayerMaxHp)) {
+            // Section 5 item 3 — poise-break: a single hit hard enough breaks a Cast outright.
+            interrupt_head();
+        } else if (head_.phase == AbilityPhase::kChannel &&
+                   static_cast<float>(h.amount) >=
+                       kChannelPoiseFrac * static_cast<float>(kPlayerMaxHp)) {
+            // Channel is squishier by design — it is the player-facing answer to "the boss is
+            // charging something big: hit it hard now." Unreached today (no shipped ability
+            // channels) but real: proven by ability_pipeline.hpp's own interrupt tests.
+            interrupt_head();
         }
         publish();
     }
@@ -233,6 +270,14 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         p.facing = facing_;
         if (account_ == 0 || dead_ticks_ > 0 || mounted_) {
             m.respond(p);  // ok stays false — you cannot fight from the saddle
+            return;
+        }
+        // RFC-001 Invariant I1 — "the basic attack is also gated by I1: you cannot swing mid-cast."
+        // Unreached today (every ability collapses Cast->Release before any other message can see
+        // `head_` mid-flight) but real: a future cast-time ability roots the caster right up until
+        // Release, exactly like a Channel roots it (Section 5's "no" column).
+        if (head_.phase != AbilityPhase::kIdle) {
+            m.respond(p);  // ok stays false
             return;
         }
         switch (m.query.kind) {
@@ -303,46 +348,75 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
             return;
         }
         const AbilityDef def = ability_def(id);
-        if (level_[static_cast<int>(def.school)] < def.unlock_level) {
-            p.reason = AbilityReject::kLocked;
+        // RFC-001 Section 5 item 4 — pressing the SAME slot again while its own ability is mid-Cast
+        // is a voluntary cancel, not a busy rejection (a different slot while busy still gets
+        // kBusy, below, per Invariant I1). Unreached by shipped content (cast_ticks == 0 always
+        // resolves before a second ask can arrive) but the right behavior once one channels or
+        // winds up.
+        if (head_.phase != AbilityPhase::kIdle && static_cast<AbilityId>(head_.ability) == id) {
+            interrupt_head();
+            p.reason = AbilityReject::kBusy;
             m.respond(p);
             return;
         }
-        if (ability_cd_[static_cast<int>(id)] > 0) {
-            p.reason = AbilityReject::kCooldown;
+        const bool locked = level_[static_cast<int>(def.school)] < def.unlock_level;
+        const bool on_cooldown = ready_at_tick_[static_cast<int>(id)] > tick_;
+        const bool lacks_resource = (def.cost_kind == AbilityCost::kStamina) ? stamina_ < def.cost
+                                                                             : mana_ < def.cost;
+        const bool staggered = tick_ < staggered_until_tick_;
+        // kEntity is the only targeting model that can fail admission in v1 (RFC-001 Section 3),
+        // and no shipped ability uses it (Open Question Q2) — always valid for now.
+        const AbilityReject reason =
+            reject_of(/*unavailable=*/false, locked, on_cooldown, lacks_resource, head_.phase,
+                     staggered, /*bad_target=*/false);
+        if (reason != AbilityReject::kOk) {
+            p.reason = reason;
             m.respond(p);
             return;
         }
         if (def.cost_kind == AbilityCost::kStamina) {
-            if (stamina_ < def.cost) {
-                p.reason = AbilityReject::kResource;
-                m.respond(p);
-                return;
-            }
             stamina_ = static_cast<std::int16_t>(stamina_ - def.cost);
         } else {
-            if (mana_ < def.cost) {
-                p.reason = AbilityReject::kResource;
-                m.respond(p);
-                return;
-            }
             mana_ = static_cast<std::int16_t>(mana_ - def.cost);
         }
-        ability_cd_[static_cast<int>(id)] = def.cooldown;
-        p.ok = true;
-        p.reason = AbilityReject::kOk;
-        // The damage the chunk will apply, scaled here so the untrusted side never computes how hard
-        // the player hits — exactly as PlanAttack does. Zones carry no direct damage.
-        if (def.kind == AbilityKind::kStrike) {
-            const std::int16_t base =
-                (def.school == Skill::kMelee) ? kBaseMeleeDamage : kBaseSpellDamage;
-            p.damage = static_cast<std::int16_t>(static_cast<float>(scaled(base, def.school)) *
-                                                 def.damage_scale);
-        } else if (def.kind == AbilityKind::kVolley) {
-            p.damage = scaled(kBaseRangedDamage, Skill::kRanged);
+        // T1 — seat the head. Aim/direction resolve per Section 7's targeting models; kSelf always
+        // aims at the caster (every striking/zone ability today), kDirection freezes the cursor
+        // vector world.hpp's own dispatch already computes from `aim_x/aim_y` — this copy is the
+        // state machine's own bookkeeping (I3 "aim freezes"), not a second source of truth for the
+        // dispatch math below, which is untouched from before this RFC.
+        const float dir_x = (facing_ == Facing::kLeft) ? -1.0f : (facing_ == Facing::kRight ? 1.0f : 0.0f);
+        const float dir_y = (facing_ == Facing::kUp) ? -1.0f : (facing_ == Facing::kDown ? 1.0f : 0.0f);
+        try_start_cast(head_, static_cast<std::uint16_t>(id), x_, y_, dir_x, dir_y);
+        advance_head(head_, def.cast_ticks, /*has_channel=*/false, /*channel_max_ticks=*/0);
+        if (head_.phase == AbilityPhase::kRelease) {
+            // T5/T6 — same-call collapse: every shipped ability (`cast_ticks == 0`) reaches this
+            // branch immediately, so behavior here is byte-identical to the pre-RFC-001 code.
+            ready_at_tick_[static_cast<int>(id)] = tick_ + def.cooldown;
+            head_ = AbilityHead{};
+            p.ok = true;
+            p.phase = AbilityPhase::kIdle;
+            p.reason = AbilityReject::kOk;
+            // The damage the chunk will apply, scaled here so the untrusted side never computes how
+            // hard the player hits — exactly as PlanAttack does. Zones carry no direct damage.
+            if (def.kind == AbilityKind::kStrike) {
+                const std::int16_t base =
+                    (def.school == Skill::kMelee) ? kBaseMeleeDamage : kBaseSpellDamage;
+                p.damage = static_cast<std::int16_t>(static_cast<float>(scaled(base, def.school)) *
+                                                     def.damage_scale);
+            } else if (def.kind == AbilityKind::kVolley) {
+                p.damage = scaled(kBaseRangedDamage, Skill::kRanged);
+            }
+            // Nova imprints the caster's currently-selected element; every other ability ignores it.
+            p.element = def.applies_element ? m.query.element : Element::kNone;
+        } else {
+            // Still winding up (unreached by shipped content). The activation was ACCEPTED — cost
+            // is debited, the head is seated — but nothing has resolved yet (I3: aim freezes only
+            // at Release), so `damage`/`element` stay at their zero defaults and `world.hpp` must
+            // not dispatch a chunk message for this response (see AbilityPlan's `phase` comment).
+            p.ok = true;
+            p.phase = head_.phase;
+            p.reason = AbilityReject::kOk;
         }
-        // Nova imprints the caster's currently-selected element; every other ability ignores it.
-        p.element = def.applies_element ? m.query.element : Element::kNone;
         publish();
         m.respond(p);
     }
@@ -382,7 +456,13 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         for (int s = 0; s < kAbilitySlots; ++s) {
             const AbilityId id = equipped_ability(level_, s);
             v.ability[s] = id;
-            v.ability_cd[s] = (id == AbilityId::kCount) ? 0 : ability_cd_[static_cast<int>(id)];
+            const std::uint64_t ready_at = (id == AbilityId::kCount)
+                                               ? 0
+                                               : ready_at_tick_[static_cast<int>(id)];
+            // Same "ticks remaining" wire shape as before RFC-001 — only the internal storage
+            // changed, from a decrementing counter to an absolute tick (Section 8's I4 discipline).
+            v.ability_cd[s] =
+                (ready_at > tick_) ? static_cast<std::uint16_t>(ready_at - tick_) : 0;
         }
         return v;
     }
@@ -432,6 +512,32 @@ private:
                                          skill_scale(level_[static_cast<int>(s)]));
     }
 
+    // RFC-001 Section 5 (T12): tear down whatever `head_` is holding — poise-break or a voluntary
+    // cancel, never death (that path is simpler and handled inline in `handle(HurtPlayer)`). Refund
+    // and cooldown follow `apply_interrupt`'s Cast-vs-Channel split; the `kStaggerTicks` recovery is
+    // uniform across every T12 exit this function is called for.
+    void interrupt_head() noexcept {
+        const InterruptResult r = apply_interrupt(head_.phase);
+        const auto id = static_cast<AbilityId>(head_.ability);
+        const AbilityDef def = ability_def(id);
+        if (r.refund_base) {
+            if (def.cost_kind == AbilityCost::kStamina) {
+                stamina_ = std::clamp<std::int16_t>(static_cast<std::int16_t>(stamina_ + def.cost), 0,
+                                                    kPlayerMaxStamina);
+            } else {
+                mana_ = std::clamp<std::int16_t>(static_cast<std::int16_t>(mana_ + def.cost), 0,
+                                                 kPlayerMaxMana);
+            }
+        }
+        // r.refund_channel_drain has nothing to refund yet — no shipped ability has a channel block,
+        // so nothing is ever drained per-tick to give back.
+        if (r.charge_half_cooldown) {
+            ready_at_tick_[static_cast<int>(id)] = tick_ + (def.cooldown + 1) / 2;  // ceil(cooldown/2)
+        }
+        staggered_until_tick_ = tick_ + r.stagger_ticks;
+        head_ = AbilityHead{};
+    }
+
     // Death is cheap on purpose. You wake at your hearth with nothing taken from you — no gear
     // dropped, no XP lost, no corpse run. This game's default is chill (GAME.md §0), and a death
     // penalty is the most reliable way to turn exploring into hoarding: players who fear losing a
@@ -478,10 +584,22 @@ private:
     std::int32_t items_[kItemKinds] = {};
     std::uint8_t level_[kSkillCount] = {};
     std::uint32_t xp_[kSkillCount] = {};
-    // Per-ability cooldown, in ticks, keyed by AbilityId. Keyed by the ABILITY rather than the slot
-    // so the timer belongs to the move and survives a future loadout-picker unchanged; with the
-    // fixed F1a loadout each slot maps to a distinct ability, so this reads identically to per-slot.
-    std::uint16_t ability_cd_[kAbilityCount] = {};
+    // Per-ability cooldown, keyed by AbilityId (not by slot, so the timer belongs to the move and
+    // survives a future loadout-picker unchanged — with the fixed F1a loadout each slot maps to a
+    // distinct ability, so this reads identically to per-slot). RFC-001 Section 8 stores cooldowns
+    // as an ABSOLUTE tick rather than a decrementing counter — the same I4 discipline
+    // `chunk_actor.hpp`'s beacon lease already uses — so `view()` below still reports "ticks
+    // remaining" (its wire shape is unchanged) but the stored value survives being read at any tick,
+    // not just ticked down one at a time.
+    std::uint64_t ready_at_tick_[kAbilityCount] = {};
+    // RFC-001's head instance (Section 9): at most one in flight at a time (Invariant I1). Every
+    // shipped ability has `cast_ticks == 0`, so in practice this is always kIdle again by the time
+    // any other handler observes it — Cast collapses straight to Release inside the very
+    // `Ask<UseAbility>` call that started it (see the handler below). It is real, ticked, and
+    // interruptible infrastructure regardless: RFC-005/008 need a caster that actually holds a Cast
+    // open across ticks once authored content gives it more than zero of them.
+    AbilityHead head_{};
+    std::uint64_t staggered_until_tick_ = 0;  // RFC-001 Section 5 — post-T12 recovery window
 };
 
 // Build costs, consulted before a PlaceBuilding is issued.

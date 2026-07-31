@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "world/abilities.hpp"
+#include "world/combat_entity.hpp"
 #include "world/tiles.hpp"
 
 namespace mmo {
@@ -107,7 +108,8 @@ struct ChunkView {
     std::vector<Creature> creatures;
     std::vector<Projectile> shots;
     std::vector<Effect> effects;
-    std::vector<Zone> zones;
+    std::vector<CombatEntity> entities;
+    std::vector<Scar> scars;
     std::vector<Crop> crops;
     std::vector<Building> buildings;
 };

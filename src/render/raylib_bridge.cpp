@@ -324,15 +324,24 @@ inline constexpr int kTreeStride = 3;
 // statuses is forty-five sprites this pack does not have; a colour wash reads instantly, costs
 // nothing, and — the part that matters — is the same colour as the spell that put it there, so the
 // player learns the mapping without being told it.
-[[nodiscard]] Color tint_of(Status s) {
-    switch (s) {
-        case Status::kFrozen: return Color{140, 210, 255, 255};
-        case Status::kBurning: return Color{255, 150, 90, 255};
-        case Status::kWet: return Color{150, 190, 255, 255};
-        case Status::kMuddy: return Color{180, 150, 110, 255};
-        case Status::kShocked: return Color{255, 245, 130, 255};
-        case Status::kNone:
-        case Status::kCount: break;
+// RFC-002: a creature carries a ladder primary (at most one) PLUS a Wet coating, rather than P2's
+// single mutually-exclusive `Status` — so the primary's tint takes precedence and Wet (a coexisting
+// coating) is the fallback, reproducing the same five colours under the new names. Earth only tints
+// from Mired (stage 2) on, matching P2's Muddy, which had no stage-1 equivalent.
+[[nodiscard]] Color tint_of(const StatusState& s) {
+    switch (s.primary) {
+        case Channel::kCold: return Color{140, 210, 255, 255};    // Slow/HeavySlow/Freeze
+        case Channel::kHeat: return Color{255, 150, 90, 255};     // Singed/Burning/Combust
+        case Channel::kShock: return Color{255, 245, 130, 255};   // Static/Shocked/Paralyze
+        case Channel::kEarth:
+            if (s.stage >= 2) return Color{180, 150, 110, 255};   // Mired/Root
+            break;
+        case Channel::kStagger:
+        case Channel::kNone:
+        case Channel::kCount: break;
+    }
+    if ((s.coatings & (1u << static_cast<std::uint8_t>(Coating::kWet))) != 0) {
+        return Color{150, 190, 255, 255};
     }
     return WHITE;
 }
@@ -1560,12 +1569,15 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                         Color{200, 220, 255, 110});
     }
 
-    // --- Ability zones, over the fighters ---------------------------------------------------------
-    // Rain over a wet zone, drifting smoke over a smoke zone. Like the weather ambience, every
-    // particle's position is a closed-form function of (its index, the zone centre, the WORLD clock)
-    // — no stored state, no per-frame RNG — so two machines watching the same zone see the same
-    // haze and a screenshot at a given world time is reproducible. The per-particle Rng is seeded
-    // from the index and the zone's tile, which is fixed, not from the frame.
+    // --- Ability entities, over the fighters (RFC-004) ----------------------------------------------
+    // Rain over a water pool, drifting smoke over a smoke cloud — the same two particle looks the
+    // old Zone system drew, now keyed off CombatEntity instead. Every particle's position is a
+    // closed-form function of (its index, the entity centre, the WORLD clock) — no stored state, no
+    // per-frame RNG — so two machines watching the same entity see the same haze and a screenshot at
+    // a given world time is reproducible. The per-particle Rng is seeded from the index and the
+    // entity's tile, which is fixed, not from the frame. Only these two archetypes render here; the
+    // other five (walls, spikes, totems, falling rocks) have no shipped producer yet and are RFC-006's
+    // FX authoring to add.
     {
         const double zt =
             static_cast<double>(status.world_ms.load(std::memory_order_relaxed)) / 1000.0;
@@ -1574,20 +1586,24 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                 ChunkViewPtr v = bus.load(ChunkCoord{player.map, static_cast<std::uint16_t>(cx),
                                                      static_cast<std::uint16_t>(cy)});
                 if (!v) continue;
-                for (const Zone& z : v->zones) {
-                    const float cxp = z.x * kTilePx;
-                    const float cyp = z.y * kTilePx;
-                    const float rpx = z.radius * kTilePx;
+                for (const CombatEntity& e : v->entities) {
+                    if (e.state != EntityState::kActive) continue;
+                    if (e.kind != EntityKind::kWaterPool && e.kind != EntityKind::kSmokeCloud) continue;
+                    const float cxp = e.x * kTilePx;
+                    const float cyp = e.y * kTilePx;
+                    const float rpx = e.radius * kTilePx;
                     const std::uint64_t base =
-                        (static_cast<std::uint64_t>(static_cast<int>(z.x)) << 20) ^
-                        static_cast<std::uint64_t>(static_cast<int>(z.y)) ^
-                        (z.kind == ZoneKind::kWet ? 0x5A17ull : 0x5A2Bull);
-                    // Fade the whole zone out over its last second so it does not pop off.
-                    const float life = z.ticks_left < 10 ? static_cast<float>(z.ticks_left) / 10.0f
-                                                         : 1.0f;
-                    if (z.kind == ZoneKind::kWet) {
+                        (static_cast<std::uint64_t>(static_cast<int>(e.x)) << 20) ^
+                        static_cast<std::uint64_t>(static_cast<int>(e.y)) ^
+                        (e.kind == EntityKind::kWaterPool ? 0x5A17ull : 0x5A2Bull);
+                    // Fade out over the last second so it does not pop off. Expiry is an absolute
+                    // tick, so remaining life is computed against this same view's published tick.
+                    const std::uint64_t remaining =
+                        e.expire_tick > v->tick ? e.expire_tick - v->tick : 0;
+                    const float life = remaining < 10 ? static_cast<float>(remaining) / 10.0f : 1.0f;
+                    if (e.kind == EntityKind::kWaterPool) {
                         // A scatter of drops falling through the circle; density tracks area.
-                        const int drops = std::clamp(static_cast<int>(z.radius * z.radius * 2.5f), 8, 44);
+                        const int drops = std::clamp(static_cast<int>(e.radius * e.radius * 2.5f), 8, 44);
                         for (int i = 0; i < drops; ++i) {
                             Rng r(static_cast<std::uint64_t>(i) * 0x9E37'79B9ull ^ base);
                             const float ang = r.unit() * 6.2831853f;
@@ -1602,7 +1618,7 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                         }
                     } else {
                         // A few overlapping puffs, drifting slowly and cycling their frames.
-                        const int puffs = std::clamp(static_cast<int>(z.radius * z.radius * 1.1f), 5, 16);
+                        const int puffs = std::clamp(static_cast<int>(e.radius * e.radius * 1.1f), 5, 16);
                         for (int i = 0; i < puffs; ++i) {
                             Rng r(static_cast<std::uint64_t>(i) * 0x85EB'CA6Bull ^ base);
                             const float ang = r.unit() * 6.2831853f;

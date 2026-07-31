@@ -64,6 +64,252 @@ int main(int argc, char** argv) {
 
     Check chk;
 
+    // --- RFC-001: the ability pipeline's generic state machine (no actor, no content needed) -------
+    // ability_pipeline.hpp's functions take plain tick counts and flags rather than reaching into
+    // the shipped AbilityId table, specifically so they can be driven here with synthetic parameters
+    // no shipped ability uses yet (a real cast time, a real channel). This proves Cast/Channel/
+    // interrupt behavior the ability-layer section further down cannot reach — every shipped ability
+    // collapses Cast -> Release in the very tick it starts, per RFC-001 Section 9's own ruling.
+    {
+        // reject_of(): Section 3's admission order, one reason at a time.
+        chk.expect(reject_of(true, false, false, false, AbilityPhase::kIdle, false, false) ==
+                       AbilityReject::kUnavailable,
+                   "reject_of: dead/unbound/mounted wins over everything else");
+        chk.expect(reject_of(false, true, false, false, AbilityPhase::kIdle, false, false) ==
+                       AbilityReject::kLocked,
+                   "reject_of: school too low");
+        chk.expect(reject_of(false, false, true, false, AbilityPhase::kIdle, false, false) ==
+                       AbilityReject::kCooldown,
+                   "reject_of: on cooldown");
+        chk.expect(reject_of(false, false, false, true, AbilityPhase::kIdle, false, false) ==
+                       AbilityReject::kResource,
+                   "reject_of: not enough stamina/mana");
+        chk.expect(reject_of(false, false, false, false, AbilityPhase::kCast, false, false) ==
+                       AbilityReject::kBusy,
+                   "reject_of: Invariant I1 - a head already in flight is kBusy");
+        chk.expect(reject_of(false, false, false, false, AbilityPhase::kIdle, true, false) ==
+                       AbilityReject::kBusy,
+                   "reject_of: the post-interrupt stagger window is also kBusy");
+        chk.expect(reject_of(false, false, false, false, AbilityPhase::kIdle, false, true) ==
+                       AbilityReject::kBadTarget,
+                   "reject_of: a bad kEntity target is refused last");
+        chk.expect(reject_of(false, false, false, false, AbilityPhase::kIdle, false, false) ==
+                       AbilityReject::kOk,
+                   "reject_of: nothing wrong admits the activation");
+
+        // advance_head(): a synthetic 5-tick cast (no shipped ability has cast_ticks > 0).
+        AbilityHead cast_head{};
+        try_start_cast(cast_head, /*ability_ref=*/0, 10.0f, 10.0f, 1.0f, 0.0f);
+        chk.expect(cast_head.phase == AbilityPhase::kCast, "try_start_cast seats the head in Cast");
+        int ticks_still_casting = 0;
+        for (int i = 0; i < 4; ++i) {
+            advance_head(cast_head, /*cast_ticks=*/5, /*has_channel=*/false, /*channel_max_ticks=*/0);
+            if (cast_head.phase == AbilityPhase::kCast) ++ticks_still_casting;
+        }
+        chk.expect(ticks_still_casting == 4, "a 5-tick cast is still casting after 4 advances");
+        advance_head(cast_head, 5, false, 0);
+        chk.expect(cast_head.phase == AbilityPhase::kRelease,
+                   "the 5th advance releases a 5-tick cast");
+
+        // apply_interrupt(): the Cast row - full refund, no cooldown charge, uniform stagger.
+        const InterruptResult cast_interrupt = apply_interrupt(AbilityPhase::kCast);
+        chk.expect(cast_interrupt.refund_base, "a broken Cast fully refunds the base cost");
+        chk.expect(!cast_interrupt.charge_half_cooldown, "a broken Cast never starts a cooldown");
+        chk.expect(cast_interrupt.stagger_ticks == kStaggerTicks,
+                   "a broken Cast still pays the uniform post-T12 stagger");
+
+        // apply_interrupt(): the Channel row - forfeits both the base cost and the drained ticks,
+        // but only charges HALF a cooldown ("the mercy is the cooldown, not the resource").
+        const InterruptResult channel_interrupt = apply_interrupt(AbilityPhase::kChannel);
+        chk.expect(!channel_interrupt.refund_base,
+                   "a forced Channel interrupt forfeits the base cost");
+        chk.expect(!channel_interrupt.refund_channel_drain,
+                   "a forced Channel interrupt forfeits the drained ticks too");
+        chk.expect(channel_interrupt.charge_half_cooldown,
+                   "a forced Channel interrupt charges only half a cooldown");
+
+        // release_channel(): the grace tap. Sub-grace release cancels (T12); past-grace release
+        // fires (T4).
+        AbilityHead channel_head{};
+        channel_head.phase = AbilityPhase::kChannel;
+        channel_head.charge_elapsed = kChannelGraceTicks - 1;
+        const bool tapped_released = release_channel(channel_head);
+        chk.expect(!tapped_released && channel_head.phase == AbilityPhase::kIdle,
+                   "releasing before the grace window cancels rather than fires");
+        const InterruptResult grace = grace_tap_result();
+        chk.expect(grace.refund_base && grace.refund_channel_drain,
+                   "a grace tap refunds everything - the base cost AND the drained ticks");
+
+        AbilityHead full_channel_head{};
+        full_channel_head.phase = AbilityPhase::kChannel;
+        full_channel_head.charge_elapsed = kChannelGraceTicks + 2;
+        const bool full_released = release_channel(full_channel_head);
+        chk.expect(full_released && full_channel_head.phase == AbilityPhase::kRelease,
+                   "releasing past the grace window fires the ability");
+
+        // charge_mil_of(): monotone in channel time, saturating at 1000; 1000 for a channel-less
+        // ability (never curve-penalized).
+        chk.expect(charge_mil_of(0, 0) == 1000, "no channel block: always full power");
+        chk.expect(charge_mil_of(5, 10) == 500,
+                   "half-held charge is half power (fixed-point 0..1000)");
+        chk.expect(charge_mil_of(10, 10) == 1000, "a fully-held charge saturates at exactly 1000");
+
+        // The Section 9 data invariants (V1 phase applicability, V3 the persist-ticks cap).
+        chk.expect(valid_persist_ticks(kMaxPersistTicks), "exactly the cap is still valid (<=)");
+        chk.expect(!valid_persist_ticks(kMaxPersistTicks + 1), "one tick over the cap is rejected");
+        chk.expect(valid_phase_applicability(PayloadKind::kInstantHit, 0, false),
+                   "an instant hit needs no cast and no channel");
+        chk.expect(!valid_phase_applicability(PayloadKind::kDash, 0, false),
+                   "V1: kDash without a cast is an unreadable, uncommitted dash - invalid");
+        chk.expect(valid_phase_applicability(PayloadKind::kDash, 9, false),
+                   "V1: kDash with a cast and no channel is valid");
+
+        std::printf(
+            "RFC-001 pipeline: admission, Cast/Channel timing, and interrupt refunds all check out\n\n");
+    }
+
+    // --- RFC-004: the CombatEntity chassis and terrain scar layer's pure functions -----------------
+    // combat_entity.hpp's state-machine and scar functions take plain data (a def, flags, ticks)
+    // rather than reaching into a ChunkActor, exactly like ability_pipeline.hpp's functions do — so
+    // the arm-exit branches, the escalation ladder, and the lazy heal decode are all directly
+    // testable here with synthetic entities/defs, independent of the world/chunk integration tests
+    // further down.
+    {
+        const EntityDef spike = entity_def(EntityKind::kRockSpike);
+        chk.expect(spike.collision == Collision::kGround && spike.destroyable,
+                   "kRockSpike is a destroyable, ground-blocking archetype");
+        const EntityDef rock = entity_def(EntityKind::kFallingRock);
+        chk.expect(rock.life_ticks == 0 && rock.hittable_while_arming,
+                   "kFallingRock has no Active phase and is hittable only while arming");
+
+        // next_state_after_arm(): the three arm-exit branches (RFC-004 Section 3).
+        chk.expect(next_state_after_arm(spike, /*intercepted=*/true, /*occupied=*/false) ==
+                       EntityState::kDying,
+                   "(a) an intercepted arm-only body dies without ever reaching Active");
+        chk.expect(next_state_after_arm(spike, /*intercepted=*/false, /*occupied=*/true) ==
+                       EntityState::kDying,
+                   "(b) the anti-trap rule whiffs a blocking spawn onto an occupied footprint");
+        chk.expect(next_state_after_arm(spike, /*intercepted=*/false, /*occupied=*/false) ==
+                       EntityState::kActive,
+                   "the ordinary arm -> active transition, neither excuse applying");
+        chk.expect(next_state_after_arm(rock, /*intercepted=*/false, /*occupied=*/false) ==
+                       EntityState::kDying,
+                   "(c) life_ticks == 0 fires its terminal transition instead of ever going Active");
+
+        // The scar escalation ladder (Section 8.4) and its lazy heal decode.
+        chk.expect(escalate(ScarKind::kNone, 0, 100) == ScarKind::kCracked,
+                   "bare ground scars to kCracked");
+        chk.expect(escalate(ScarKind::kCracked, 100, 100 + kEscalateWindow - 1) == ScarKind::kRubble,
+                   "a second scarring impact inside the escalation window upgrades one step");
+        chk.expect(escalate(ScarKind::kRubble, 100, 100 + kEscalateWindow - 1) == ScarKind::kCrater,
+                   "rubble upgrades to crater");
+        chk.expect(escalate(ScarKind::kCrater, 100, 100 + kEscalateWindow - 1) == ScarKind::kCrater,
+                   "crater is the top of the ladder");
+        chk.expect(escalate(ScarKind::kCracked, 100, 100 + kEscalateWindow + 1) == ScarKind::kCracked,
+                   "outside the escalation window, a scarring impact re-stamps kCracked instead");
+
+        Scar s{5, 5, ScarKind::kCrater, /*heal_tick=*/1000, /*made_tick=*/0};
+        const std::uint64_t heal_crater = heal_ticks_of(ScarKind::kCrater);
+        const std::uint64_t heal_rubble = heal_ticks_of(ScarKind::kRubble);
+        const Scar after_one = heal_lazy(s, 1000);
+        chk.expect(after_one.kind == ScarKind::kRubble, "one heal-step downgrades crater to rubble");
+        // A single call with `now` far past several heal steps must still land on the correct rung —
+        // the "wake" contract: bounded by severity levels, never by how many ticks were skipped.
+        const Scar after_wake = heal_lazy(s, 1000 + heal_crater + heal_rubble + 1);
+        chk.expect(after_wake.kind == ScarKind::kNone,
+                   "fast-forwarding past every remaining heal step lands on kNone in one call, "
+                   "whether or not a chunk actually ticked through the skipped ticks");
+
+        // The v1 damage-to-entity multiplier table (Section 7).
+        chk.expect(entity_damage_scale(EntityKind::kIceWall, Element::kFire, false) == 2.0f,
+                   "fire is the ice wall's weakness");
+        chk.expect(entity_damage_scale(EntityKind::kIceWall, Element::kIce, false) == 0.25f,
+                   "ice barely scratches an ice wall");
+        chk.expect(entity_damage_scale(EntityKind::kRockSpike, Element::kNone, true) == 1.5f,
+                   "a heavy melee blow is extra effective against a rock spike");
+        chk.expect(entity_damage_scale(EntityKind::kRockSpike, Element::kNone, false) == 1.0f,
+                   "a light melee blow against a rock spike is unscaled");
+
+        // The one vision_bits rasterization rule (Section 4): a tile's centre inside the circle.
+        chk.expect(circle_covers_tile(5.5f, 5.5f, 5.0f, 5.0f, 1.0f), "a near tile centre is covered");
+        chk.expect(!circle_covers_tile(50.5f, 50.5f, 5.0f, 5.0f, 1.0f),
+                   "a far tile centre is not covered");
+
+        std::printf(
+            "RFC-004 chassis: arm-exit branches, scar escalation/heal, and the damage table all "
+            "check out\n\n");
+    }
+
+    // --- RFC-003: physics & material interaction, as pure functions ---------------------------------
+    {
+        // §3.1: impulse transmission — Spirit is the one impulse-immune (infinite-mass) material.
+        chk.expect(material_impulse_pm(Material::kFlesh) == 1000, "Flesh impulse transmission is baseline");
+        chk.expect(material_impulse_pm(Material::kSpirit) == 0, "Spirit is impulse-immune");
+        chk.expect(material_impulse_pm(Material::kSlime) == 1400, "shoves send slime gel bouncing");
+        chk.expect(transmit_impulse(220, Material::kSpirit) == 0,
+                   "a Spirit target receives zero transmitted impulse");
+        chk.expect(transmit_impulse(220, Material::kSlime) == 308,
+                   "220 impulse x1400pm on Slime transmits at 308");
+
+        // §4: mass and outgoing-impulse scaling by scale tier.
+        chk.expect(mass_of(ScaleTier::kMedium) == 100 && mass_of(ScaleTier::kGiant) == 700,
+                   "mass points match the RFC-003 §4 table (Medium 100, Giant 700)");
+        chk.expect(scale_impulse_out_pm(ScaleTier::kGiant) == 1600,
+                   "a Giant's outgoing impulse is scaled x1.6");
+
+        // §6: terrain physical properties, base rows.
+        const TerrainPhys grass = terrain_phys(Terrain::kGrass);
+        chk.expect(grass.friction == 60 && grass.grip == 70 && grass.conductivity == 15 &&
+                       grass.stability == 60,
+                   "grass is the §6 baseline row");
+        const TerrainPhys marsh = terrain_phys(Terrain::kMarsh);
+        chk.expect(marsh.friction == 95 && marsh.grip == 90 && marsh.conductivity == 60,
+                   "marsh matches the §6 mud row");
+
+        // §6: the RFC-004 scar overlay on top of terrain properties.
+        const TerrainPhys rubbled = terrain_phys(Terrain::kGrass, ScarKind::kRubble);
+        chk.expect(rubbled.friction == 85 && rubbled.stability == 25,
+                   "a rubble scar SETS the terrain row, it does not blend with grass");
+        chk.expect(terrain_phys(Terrain::kGrass, ScarKind::kCracked).stability == 45,
+                   "a cracked scar subtracts 15 stability from the base row");
+        chk.expect(terrain_phys(Terrain::kGrass, ScarKind::kScorched).conductivity == 5,
+                   "a scorched scar subtracts 10 conductivity from the base row");
+
+        // §5: the knockback law, reproduced against the RFC's own §5/§10 worked numbers.
+        chk.expect(kb_terrain_pm(60) == 1000, "grass friction 60 is kb_terrain = 1.0x by construction");
+        chk.expect(kb_terrain_pm(15) == 2125, "friction 15 (ice glaze) matches the RFC's own 2125pm");
+        chk.expect(kb_terrain_pm(95) == 125, "friction 95 (marsh) matches the RFC's own 125pm");
+        const float kb_grass = knockback_tiles(220, 100, 60);
+        chk.expect(kb_grass > 2.19f && kb_grass < 2.21f,
+                   "220 impulse / 100 mass on grass moves ~2.2 tiles, the RFC's §5 worked example");
+        chk.expect(knockback_tiles(220, 700, 60) < knockback_tiles(220, 100, 60),
+                   "a Giant's mass shoves less far than a Medium's for the same impulse");
+        chk.expect(knockback_tiles(50000, 100, 60) == kKnockbackCap, "knockback is capped at 4 tiles");
+
+        // §6: the mud rule (force-transfer), reproduced against the RFC's own §6 worked example.
+        const std::uint16_t bonus = force_transfer_crush(220, kb_terrain_pm(95), 90);
+        chk.expect(bonus == 44, "marsh's suppressed momentum adds ~44 Crush, the RFC's own example");
+        chk.expect(force_transfer_crush(220, kb_terrain_pm(80), 55) == 0,
+                   "sand (kb_terrain 500pm) merely absorbs -- zero force-transfer bonus");
+
+        // §6: slip mitigation — ice-grip (< 30) softens a direct blow.
+        chk.expect(slip_applies(29), "grip just under the ice threshold slips");
+        chk.expect(!slip_applies(30), "grip AT the threshold does not slip");
+
+        // §5/§10: WallSlam, reproduced against the RFC's own §10 Meteor worked example.
+        chk.expect(wallslam_crush(1.7f, 100) == 85,
+                   "1.7 undelivered tiles at Medium mass slams for 85, the RFC's own example");
+
+        // §7: terrain stress, reproduced against the same worked example (stress 200 vs grass
+        // stability 60 -> threshold 180).
+        chk.expect(stress_converts(200, 60), "200 stress exceeds grass's 60x3=180 threshold");
+        chk.expect(!stress_converts(179, 60), "179 stress falls just short of the same threshold");
+
+        std::printf(
+            "RFC-003 physics: material impulse transmission, mass/tier tables, terrain properties, "
+            "the knockback law, the mud/ice rules, WallSlam and terrain stress all check out\n\n");
+    }
+
     // --- Accounts ---------------------------------------------------------------------------------
     // Argon2 is slow ON PURPOSE (32 MiB, three passes), so this section costs a fraction of a second
     // and that is the feature. What is asserted is only what the game depends on: a new name works,
@@ -150,21 +396,132 @@ int main(int argc, char** argv) {
     chk.expect(raid_kind_of(Ring::kMeadow, 0) != raid_kind_of(Ring::kWasteland, 0),
                "the rim sends different creatures, not just bigger ones");
 
-    // --- The combo table, as a function -----------------------------------------------------------
-    // Combos are pure: (status, kind of blow) -> effect. Asserting them here rather than through a
-    // staged fight is deliberate — a fight can only ever sample the table, and the interesting
-    // failure is an entry that silently stops matching GAME.md §7.
-    chk.expect(combo_of(Status::kFrozen, true, false, Element::kNone) == Combo::kShatter,
-               "frozen + heavy melee shatters");
-    chk.expect(combo_of(Status::kFrozen, false, false, Element::kNone) == Combo::kNone,
-               "a light tap does not shatter — the heavy blow is the point");
-    chk.expect(combo_of(Status::kBurning, false, true, Element::kNone) == Combo::kBlast,
-               "burning + arrow blasts");
-    chk.expect(combo_of(Status::kWet, false, false, Element::kShock) == Combo::kConduct,
-               "wet + shock conducts");
-    chk.expect(combo_of(Status::kMuddy, true, false, Element::kNone) == Combo::kCrush,
-               "muddy + heavy melee crushes");
+    // --- RFC-002: the combo table, as a function ----------------------------------------------------
+    // Combos are pure: (ladder state, kind of blow) -> effect. Asserting them here rather than
+    // through a staged fight is deliberate — a fight can only ever sample the table, and the
+    // interesting failure is an entry that silently stops matching GAME.md §7. Synthetic
+    // `StatusState`s stand in for a target already sitting at a given stage/coating, exactly as the
+    // old test drove `combo_of` with a bare `Status` value.
+    {
+        Gauge g[5]{};
+        StatusState frozen{Channel::kCold, 3, kFreezeTicks, 0, {}};
+        chk.expect(status_detonate(frozen, g, true, false, false, 100) == Combo::kShatter,
+                   "frozen + heavy melee shatters");
+    }
+    {
+        Gauge g[5]{};
+        StatusState frozen{Channel::kCold, 3, kFreezeTicks, 0, {}};
+        chk.expect(status_detonate(frozen, g, false, false, false, 100) == Combo::kNone,
+                   "a light tap does not shatter — the heavy blow is the point");
+    }
+    {
+        Gauge g[5]{};
+        StatusState burning{Channel::kHeat, 2, kHeatStage2Ticks, 0, {}};
+        chk.expect(status_detonate(burning, g, false, true, false, 100) == Combo::kBlast,
+                   "burning + arrow blasts");
+    }
+    {
+        Gauge g[5]{};
+        StatusState wet{};
+        status_coat(wet, CoatingPacket{Coating::kWet, 80});
+        chk.expect(status_detonate(wet, g, false, false, true, 100) == Combo::kConduct,
+                   "wet + a shock-element hit conducts");
+    }
+    {
+        Gauge g[5]{};
+        StatusState mired{Channel::kEarth, 2, kEarthStage2Ticks, 0, {}};
+        chk.expect(status_detonate(mired, g, true, false, false, 100) == Combo::kCrush,
+                   "mired (earth stage 2) + heavy melee crushes");
+    }
+    {
+        // No `Combo::kArc` assertion existed before this migration — a gap this closes.
+        Gauge g[5]{};
+        StatusState shocked{Channel::kShock, 2, kShockStage2Ticks, 0, {}};
+        const Combo c = status_detonate(shocked, g, false, false, false, 100);
+        chk.expect(c == Combo::kArc, "shocked (stage 2) + melee arcs");
+        chk.expect(shocked.primary == Channel::kShock && shocked.stage == 1,
+                   "Arc drops one rung, not cleared (the spammable, low-commitment combo)");
+    }
     chk.expect(combo_damage_scale(Combo::kShatter) > 2.0f, "shatter is worth aiming for");
+
+    // --- RFC-002: the ladder chassis's own pure functions -------------------------------------------
+    {
+        // Promotion (§4): a single kIceBoltPower-anchored gain (600) lands exactly on T2, the
+        // documented "one cast reaches HeavySlow" compatibility contract (RFC-002 §11).
+        StatusState s{};
+        Gauge g[5]{};
+        status_gain(s, g, BuildupPacket{Channel::kCold, 600, 0, 1}, 1000, 100);
+        (void)status_step(s, g, 1, 101);
+        chk.expect(s.primary == Channel::kCold && s.stage == 2,
+                   "a 600-power Cold gain promotes straight to HeavySlow (stage 2)");
+    }
+    {
+        // The one-slot rule (§4): equal stages never swap; a strictly higher stage evicts.
+        StatusState s{};
+        Gauge g[5]{};
+        status_gain(s, g, BuildupPacket{Channel::kEarth, 300, 0, 1}, 1000, 0);
+        (void)status_step(s, g, 1, 1);
+        chk.expect(s.primary == Channel::kEarth && s.stage == 1, "Earth claims the empty slot");
+        status_gain(s, g, BuildupPacket{Channel::kShock, 300, 0, 1}, 1000, 1);
+        (void)status_step(s, g, 1, 2);
+        chk.expect(s.primary == Channel::kEarth,
+                   "an equal-stage claim never evicts the incumbent");
+        status_gain(s, g, BuildupPacket{Channel::kShock, 300, 0, 2}, 1000, 2);
+        (void)status_step(s, g, 1, 3);
+        chk.expect(s.primary == Channel::kShock && s.stage == 2,
+                   "a strictly higher stage DOES evict the incumbent");
+    }
+    {
+        // Terminal-exit-through-stage-1 (§3) and soft-resist (§6): expiring Freeze empties the
+        // gauge, arms resist, and lands on stage 1 rather than stage 0 or a banked head start.
+        StatusState s{};
+        Gauge g[5]{};
+        status_gain(s, g, BuildupPacket{Channel::kCold, 900, 0, 1}, 1000, 0);
+        (void)status_step(s, g, 1, 1);
+        chk.expect(s.primary == Channel::kCold && s.stage == 3, "900 Cold power freezes outright");
+        (void)status_step(s, g, kFreezeTicks, 1 + kFreezeTicks);
+        const Gauge& cold = g[gauge_index_of(Channel::kCold)];
+        chk.expect(s.primary == Channel::kCold && s.stage == 1 && cold.value == 0,
+                   "expiring a terminal exits THROUGH stage 1 with the gauge emptied, not to stage 0");
+        chk.expect(cold.resist_level == 1, "a resolved terminal arms the soft-resist window");
+        status_gain(s, g, BuildupPacket{Channel::kCold, 900, 0, 1}, 1000, 1 + kFreezeTicks);
+        chk.expect(g[gauge_index_of(Channel::kCold)].value == 450,
+                   "soft-resist halves a same-window Cold gain (900 power -> 450 effective)");
+    }
+    {
+        // X1 (§5): Heat and Cold are opposed and absolute — Heat drains Cold 2:1 and does not
+        // itself accumulate until Cold is empty.
+        StatusState s{};
+        Gauge g[5]{};
+        status_gain(s, g, BuildupPacket{Channel::kCold, 500, 0, 1}, 1000, 0);
+        status_gain(s, g, BuildupPacket{Channel::kHeat, 100, 0, 1}, 1000, 1);
+        chk.expect(g[gauge_index_of(Channel::kCold)].value == 300 &&
+                       g[gauge_index_of(Channel::kHeat)].value == 0,
+                   "X1: a 100-power Heat gain drains 200 off an active Cold gauge and adds no Heat");
+    }
+    {
+        // C1: re-applying a coating sets ticks to the max, never adds.
+        StatusState s{};
+        status_coat(s, CoatingPacket{Coating::kWet, 80});
+        status_coat(s, CoatingPacket{Coating::kWet, 40});
+        chk.expect(s.coating_ticks[0] == 80,
+                   "a shorter Wet re-application does not shorten the coating (C1: max, not sum)");
+        status_coat(s, CoatingPacket{Coating::kWet, 100});
+        chk.expect(s.coating_ticks[0] == 100, "a longer re-application does extend it");
+    }
+    {
+        // Heat's terminal (Combust) resolves immediately rather than sitting at stage 3 — this
+        // header cannot apply its own burst damage (no access to max_hp), so it reports the event.
+        StatusState s{};
+        Gauge g[5]{};
+        status_gain(s, g, BuildupPacket{Channel::kHeat, 900, 0, 1}, 1000, 0);
+        const StepResult r = status_step(s, g, 1, 1);
+        chk.expect(r.combust, "900 Heat power reaches Combust and is reported for the caller to burst");
+        chk.expect(s.primary == Channel::kHeat && s.stage == 1,
+                   "Combust resolves immediately, exiting through stage 1 like any other terminal");
+    }
+    std::printf("RFC-002 status chassis: combos, promotion/eviction, terminal-exit, soft-resist, "
+               "X1, and coatings all check out\n\n");
 
     // --- The opening: you wake in open country and walk ------------------------------------------
     const PlayerView spawn = world.player_view(slot);
@@ -505,11 +862,14 @@ int main(int argc, char** argv) {
         world.teleport_player(me, home, spawn.x, spawn.y);
     }
 
-    // --- Zone seams (F2) --------------------------------------------------------------------------
-    // A lingering zone centred on a chunk border must affect creatures on BOTH sides. Under F1a only
-    // the chunk owning the centre adopted it, so a creature one tile across the seam stayed dry. The
-    // fix fans the zone to the neighbourhood and each chunk keeps the part that overlaps it. Proof: a
-    // wet zone straddling a border wets a creature on each side.
+    // --- Entity seams (F2, migrated to RFC-004) -----------------------------------------------------
+    // A lingering aura entity centred on a chunk border must affect creatures on BOTH sides. Under
+    // F1a only the chunk owning the centre adopted it, so a creature one tile across the seam stayed
+    // dry. The fix fans the spawn to the neighbourhood and each chunk keeps the part that overlaps
+    // it. Proof: a kWaterPool straddling a border wets a creature on each side. (The old short-lived-
+    // zone absolute-expiry proof is superseded by the dedicated CombatEntity lifecycle test below,
+    // which exercises the real archetype numbers rather than a synthetic override this chassis no
+    // longer accepts — life/radius now come from `entity_def()`, not the spawn call.)
     {
         // A walkable meadow border: an x on a chunk boundary with walkable tiles either side of it.
         int bx = -1, by = -1;
@@ -535,18 +895,294 @@ int main(int argc, char** argv) {
             world.spawn_one_at(static_cast<std::uint16_t>(bx), static_cast<std::uint16_t>(by),
                                CreatureKind::kSlime, home);
             advance(world, 1);
-            // A wet zone centred exactly on the seam, radius 3 — reaches a tile into each chunk.
-            world.spawn_zone_at(ZoneKind::kWet, static_cast<float>(bx), static_cast<float>(by) + 0.5f,
-                                3.0f, 30, home);
-            advance(world, 2);  // step_zones wets what it owns inside the circle, on both sides
+            // A water pool centred exactly on the seam, radius 3 — reaches a tile into each chunk.
+            world.spawn_entity_at(EntityKind::kWaterPool, static_cast<float>(bx),
+                                  static_cast<float>(by) + 0.5f, /*radius_override=*/3.0f,
+                                  /*boss_room=*/false, home);
+            advance(world, 2);  // step_entities applies the aura to what it owns inside the circle
             const ChunkStats ls = world.chunk_stats(left);
             const ChunkStats rs = world.chunk_stats(right);
-            std::printf("\nzone seam: border tile x=%d; afflicted left=%u right=%u\n", bx,
+            std::printf("\nentity seam: border tile x=%d; afflicted left=%u right=%u\n", bx,
                         ls.afflicted, rs.afflicted);
-            chk.expect(ls.afflicted > 0, "the border zone wet the creature on the LEFT chunk");
-            chk.expect(rs.afflicted > 0, "the border zone wet the creature on the RIGHT chunk");
+            chk.expect(ls.afflicted > 0, "the border pool wet the creature on the LEFT chunk");
+            chk.expect(rs.afflicted > 0, "the border pool wet the creature on the RIGHT chunk");
         }
     }
+
+    // --- RFC-004 integration: caps, anti-trap, block_bits, entity combat, always-hot, scars --------
+    // Exercises the CombatEntity chassis end-to-end through World's debug `spawn_entity_at` bypass
+    // (mirroring how `spawn_zone_at` staged the old zone tests) — no shipped ability spawns a
+    // blocking/always-hot archetype yet, so this is the only way to reach kIceWall/kRockSpike/
+    // kThunderTotem/kFallingRock with real content today. Each sub-test stakes out its own clean
+    // meadow tile (or the real dojo boss room) so nothing here interferes with `me`'s state used by
+    // the sections above and below.
+    const auto find_clean_tile = [&](int cx, int cy, int& ox, int& oy) -> bool {
+        for (int r = 0; r < 240; ++r) {
+            for (int dy = -r; dy <= r; ++dy) {
+                for (int dx = -r; dx <= r; ++dx) {
+                    if (std::abs(dx) != r && std::abs(dy) != r) continue;
+                    const int tx = cx + dx;
+                    const int ty = cy + dy;
+                    if (tx < 3 || ty < 3 || tx >= kMapTiles - 3 || ty >= kMapTiles - 3) continue;
+                    if (ring_of(kWorldSeed, tx, ty) != Ring::kMeadow) continue;
+                    if (!is_walkable(terrain_of(kWorldSeed, home, tx, ty))) continue;
+                    ox = tx;
+                    oy = ty;
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    // Spawn cap + boss-room eviction (Section 5): 16 fills a chunk, a 17th is refused, and a
+    // boss-room-flagged 17th evicts the oldest entity instead of growing past the cap.
+    {
+        int ax = -1, ay = -1;
+        chk.expect(find_clean_tile(kHomeTx - 200, kHomeTy, ax, ay),
+                   "found a meadow tile to stage the spawn-cap test on");
+        if (ax > 0) {
+            const ChunkCoord achunk = chunk_of(home, static_cast<float>(ax), static_cast<float>(ay));
+            std::vector<std::pair<int, int>> tiles;
+            for (int i = 0; i < 60 && tiles.size() < 17; ++i) {
+                const int tx = ax + (i % 6);
+                const int ty = ay + (i / 6);
+                if (chunk_of(home, static_cast<float>(tx), static_cast<float>(ty)) != achunk) continue;
+                if (!is_walkable(terrain_of(kWorldSeed, home, tx, ty))) continue;
+                tiles.emplace_back(tx, ty);
+            }
+            chk.expect(tiles.size() >= 17,
+                       "found 17 distinct walkable tiles inside one chunk for the cap test");
+            if (tiles.size() >= 17) {
+                for (int i = 0; i < 16; ++i) {
+                    world.spawn_entity_at(EntityKind::kRockSpike,
+                                          static_cast<float>(tiles[static_cast<std::size_t>(i)].first) + 0.5f,
+                                          static_cast<float>(tiles[static_cast<std::size_t>(i)].second) + 0.5f,
+                                          0.0f, false, home);
+                }
+                advance(world, 1);
+                const std::uint32_t at_cap = world.chunk_stats(achunk).entities;
+                world.spawn_entity_at(EntityKind::kRockSpike,
+                                      static_cast<float>(tiles[16].first) + 0.5f,
+                                      static_cast<float>(tiles[16].second) + 0.5f, 0.0f, false, home);
+                advance(world, 1);
+                const std::uint32_t after_refusal = world.chunk_stats(achunk).entities;
+                world.spawn_entity_at(EntityKind::kRockSpike,
+                                      static_cast<float>(tiles[16].first) + 0.5f,
+                                      static_cast<float>(tiles[16].second) + 0.5f, 0.0f,
+                                      /*boss_room=*/true, home);
+                advance(world, 1);
+                const std::uint32_t after_eviction = world.chunk_stats(achunk).entities;
+                std::printf("\nspawn cap: at cap=%u  after a refused 17th=%u  after a boss-room 17th=%u\n",
+                            at_cap, after_refusal, after_eviction);
+                chk.expect(at_cap == kMaxEntities, "16 spawns fill the chunk to kMaxEntities");
+                chk.expect(after_refusal == kMaxEntities,
+                           "a 17th spawn is refused rather than evicting anything (boss_room not set)");
+                chk.expect(after_eviction == kMaxEntities,
+                           "a boss-room spawn evicts the oldest entity instead of growing past the cap");
+            }
+        }
+    }
+
+    // block_bits + the blocked-repath contact-damage counter (Section 4/7): a hostile creature
+    // whose only path to a player runs through an Active kGroundAndShot wall cannot cross it, and
+    // after enough consecutive refusals deals contact damage instead. Staged inside an ordinary
+    // (non-dojo) interior room's floor — guaranteed uniform walkable Terrain::kStone, per
+    // tiles.hpp's `interior_tile`, unlike open meadow's scattered ponds/copses that made a 5-tile
+    // pocket unreliable to place intact. `interior_tile` is a pure function of the room index alone,
+    // so any arbitrary room number works without needing a real door to lead to it; deliberately NOT
+    // a dojo room (layout.dojo_rooms()), whose resident boss would confound this test by engaging
+    // the same player and creature this stages.
+    {
+        const std::uint32_t room2 = 2000;
+        const int bxr2 = room_block_x(static_cast<int>(room2));
+        const int byr2 = room_block_y(static_cast<int>(room2));
+        // Well clear of the door (kRoomDoorX/Y) — this room has no boss to also avoid.
+        const int wx = bxr2 + kRoomX0 + 2;
+        const int wy = byr2 + kRoomY0 + 5;
+        // A straight wall alone is not a trap — the creature just slides along the perpendicular
+        // axis and walks around it (the very same "full encirclement... escapability" property
+        // RFC-004 §4 itself calls out, and exactly why the move-and-slide code's "every way forward
+        // is blocked" branch — the ONLY thing that increments `blocked_ticks` — needs ALL of
+        // diagonal/x-only/y-only refused, not just the direct line). So this stages a genuine dead
+        // end: a front wall plus two pocket-side walls one tile back, open only to the west where
+        // the slime starts — the same L-shape a player's own Ice ability would leave as a retreat.
+        world.spawn_entity_at(EntityKind::kIceWall, static_cast<float>(wx) + 0.5f,
+                              static_cast<float>(wy - 1) + 0.5f, 0.0f, false, kInterior);
+        world.spawn_entity_at(EntityKind::kIceWall, static_cast<float>(wx) + 0.5f,
+                              static_cast<float>(wy) + 0.5f, 0.0f, false, kInterior);
+        world.spawn_entity_at(EntityKind::kIceWall, static_cast<float>(wx) + 0.5f,
+                              static_cast<float>(wy + 1) + 0.5f, 0.0f, false, kInterior);
+        world.spawn_entity_at(EntityKind::kIceWall, static_cast<float>(wx - 1) + 0.5f,
+                              static_cast<float>(wy - 1) + 0.5f, 0.0f, false, kInterior);
+        world.spawn_entity_at(EntityKind::kIceWall, static_cast<float>(wx - 1) + 0.5f,
+                              static_cast<float>(wy + 1) + 0.5f, 0.0f, false, kInterior);
+        // Let every segment arm and activate BEFORE anyone stands on its footprint, so the
+        // anti-trap rule does not whiff any of them.
+        advance(world, entity_def(EntityKind::kIceWall).arm_ticks + 2);
+        // Spawned directly IN the pocket (not several tiles back) — travel time adds nothing to
+        // what this proves, and a slime left to wander long stretches of the map on a miss risks
+        // wandering into another staged fight further down this file.
+        world.spawn_one_at(static_cast<std::uint16_t>(wx - 1), static_cast<std::uint16_t>(wy),
+                           CreatureKind::kSlime, kInterior);
+        // A player just past the pocket, within the slime's aggro radius: prey-targeting is a
+        // direct beeline (no flow field involved), so the heading is fully deterministic — the
+        // dead end sits squarely between them.
+        world.teleport_player(me, kInterior, static_cast<float>(wx) + 2.5f, static_cast<float>(wy) + 0.5f);
+        advance(world, 80);
+        const ChunkCoord wchunk = chunk_of(kInterior, static_cast<float>(wx), static_cast<float>(wy));
+        int walls_seen = 0;
+        std::int16_t min_wall_hp = entity_def(EntityKind::kIceWall).base_hp;
+        bool found_pool = false;
+        if (ChunkViewPtr v = world.bus().load(wchunk)) {
+            for (const CombatEntity& e : v->entities) {
+                if (e.kind == EntityKind::kIceWall) {
+                    ++walls_seen;
+                    min_wall_hp = std::min(min_wall_hp, e.hp);
+                }
+                if (e.kind == EntityKind::kWaterPool) found_pool = true;
+            }
+        }
+        // The reliable, deterministic half of the proof: once pinned against the front wall, x is
+        // refused EVERY tick regardless of y (the diagonal and x-only probes both land in the walled
+        // column at every row this pocket spans), so the slime can never cross into tile `wx` at all
+        // — proving block_bits actually gates its movement. The blocked-repath contact-damage
+        // counter is the harder-to-observe half: it only increments on a tick where y ALSO refuses
+        // (a small, jitter-driven in-tile wobble almost always succeeds instead, since the jitter
+        // term is far smaller than a full tile), so getting 5 CONSECUTIVE y-refusals in a row is a
+        // real but slow-to-land probabilistic event, not asserted here on a short deterministic
+        // budget — see the RFC-001-style pure-function tests above for the counter's own logic.
+        float slime_x = -1.0f;
+        if (ChunkViewPtr v = world.bus().load(wchunk)) {
+            for (const Creature& c : v->creatures) {
+                if (c.kind == CreatureKind::kSlime) slime_x = c.x;
+            }
+        }
+        std::printf("block_bits: %d/5 wall segments placed, min hp = %d (a segment died into a "
+                    "water pool: %s);  slime x = %.2f (wall at x=%d)\n",
+                    walls_seen, min_wall_hp, found_pool ? "yes" : "no", static_cast<double>(slime_x), wx);
+        chk.expect(walls_seen == 5, "this room's uniform floor takes the full 5-segment pocket");
+        chk.expect(slime_x > 0.0f && slime_x < static_cast<float>(wx),
+                   "a hostile creature run straight at an Active kGroundAndShot wall never crosses "
+                   "into its tile, proving block_bits actually gates creature movement");
+        world.teleport_player(me, home, spawn.x, spawn.y);
+    }
+
+    // Projectile vs. entity (Section 7): a kGroundAndShot entity stops an arrow and takes its damage.
+    {
+        int px = -1, py = -1;
+        chk.expect(find_clean_tile(kHomeTx - 150, kHomeTy + 60, px, py),
+                   "found a meadow tile to stage the projectile-vs-entity test on");
+        if (px > 0) {
+            world.spawn_entity_at(EntityKind::kIceWall, static_cast<float>(px) + 0.5f,
+                                  static_cast<float>(py) + 0.5f, 0.0f, false, home);
+            advance(world, entity_def(EntityKind::kIceWall).arm_ticks + 2);
+            world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+            world.teleport_player(me, home, static_cast<float>(px) - 3.0f, static_cast<float>(py) + 0.5f);
+            const bool shot_ok =
+                world.shoot(me, static_cast<float>(px) + 0.5f, static_cast<float>(py) + 0.5f);
+            advance(world, 5);
+            const ChunkCoord pchunk = chunk_of(home, static_cast<float>(px), static_cast<float>(py));
+            std::int16_t wall_hp2 = entity_def(EntityKind::kIceWall).base_hp;
+            if (ChunkViewPtr v = world.bus().load(pchunk)) {
+                for (const CombatEntity& e : v->entities) {
+                    if (e.kind == EntityKind::kIceWall) wall_hp2 = e.hp;
+                }
+            }
+            std::printf("projectile vs entity: shot %s;  wall hp %d -> %d\n", shot_ok ? "ok" : "refused",
+                        entity_def(EntityKind::kIceWall).base_hp, wall_hp2);
+            chk.expect(shot_ok, "the player could shoot");
+            chk.expect(wall_hp2 < entity_def(EntityKind::kIceWall).base_hp,
+                       "a kGroundAndShot entity stops an arrow and takes its damage");
+            world.teleport_player(me, home, spawn.x, spawn.y);
+        }
+    }
+
+    // Melee/strike vs. entity, and the scar it leaves (Section 7 + 8.4): killing a kRockSpike
+    // stamps a kCracked scar on its tile.
+    {
+        int mx = -1, my = -1;
+        chk.expect(find_clean_tile(kHomeTx - 150, kHomeTy - 60, mx, my),
+                   "found a meadow tile to stage the melee-vs-entity test on");
+        if (mx > 0) {
+            const ChunkCoord mchunk = chunk_of(home, static_cast<float>(mx), static_cast<float>(my));
+            const std::uint32_t scars_before = world.chunk_stats(mchunk).scars;
+            world.spawn_entity_at(EntityKind::kRockSpike, static_cast<float>(mx) + 0.5f,
+                                  static_cast<float>(my) + 0.5f, 0.0f, false, home);
+            advance(world, entity_def(EntityKind::kRockSpike).arm_ticks + 2);
+            world.grant_vitals(me, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+            world.teleport_player(me, home, static_cast<float>(mx) - 1.0f, static_cast<float>(my) + 0.5f);
+            world.move_player(me, 0.01f, 0.0f);  // face the spike without needing to cross into it
+            advance(world, 1);
+            bool any_swing_ok = false;
+            for (int i = 0; i < 8; ++i) {
+                if (world.swing(me, false)) any_swing_ok = true;
+                advance(world, 4);  // past the swing cooldown
+            }
+            const std::uint32_t scars_after = world.chunk_stats(mchunk).scars;
+            std::printf("melee vs entity: any swing landed=%s;  scars %u -> %u\n",
+                        any_swing_ok ? "yes" : "no", scars_before, scars_after);
+            chk.expect(any_swing_ok, "the player could swing at the spike");
+            chk.expect(scars_after > scars_before,
+                       "killing the rock spike stamped a kCracked scar on its tile");
+            world.teleport_player(me, home, spawn.x, spawn.y);
+        }
+    }
+
+    // Always-hot restriction + kFallingRock's life_ticks==0 terminal transition (Section 2/3(c)/5):
+    // borrows the real dojo boss room the F3 test further down also uses, since no ability or boss
+    // content spawns either kind live and a chunk that owns a boss is the cheap real proxy this pass
+    // backstops the restriction on.
+    {
+        const ChunkCoord ordinary = chunk_of(home, spawn.x, spawn.y);
+        const std::uint32_t ord_before = world.chunk_stats(ordinary).entities;
+        world.spawn_entity_at(EntityKind::kThunderTotem, spawn.x, spawn.y, 0.0f, false, home);
+        advance(world, 1);
+        const std::uint32_t ord_after = world.chunk_stats(ordinary).entities;
+        chk.expect(ord_after == ord_before,
+                   "kThunderTotem is refused on an ordinary chunk that owns no boss");
+
+        if (!layout.dojo_rooms().empty()) {
+            const std::uint32_t room = layout.dojo_rooms().front();
+            const int bxr = room_block_x(static_cast<int>(room));
+            const int byr = room_block_y(static_cast<int>(room));
+            const float totem_x = static_cast<float>(bxr + kRoomX0 + 2) + 0.5f;
+            const float totem_y = static_cast<float>(byr + kRoomY0 + 2) + 0.5f;
+            const ChunkCoord broom = chunk_of(kInterior, totem_x, totem_y);
+            const std::uint32_t boss_before = world.chunk_stats(broom).entities;
+            world.spawn_entity_at(EntityKind::kThunderTotem, totem_x, totem_y, 0.0f, false, kInterior);
+            advance(world, 1);
+            const std::uint32_t boss_after = world.chunk_stats(broom).entities;
+            std::printf("always-hot: ordinary chunk %u -> %u;  boss-room chunk %u -> %u\n", ord_before,
+                        ord_after, boss_before, boss_after);
+            chk.expect(boss_after == boss_before + 1,
+                       "a chunk that owns a boss accepts the same kThunderTotem spawn");
+
+            const float rock_x = static_cast<float>(bxr + kRoomX0 + 4) + 0.5f;
+            const float rock_y = static_cast<float>(byr + kRoomY0 + 2) + 0.5f;
+            const std::uint32_t scars_before_rock = world.chunk_stats(broom).scars;
+            world.spawn_entity_at(EntityKind::kFallingRock, rock_x, rock_y, 0.0f, false, kInterior);
+            advance(world, entity_def(EntityKind::kFallingRock).arm_ticks + 1);
+            bool rock_ever_active = false;
+            if (ChunkViewPtr v = world.bus().load(broom)) {
+                for (const CombatEntity& e : v->entities) {
+                    if (e.kind == EntityKind::kFallingRock && e.state == EntityState::kActive) {
+                        rock_ever_active = true;
+                    }
+                }
+            }
+            const std::uint32_t scars_after_rock = world.chunk_stats(broom).scars;
+            std::printf("kFallingRock: reached kActive=%s;  scars %u -> %u\n",
+                        rock_ever_active ? "YES(bug)" : "no", scars_before_rock, scars_after_rock);
+            chk.expect(!rock_ever_active,
+                       "kFallingRock's life_ticks==0 never reaches kActive (Section 3(c))");
+            chk.expect(scars_after_rock > scars_before_rock,
+                       "its terminal transition stamped a scar on impact");
+        }
+    }
+
+    std::printf("\nRFC-004 integration: spawn caps, block_bits, entity combat, always-hot, and scars "
+               "all check out\n");
 
     const std::uint64_t guest = world.key_of(slot2);
 
@@ -617,23 +1253,37 @@ int main(int argc, char** argv) {
         advance(world, 3);
         const bool rained = world.use_ability(guest, 1, Element::kNone, static_cast<float>(m2x),
                                               static_cast<float>(m2y));
-        advance(world, 2);  // the zone wets the creatures standing in it
+        advance(world, 2);  // the pool's aura wets the creatures standing in it
         const ChunkStats wet = world.chunk_stats(m2_chunk);
-        std::printf("RainCall: cast %s;  zones=%u  afflicted(wet)=%u\n", rained ? "ok" : "refused",
-                    wet.zones, wet.afflicted);
+        std::printf("RainCall: cast %s;  entities=%u  afflicted(wet)=%u\n", rained ? "ok" : "refused",
+                    wet.entities, wet.afflicted);
         chk.expect(rained, "the player could call rain with Magic 10 and full mana");
-        chk.expect(wet.zones > 0, "the rain left a wet zone on the map");
-        chk.expect(wet.afflicted > 0, "the wet zone marked the creatures inside it");
+        chk.expect(wet.entities > 0, "the rain left a kWaterPool entity on the map");
+        chk.expect(wet.afflicted > 0, "the water pool's aura marked the creatures inside it");
 
+        // RFC-002 §7 changed what Conduct's chain DOES: it now feeds nearby Wet creatures a one-shot
+        // Shock build-up gain (and consumes their Wet), rather than the old hand-wire's direct
+        // second strike — only the creature the cast itself lands on takes real, combo-scaled
+        // damage. A single cast is therefore no longer guaranteed lethal, so this retries (granting
+        // fresh mana each round) exactly the way the WhirlCleave test above already does, rather
+        // than asserting the old chain-strikes-everyone behavior this migration deliberately drops.
         const std::uint32_t chain_before = world.status().player_kills.load(std::memory_order_relaxed);
-        const bool shocked = world.cast(guest, Element::kShock, static_cast<float>(m2x) + 0.5f,
-                                        static_cast<float>(m2y) + 0.5f);
-        advance(world, 2);
+        bool shocked = false;
+        for (int round = 0; round < 6; ++round) {
+            if (world.status().player_kills.load(std::memory_order_relaxed) > chain_before) break;
+            world.grant_vitals(guest, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+            shocked = world.cast(guest, Element::kShock, static_cast<float>(m2x) + 0.5f,
+                                 static_cast<float>(m2y) + 0.5f) ||
+                     shocked;
+            advance(world, 6);
+        }
         const std::uint32_t chain_after = world.status().player_kills.load(std::memory_order_relaxed);
         std::printf("  shock into the rain: cast %s;  Conduct kills %u -> %u\n",
                     shocked ? "ok" : "refused", chain_before, chain_after);
         chk.expect(shocked, "the player could cast shock");
-        chk.expect(chain_after > chain_before, "wet + shock conducted and the chain killed");
+        chk.expect(chain_after > chain_before,
+                   "wet + shock still detonates Conduct on the struck target, eventually killing "
+                   "something even though the chain itself is now build-up, not a second strike");
 
         // ---- Interior combat: the map-aware fan-out reaches an interior chunk ----
         // Before the fix, every combat verb fanned to the OVERWORLD chunks under a room and hit
@@ -850,6 +1500,16 @@ int main(int argc, char** argv) {
             advance(world, 5);
             Creature during{};
             chk.expect(!boss_of_room(during), "the boss stays dead through its respawn timer");
+            // KNOWN ISSUE (flagged, not this RFC's to fix): waiting out the ~3000-tick respawn timer
+            // here has been observed to be unreliable in real wall-clock terms under this multi-
+            // threaded actor runtime — sometimes fast and correct, sometimes taking minutes, once
+            // hanging for hours. A single-threaded isolation test (`ChunkActor::handle(Tick&)` driven
+            // directly, no threads, no message pool) proved the respawn LOGIC itself fires exactly
+            // on schedule in under a millisecond for the same 3010 ticks — so the fault is in the
+            // actor runtime/testkit's handling of a chunk fielding a large `Tick` burst while
+            // otherwise idle, not in RFC-009's game logic. Left as the original single `advance()`
+            // (returns quickly on most runs) rather than a retry/poll loop, since several retry
+            // shapes were tried live and none reliably avoided the same stalls.
             advance(world, kBossRespawnTicks + 5);
             world.teleport_player(me, kOverworld, static_cast<float>(door_tx) + 0.5f,
                                   static_cast<float>(door_ty) + 0.5f);

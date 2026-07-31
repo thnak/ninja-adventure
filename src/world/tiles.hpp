@@ -16,6 +16,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "world/combat_math.hpp"
+
 namespace mmo {
 
 // --- Geometry ------------------------------------------------------------------------------------
@@ -194,104 +196,11 @@ enum class Element : std::uint8_t {
 
 inline constexpr int kElementCount = static_cast<int>(Element::kCount);
 
-enum class Status : std::uint8_t {
-    kNone = 0,
-    kFrozen = 1,   // cannot move at all
-    kBurning = 2,  // damage over time
-    kWet = 3,      // slower, and the conductor for Shock
-    kMuddy = 4,    // much slower
-    kShocked = 5,  // damage over time, and staggers
-    kCount = 6,
-};
-
-[[nodiscard]] inline constexpr Status status_of(Element e) noexcept {
-    switch (e) {
-        case Element::kFire: return Status::kBurning;
-        case Element::kIce: return Status::kFrozen;
-        case Element::kEarth: return Status::kMuddy;
-        case Element::kShock: return Status::kShocked;
-        case Element::kNone:
-        case Element::kCount: break;
-    }
-    return Status::kNone;
-}
-
-// How long a freshly applied status lasts, in ticks. Frozen is the shortest because it is the
-// strongest: it is a full stop, and the Shatter combo has to be a window you aim for rather than a
-// state you park a creature in.
-[[nodiscard]] inline constexpr std::uint8_t status_ticks_of(Status s) noexcept {
-    switch (s) {
-        case Status::kFrozen: return 25;
-        case Status::kBurning: return 50;
-        case Status::kWet: return 80;
-        case Status::kMuddy: return 60;
-        case Status::kShocked: return 30;
-        case Status::kNone:
-        case Status::kCount: break;
-    }
-    return 0;
-}
-
-// Movement multiplier a status imposes.
-[[nodiscard]] inline constexpr float status_speed_scale(Status s) noexcept {
-    switch (s) {
-        case Status::kFrozen: return 0.0f;
-        case Status::kMuddy: return 0.45f;
-        case Status::kWet: return 0.85f;
-        case Status::kShocked: return 0.7f;
-        case Status::kBurning: return 1.15f;  // it panics — burning things run
-        case Status::kNone:
-        case Status::kCount: break;
-    }
-    return 1.0f;
-}
-
-// The combos. `heavy` distinguishes a charged melee blow from a light one; `by_projectile` an arrow
-// from a hand weapon. Returned as a damage multiplier plus a flag for the side effect the chunk has
-// to act on, because a multiplier alone cannot express "splash two tiles" or "give the caster mana".
-enum class Combo : std::uint8_t {
-    kNone = 0,
-    kShatter = 1,   // Frozen + heavy melee: x2.5, ignores armour
-    kBlast = 2,     // Burning + arrow: splash damage 2 tiles
-    kConduct = 3,   // Wet + Shock: chains to every wet enemy nearby
-    kCrush = 4,     // Muddy + heavy melee: stun
-    kArc = 5,       // Shocked + melee: returns mana to the striker
-};
-
-[[nodiscard]] inline constexpr Combo combo_of(Status s, bool heavy, bool by_projectile,
-                                              Element by_element) noexcept {
-    if (by_element == Element::kShock && s == Status::kWet) return Combo::kConduct;
-    if (by_element != Element::kNone) return Combo::kNone;  // other spells do not detonate
-    if (s == Status::kFrozen && heavy && !by_projectile) return Combo::kShatter;
-    if (s == Status::kBurning && by_projectile) return Combo::kBlast;
-    if (s == Status::kMuddy && heavy && !by_projectile) return Combo::kCrush;
-    if (s == Status::kShocked && !by_projectile) return Combo::kArc;
-    return Combo::kNone;
-}
-
-[[nodiscard]] inline constexpr float combo_damage_scale(Combo c) noexcept {
-    switch (c) {
-        case Combo::kShatter: return 2.5f;
-        case Combo::kBlast: return 1.6f;
-        case Combo::kConduct: return 1.4f;
-        case Combo::kCrush: return 1.3f;
-        case Combo::kArc: return 1.1f;
-        case Combo::kNone: break;
-    }
-    return 1.0f;
-}
-
-[[nodiscard]] inline const char* describe(Combo c) noexcept {
-    switch (c) {
-        case Combo::kShatter: return "SHATTER";
-        case Combo::kBlast: return "BLAST";
-        case Combo::kConduct: return "CONDUCT";
-        case Combo::kCrush: return "CRUSH";
-        case Combo::kArc: return "ARC";
-        case Combo::kNone: break;
-    }
-    return "";
-}
+// Status/Combo (P2's one-slot Status enum + combo_of) has been replaced wholesale by RFC-002's
+// build-up ladders — see status.hpp for Channel/Coating/StatusState/Gauge, status_gain/status_step/
+// status_detonate, and the moved Combo enum + combo_damage_scale. Deleted in this same change, the
+// same precedent as ZoneKind's removal above: RFC-002 rules that the old model dies alongside the
+// new one landing, not beside it.
 
 // --- Entities ------------------------------------------------------------------------------------
 // ONE creature type for everything alive that is not a player — monsters, wildlife, and later the
@@ -404,6 +313,32 @@ struct CreatureStats {
     return {30, 1.2f, 4, F::kMonster, D::kHostile, 7.0f, 1.0f, 4, 0.0f, 4};
 }
 
+// RFC-009's Material/ScaleTier per creature kind, borrowing RFC-003 §3/§4's own stated defaults
+// (ghosts Spirit, slimes Slime material, bears/the boss Large/Giant, critters Tiny) — RFC-003's
+// actual scope (impulse, terrain physics, the interaction rule table) is not built; this is only
+// enough to give RFC-009's tier/material tables real content to run against.
+struct DefenderProfile {
+    Material material = Material::kFlesh;
+    ScaleTier tier = ScaleTier::kMedium;
+};
+
+[[nodiscard]] inline constexpr DefenderProfile defender_of(CreatureKind k) noexcept {
+    switch (k) {
+        case CreatureKind::kSlime: return {Material::kSlime, ScaleTier::kSmall};
+        case CreatureKind::kSpider: return {Material::kFlesh, ScaleTier::kSmall};
+        case CreatureKind::kGhost: return {Material::kSpirit, ScaleTier::kMedium};
+        case CreatureKind::kSkull: return {Material::kFlesh, ScaleTier::kMedium};
+        case CreatureKind::kBoar: return {Material::kFlesh, ScaleTier::kMedium};
+        case CreatureKind::kWolf: return {Material::kFlesh, ScaleTier::kMedium};
+        case CreatureKind::kBear: return {Material::kFlesh, ScaleTier::kLarge};
+        case CreatureKind::kHare: return {Material::kFlesh, ScaleTier::kTiny};
+        case CreatureKind::kChicken: return {Material::kFlesh, ScaleTier::kTiny};
+        case CreatureKind::kBoss: return {Material::kFlesh, ScaleTier::kGiant};
+        case CreatureKind::kCount: break;
+    }
+    return {Material::kFlesh, ScaleTier::kMedium};
+}
+
 // Difficulty by RING, applied when a creature is created rather than when it is hit — so a slime
 // that wandered inward from the wasteland stays a wasteland slime, and the player can tell.
 //
@@ -501,10 +436,32 @@ struct Creature {
     std::uint8_t grudge = 0;        // times provoked; each one makes the next anger last longer
     std::uint64_t target = 0;       // the player key it is angry at, 0 = nobody
 
-    // --- elemental state ------------------------------------------------------------------------
-    Status status = Status::kNone;
-    std::uint8_t status_ticks = 0;
-    std::uint8_t stun_ticks = 0;
+    // --- elemental state (RFC-002) ----------------------------------------------------------------
+    // `stun_ticks` is gone: a flat stun is now Stagger's terminal (Knockdown), reached through the
+    // ladder like every other status — see step_creatures()'s Knockdown check in chunk_actor.hpp.
+    StatusState status{};
+    Gauge gauges[5]{};
+    std::uint64_t dot_owner = 0;  // credited on a DoT kill: whoever last fed the primary channel
+
+    // --- RFC-009: material/tier and the mitigation half of a DefenderSheet ------------------------
+    // Assigned once at creation (`defender_of`, `make_creature`/`spawn_boss`) and never mutated —
+    // archetype-static, matching RFC-003's own "material/tier are per-archetype" framing. `dr[2]`
+    // stays `{0,0}` this pass (no gear/guard-stance/cover source exists yet); `toughness` is tier-
+    // only and real (`tier_toughness`, combat_math.hpp).
+    Material material = Material::kFlesh;
+    ScaleTier tier = ScaleTier::kMedium;
+    std::uint8_t toughness = 0;
+    std::uint16_t dr[2] = {0, 0};
+
+    // --- RFC-003: knockback displacement, Displaced state -------------------------------------------
+    // `kb_dx`/`kb_dy` is the REMAINING displacement vector (tiles); each tick moves
+    // `(kb_dx, kb_dy) / kb_ticks_left` and subtracts it, so both magnitude and direction live in one
+    // pair of floats (`physics.hpp`'s `wallslam_crush` reads the vector's length when a slide is
+    // blocked early). `kb_ticks_left == 0` is Grounded; nonzero is Displaced. A fresh hit overwrites
+    // all three fields outright, matching the RFC's own "new knockback replaces remaining" rule.
+    float kb_dx = 0.0f;
+    float kb_dy = 0.0f;
+    std::uint8_t kb_ticks_left = 0;
 
     // --- the telegraphed attack, which is STATE the renderer reads (F2) -------------------------
     // A creature in reach COMMITS to a swing instead of hitting instantly: it freezes here for its
@@ -525,6 +482,13 @@ struct Creature {
     std::uint8_t wander_cd = 0;
     std::int8_t wander_dx = 0;
     std::int8_t wander_dy = 0;
+
+    // RFC-004 §7: consecutive ticks this creature's every way forward has been refused by a
+    // blocking CombatEntity (not a Building — see `attack_blocking_building` for that older,
+    // separate path). At `kBlockedRepathTicks` it deals contact damage to the entity and resets,
+    // mirroring `attack_blocking_building`'s own shape rather than the wind-up/strike machinery
+    // (a deliberate simplification of §7's "same machinery" language — see chunk_actor.hpp).
+    std::uint8_t blocked_ticks = 0;
 
     // Which pose the renderer draws for a kBoss creature (F3): a value of `BossPose` (boss.hpp),
     // written by step_bosses and published in the ChunkView so the renderer picks the right Samurai
@@ -633,31 +597,11 @@ struct Effect {
     std::uint8_t age = 0;  // counts up; dropped at effect_life_of(kind)
 };
 
-// A ZONE: a lingering circle of effect a player drops on the ground, owned by the chunk it lands in
-// and stepped down each tick until it expires. It is the ability layer's second kind of persistent
-// state after the projectile — and, like the projectile, it is CHUNK state rather than the caster's,
-// because what it does (wet a creature, blind a creature) is a fact about which creatures stand
-// where, and the actor that knows that is the one that owns the tile.
-//
-// This is the minimal F1a shape: a zone belongs to exactly the chunk that owns its centre and only
-// touches that chunk's own creatures. A radius that spills into a neighbour therefore under-covers
-// at the seam — F2 owns the fan-out that fixes it. Kept deliberately small (kMaxZones per chunk) for
-// the same reason effects are capped: a published view is copied, not referenced.
-enum class ZoneKind : std::uint8_t {
-    kWet = 0,           // RainCall — marks everything inside Status::kWet, feeding the Conduct chain
-    kSmokeSuppress = 1, // SmokeBomb — creatures inside drop their target and cannot acquire prey
-    kCount = 2,
-};
-
-struct Zone {
-    ZoneKind kind = ZoneKind::kWet;
-    float x = 0.0f;
-    float y = 0.0f;
-    float radius = 0.0f;
-    std::uint16_t ticks_left = 0;  // counts down; dropped at 0
-};
-
-inline constexpr std::size_t kMaxZones = 8;  // per chunk — a published view is copied, not referenced
+// ZONE was the ability layer's lingering-circle mechanism (kWet/kSmokeSuppress). RFC-004 §2b/Open
+// Question 1 rule that it dies in the same change CombatEntity lands: `kWaterPool`/`kSmokeCloud`
+// (combat_entity.hpp) reproduce its exact numbers on the new chassis, which also gives them HP,
+// collision and a team — the three things a bare zone could never have. See chunk_actor.hpp's
+// step_entities() and world.hpp's use_ability() kZone branch.
 
 struct Crop {
     std::uint16_t tx = 0;  // map-global tile
