@@ -748,6 +748,13 @@ public:
         player_ref_by_key(player).tell(UseWaypoint{village_index, pay_kind});
     }
 
+    // RFC-011 §5.3: assign (or, with `AbilityId::kCount`, reset to auto-pick) one loadout slot.
+    // PlayerActor is the sole re-validator (eligibility, no-duplicate, out-of-combat); this is a
+    // thin passthrough, the same shape as `respec_skill`/`use_waypoint` above.
+    void set_loadout(std::uint64_t player, std::uint8_t slot, AbilityId ability) {
+        player_ref_by_key(player).tell(SetLoadout{slot, ability});
+    }
+
     // RFC-021 §5.2/§4.3: read a player's discovery state — the per-village visited/usable bitsets
     // (`DiscoveryView`) and a single fog-cell query, both exposed for tests/tools/a future Map
     // screen rather than the per-tick `PlayerView` bus (§5.4's own explicit cadence separation).

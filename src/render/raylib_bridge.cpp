@@ -346,6 +346,43 @@ inline constexpr int kTreeStride = 3;
     return WHITE;
 }
 
+// RFC-011 §4: RFC-002 Open Question 4, answered — ordinary creatures show a 3-pip discrete ladder
+// indicator (one pip lit per `stage`, 0-3) above any on-screen hostile/neutral creature whose
+// `stage > 0`, tinted by the primary channel's element. This is the SAME byte already replicated
+// for `tint_of` above (zero new wire bytes, §4's own ruling) — just a second, additive read of it.
+// Reuses `tint_of`'s per-channel palette (RFC-006's element colours) rather than defining a new one.
+[[nodiscard]] Color pip_color_of(Channel primary) {
+    switch (primary) {
+        case Channel::kCold: return Color{140, 210, 255, 255};
+        case Channel::kHeat: return Color{255, 150, 90, 255};
+        case Channel::kShock: return Color{255, 245, 130, 255};
+        case Channel::kEarth: return Color{180, 150, 110, 255};
+        case Channel::kStagger:
+        case Channel::kNone:
+        case Channel::kCount: break;
+    }
+    return WHITE;
+}
+
+// Drawn centred above the creature's sprite, just above its (possibly absent) health bar. Pip size
+// 6px, gap 2px (§4, both tunable) — up to 3 pips, one lit per stage value, none while stage == 0.
+void draw_status_pips(const StatusState& s, float cx, float top_y) {
+    if (s.stage == 0) return;
+    constexpr int kPipSize = 6;
+    constexpr int kPipGap = 2;
+    const int total_w = 3 * kPipSize + 2 * kPipGap;
+    const Color lit = pip_color_of(s.primary);
+    const int x0 = static_cast<int>(cx) - total_w / 2;
+    for (int i = 0; i < 3; ++i) {
+        const int px = x0 + i * (kPipSize + kPipGap);
+        const int py = static_cast<int>(top_y);
+        DrawRectangle(px, py, kPipSize, kPipSize, Color{0, 0, 0, 140});
+        if (i < s.stage) {
+            DrawRectangle(px + 1, py + 1, kPipSize - 2, kPipSize - 2, lit);
+        }
+    }
+}
+
 
 // Growth reads as "sprout -> bigger plant -> the ripe crop's own colour", so only the last stage
 // differs per crop kind.
@@ -988,6 +1025,9 @@ struct RaylibBridge::Impl {
                                   static_cast<int>(sp.y) - kTilePx / 2 - 3, w, 3,
                                   Color{220, 70, 70, 255});
                 }
+                // RFC-011 §4: the status stage pips, stacked just above the (possibly absent)
+                // health bar so a fought-and-frozen slime reads its progress at a glance.
+                draw_status_pips(m.status, sp.x, sp.y - kTilePx / 2 - 11.0f);
                 // One pixel of intent: an angry creature gets a mark. Disposition is state, and
                 // state the player cannot see is state that might as well not exist — this is the
                 // difference between "the boar attacked me for no reason" and "I annoyed a boar".
@@ -1809,14 +1849,99 @@ void RaylibBridge::end_frame() { EndDrawing(); }
 
 void RaylibBridge::screenshot(const char* path) const { TakeScreenshot(path); }
 
-InputFrame RaylibBridge::poll_input(const PlayerView& player) const {
+// RFC-011 §6.1: the exact shipped hardcoded map, named. Order matches `BindableAction`.
+KeyBindings::KeyBindings() noexcept
+    : key{KEY_W,     KEY_S,     KEY_A,  KEY_D,  KEY_LEFT_SHIFT, KEY_Q,     KEY_F,   KEY_G,
+          KEY_E,     KEY_T,     KEY_U,  KEY_B,  KEY_ONE,        KEY_TWO,   KEY_THREE, KEY_FOUR,
+          KEY_R,     KEY_C,     KEY_J} {}
+
+namespace {
+// The default single-key binding for the two actions that ship with a SECOND default physical key
+// (§6.3) — compared against the live binding so the second key only fires while that action is
+// still at its shipped default, never after a rebind replaces it.
+inline constexpr int kDefaultHeavyModifierKey = KEY_LEFT_SHIFT;
+inline constexpr int kDefaultShootKey = KEY_Q;
+}  // namespace
+
+const char* bindable_action_name(BindableAction a) noexcept {
+    switch (a) {
+        case BindableAction::kMoveUp: return "Move Up";
+        case BindableAction::kMoveDown: return "Move Down";
+        case BindableAction::kMoveLeft: return "Move Left";
+        case BindableAction::kMoveRight: return "Move Right";
+        case BindableAction::kHeavyModifier: return "Heavy-attack Modifier";
+        case BindableAction::kShoot: return "Shoot";
+        case BindableAction::kAbilityF: return "Ability Slot F";
+        case BindableAction::kAbilityG: return "Ability Slot G";
+        case BindableAction::kHarvest: return "Harvest";
+        case BindableAction::kTill: return "Till";
+        case BindableAction::kUpgrade: return "Upgrade";
+        case BindableAction::kToggleBuild: return "Toggle Build Mode";
+        case BindableAction::kHotbar1: return "Hotbar Slot 1";
+        case BindableAction::kHotbar2: return "Hotbar Slot 2";
+        case BindableAction::kHotbar3: return "Hotbar Slot 3";
+        case BindableAction::kHotbar4: return "Hotbar Slot 4";
+        case BindableAction::kMount: return "Mount/Dismount";
+        case BindableAction::kCharacterScreen: return "Character Screen";
+        case BindableAction::kJournalScreen: return "Journal Screen";
+        case BindableAction::kCount: break;
+    }
+    return "?";
+}
+
+const char* key_glyph(int k) noexcept {
+    switch (k) {
+        case KEY_A: return "A"; case KEY_B: return "B"; case KEY_C: return "C";
+        case KEY_D: return "D"; case KEY_E: return "E"; case KEY_F: return "F";
+        case KEY_G: return "G"; case KEY_H: return "H"; case KEY_I: return "I";
+        case KEY_J: return "J"; case KEY_K: return "K"; case KEY_L: return "L";
+        case KEY_M: return "M"; case KEY_N: return "N"; case KEY_O: return "O";
+        case KEY_P: return "P"; case KEY_Q: return "Q"; case KEY_R: return "R";
+        case KEY_S: return "S"; case KEY_T: return "T"; case KEY_U: return "U";
+        case KEY_V: return "V"; case KEY_W: return "W"; case KEY_X: return "X";
+        case KEY_Y: return "Y"; case KEY_Z: return "Z";
+        case KEY_ONE: return "1"; case KEY_TWO: return "2"; case KEY_THREE: return "3";
+        case KEY_FOUR: return "4"; case KEY_FIVE: return "5"; case KEY_SIX: return "6";
+        case KEY_SEVEN: return "7"; case KEY_EIGHT: return "8"; case KEY_NINE: return "9";
+        case KEY_ZERO: return "0";
+        case KEY_SPACE: return "Space"; case KEY_ENTER: return "Enter";
+        case KEY_LEFT_SHIFT: return "LShift"; case KEY_RIGHT_SHIFT: return "RShift";
+        case KEY_LEFT_CONTROL: return "LCtrl"; case KEY_RIGHT_CONTROL: return "RCtrl";
+        case KEY_LEFT_ALT: return "LAlt"; case KEY_RIGHT_ALT: return "RAlt";
+        case KEY_TAB: return "Tab"; case KEY_CAPS_LOCK: return "CapsLock";
+        case KEY_LEFT: return "Left"; case KEY_RIGHT: return "Right";
+        case KEY_UP: return "Up"; case KEY_DOWN: return "Down";
+        case KEY_LEFT_BRACKET: return "["; case KEY_RIGHT_BRACKET: return "]";
+        case KEY_SEMICOLON: return ";"; case KEY_APOSTROPHE: return "'";
+        case KEY_COMMA: return ","; case KEY_PERIOD: return "."; case KEY_SLASH: return "/";
+        case KEY_MINUS: return "-"; case KEY_EQUAL: return "=";
+        default: break;
+    }
+    return "?";
+}
+
+BindableAction find_key_conflict(const KeyBindings& binds, BindableAction except_for,
+                                 int k) noexcept {
+    for (int i = 0; i < kBindableActionCount; ++i) {
+        if (static_cast<BindableAction>(i) == except_for) continue;
+        if (binds.key[i] == k) return static_cast<BindableAction>(i);
+    }
+    return BindableAction::kCount;
+}
+
+InputFrame RaylibBridge::poll_input(const PlayerView& player, const KeyBindings& binds) const {
     Impl& im = *impl_;
     InputFrame in{};
 
-    if (IsKeyDown(KEY_W) || IsKeyDown(KEY_UP)) in.move_y -= 1.0f;
-    if (IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN)) in.move_y += 1.0f;
-    if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) in.move_x -= 1.0f;
-    if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) in.move_x += 1.0f;
+    const auto bk = [&](BindableAction a) { return binds.key[static_cast<int>(a)]; };
+
+    // §6.1/§6.3: WASD (or whatever they are rebound to) is the primary binding; the arrow keys are
+    // a FIXED secondary that always works no matter what — the safety rail that keeps a broken
+    // rebind from locking basic navigation out.
+    if (IsKeyDown(bk(BindableAction::kMoveUp)) || IsKeyDown(KEY_UP)) in.move_y -= 1.0f;
+    if (IsKeyDown(bk(BindableAction::kMoveDown)) || IsKeyDown(KEY_DOWN)) in.move_y += 1.0f;
+    if (IsKeyDown(bk(BindableAction::kMoveLeft)) || IsKeyDown(KEY_LEFT)) in.move_x -= 1.0f;
+    if (IsKeyDown(bk(BindableAction::kMoveRight)) || IsKeyDown(KEY_RIGHT)) in.move_x += 1.0f;
 
     // Normalise so diagonal movement is not faster than orthogonal.
     const float len = std::sqrt(in.move_x * in.move_x + in.move_y * in.move_y);
@@ -1825,24 +1950,24 @@ InputFrame RaylibBridge::poll_input(const PlayerView& player) const {
         in.move_y /= len;
     }
 
-    if (IsKeyPressed(KEY_B)) im.building = !im.building;
+    if (IsKeyPressed(bk(BindableAction::kToggleBuild))) im.building = !im.building;
     in.build_mode = im.building;
 
     // The number row means different things in the two modes, and only two of the four slots exist
     // in build mode. That asymmetry is the honest one: there are two things to build and four
     // schools of magic.
     if (im.building) {
-        if (IsKeyPressed(KEY_ONE)) im.selected = BuildKind::kHearth;
-        if (IsKeyPressed(KEY_TWO)) im.selected = BuildKind::kPlot;
+        if (IsKeyPressed(bk(BindableAction::kHotbar1))) im.selected = BuildKind::kHearth;
+        if (IsKeyPressed(bk(BindableAction::kHotbar2))) im.selected = BuildKind::kPlot;
     } else {
-        if (IsKeyPressed(KEY_ONE)) im.element = Element::kFire;
-        if (IsKeyPressed(KEY_TWO)) im.element = Element::kIce;
-        if (IsKeyPressed(KEY_THREE)) im.element = Element::kEarth;
-        if (IsKeyPressed(KEY_FOUR)) im.element = Element::kShock;
+        if (IsKeyPressed(bk(BindableAction::kHotbar1))) im.element = Element::kFire;
+        if (IsKeyPressed(bk(BindableAction::kHotbar2))) im.element = Element::kIce;
+        if (IsKeyPressed(bk(BindableAction::kHotbar3))) im.element = Element::kEarth;
+        if (IsKeyPressed(bk(BindableAction::kHotbar4))) im.element = Element::kShock;
     }
     in.build_kind = im.selected;
     in.element = im.element;
-    in.mount = IsKeyPressed(KEY_R);
+    in.mount = IsKeyPressed(bk(BindableAction::kMount));
 
     const float wheel = GetMouseWheelMove();
     if (wheel != 0.0f) {
@@ -1857,9 +1982,11 @@ InputFrame RaylibBridge::poll_input(const PlayerView& player) const {
     if (tx >= 0 && ty >= 0 && tx < kMapTiles && ty < kMapTiles) {
         in.cursor_tx = static_cast<std::uint16_t>(tx);
         in.cursor_ty = static_cast<std::uint16_t>(ty);
-        in.harvest = IsMouseButtonPressed(MOUSE_BUTTON_MIDDLE) || IsKeyPressed(KEY_E);
-        in.till = IsKeyPressed(KEY_T);
-        in.upgrade = IsKeyPressed(KEY_U);
+        // Middle-mouse is a fixed, always-live alternate (§6.1's own note: "not rebindable").
+        in.harvest = IsMouseButtonPressed(MOUSE_BUTTON_MIDDLE) ||
+                     IsKeyPressed(bk(BindableAction::kHarvest));
+        in.till = IsKeyPressed(bk(BindableAction::kTill));
+        in.upgrade = IsKeyPressed(bk(BindableAction::kUpgrade));
         if (im.building) {
             in.build = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
             in.plant = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
@@ -1873,7 +2000,13 @@ InputFrame RaylibBridge::poll_input(const PlayerView& player) const {
             // not fire sixty asks a second to be told "no" fifty-seven times.
             im.swing_cd = std::max(0.0f, im.swing_cd - GetFrameTime());
             const bool want = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
-            const bool heavy = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+            // §6.3: one logical modifier, bound to one key — but the SHIPPED DEFAULT is both Shift
+            // keys (matching pre-RFC-011 behaviour exactly), so the second physical key only keeps
+            // working while this action is still at its default; a rebind replaces both with the
+            // single new key, never leaving one Shift key live.
+            const int heavy_key = bk(BindableAction::kHeavyModifier);
+            const bool heavy = IsKeyDown(heavy_key) ||
+                               (heavy_key == kDefaultHeavyModifierKey && IsKeyDown(KEY_RIGHT_SHIFT));
             in.swing = want && im.swing_cd <= 0.0f;
             if (in.swing) {
                 im.swing_cd = static_cast<float>(heavy ? kHeavyCooldown : kSwingCooldown) /
@@ -1884,12 +2017,15 @@ InputFrame RaylibBridge::poll_input(const PlayerView& player) const {
             }
             in.heavy = in.swing && heavy;
             in.cast = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
-            in.shoot = IsKeyPressed(KEY_Q) || IsKeyPressed(KEY_SPACE);
-            // The two ability slots. F and G, edge-triggered — a discrete event like a swing, not a
-            // held rhythm, so `Pressed` not `Down`. Both keys are otherwise free (see the input map
-            // in the journal). The cooldown that paces them lives in the trusted actor, not here.
-            in.ability_a = IsKeyPressed(KEY_F);
-            in.ability_b = IsKeyPressed(KEY_G);
+            // Same shipped-default-only second key as the heavy modifier, above (§6.3).
+            const int shoot_key = bk(BindableAction::kShoot);
+            in.shoot = IsKeyPressed(shoot_key) ||
+                      (shoot_key == kDefaultShootKey && IsKeyPressed(KEY_SPACE));
+            // The two ability slots. F and G (or whatever they are rebound to), edge-triggered — a
+            // discrete event like a swing, not a held rhythm, so `Pressed` not `Down`. The cooldown
+            // that paces them lives in the trusted actor, not here.
+            in.ability_a = IsKeyPressed(bk(BindableAction::kAbilityF));
+            in.ability_b = IsKeyPressed(bk(BindableAction::kAbilityG));
         }
     }
 

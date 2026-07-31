@@ -2766,8 +2766,7 @@ int main(int argc, char** argv) {
             dead_instanced.hp = 0;
             dead_instanced.map = kPersistentBandEnd;  // an instanced MapId
             dead_instanced.return_map = kOverworld;
-            dead_instanced.return_x = 12;
-            dead_instanced.return_y = 34;
+            dead_instanced.return_xy = 12u | (34u << 16);  // packed x=12, y=34 (return_x/return_y)
             apply_recovery_defaults(dead_instanced);
             chk.expect(dead_instanced.map == kOverworld && dead_instanced.x == 12.5f &&
                            dead_instanced.y == 34.5f,
@@ -3299,10 +3298,107 @@ int main(int argc, char** argv) {
                            guest_after.skill_level[static_cast<int>(Skill::kMelee)] > 0,
                        "the player who landed the killing blow also gets full kill XP, not a "
                        "divided share between the two contributors");
+
+            // --- RFC-011 §5: the manual loadout picker ----------------------------------------------
+            // Still `p19_key`: the Magic->Ranged respec above reset Magic to 0, leaving Ranged
+            // (level 17) the strongest fighting school — its auto-pick pair (FanVolley/SmokeBomb) is
+            // real, live-eligible content to pick between, and Magic's now-0 level makes a clean
+            // "ineligible" negative case for free.
+            const PlayerView lo0 = world.player_view(p19_slot);
+            chk.expect(lo0.ability[0] == AbilityId::kFanVolley &&
+                           lo0.ability[1] == AbilityId::kSmokeBomb &&
+                           lo0.loadout_raw[0] == kLoadoutAuto && lo0.loadout_raw[1] == kLoadoutAuto,
+                       "before any manual pick, both slots still show the shipped auto-pick, and "
+                       "the raw picker state confirms neither slot has ever been touched");
+
+            // No duplicate (§5.1): each slot's CURRENT (auto-resolved) value is exactly what the
+            // OTHER slot would collide with — the natural case, no artificial setup needed.
+            world.set_loadout(p19_key, 0, AbilityId::kSmokeBomb);
+            advance(world, 1);
+            chk.expect(world.player_view(p19_slot).ability[0] == AbilityId::kFanVolley,
+                       "a pick that would duplicate the other (still-auto) slot's ability is "
+                       "refused — slot F is unchanged");
+
+            // Cross-branch, free, instant: unlock WhirlCleave (Melee) so a genuine three-way choice
+            // exists, then manually equip it — an ability from a THIRD school, not a re-pick of the
+            // pair auto-selection already carries.
+            world.grant_xp(p19_key, Skill::kMelee, xp_to_reach(2));
+            advance(world, 1);
+            world.set_loadout(p19_key, 0, AbilityId::kWhirlCleave);
+            advance(world, 1);
+            PlayerView lo1 = world.player_view(p19_slot);
+            chk.expect(lo1.ability[0] == AbilityId::kWhirlCleave &&
+                           lo1.loadout_raw[0] == static_cast<std::uint8_t>(AbilityId::kWhirlCleave),
+                       "a cross-branch manual pick of an eligible ability lands in the slot and "
+                       "the raw picker state records it as manual, not auto");
+            chk.expect(lo1.ability[1] == AbilityId::kSmokeBomb,
+                       "slot G is untouched by slot F's manual pick");
+
+            // Eligibility is re-validated server-side regardless of what the client asked for —
+            // Magic is 0 now, so Nova (unlock level 2) is not eligible no matter the slot.
+            world.set_loadout(p19_key, 1, AbilityId::kElementalNova);
+            advance(world, 1);
+            chk.expect(world.player_view(p19_slot).ability[1] == AbilityId::kSmokeBomb,
+                       "a pick of an ability the player's levels do not make eligible is refused");
+
+            // Out-of-combat gate (§5.1): reuses RFC-013's own combat-cooldown flag, not a new timer.
+            world.hurt_player(p19_key, 1);
+            advance(world, 1);
+            world.set_loadout(p19_key, 1, AbilityId::kFanVolley);
+            advance(world, 1);
+            chk.expect(world.player_view(p19_slot).ability[1] == AbilityId::kSmokeBomb,
+                       "a loadout change is refused while still inside the combat cooldown window");
+            advance(world, kCombatCooldownMs / kTickMs + 2);  // wait it out
+            world.set_loadout(p19_key, 1, AbilityId::kFanVolley);
+            advance(world, 1);
+            chk.expect(world.player_view(p19_slot).ability[1] == AbilityId::kFanVolley &&
+                           world.player_view(p19_slot).loadout_raw[1] ==
+                               static_cast<std::uint8_t>(AbilityId::kFanVolley),
+                       "once out of combat again, the same pick succeeds");
+
+            // "Reset to Auto" (§5.1/§5.3): AbilityId::kCount is the wire sentinel: it always
+            // succeeds and hands the slot back to the shipped auto-pick rule, permanently, until
+            // the picker is opened again.
+            world.set_loadout(p19_key, 0, AbilityId::kCount);
+            advance(world, 1);
+            const PlayerView lo2 = world.player_view(p19_slot);
+            chk.expect(lo2.ability[0] == AbilityId::kWhirlCleave &&
+                           lo2.loadout_raw[0] == kLoadoutAuto,
+                       "Reset to Auto clears the manual flag; the slot happens to auto-resolve to "
+                       "the same ability here only because Melee is now the strongest school");
+
+            // Respec clears a manual pick it invalidates (RFC-019 §5.6/RFC-011 §5.4) — a MANUAL
+            // slot does not silently fall back to auto; it goes genuinely empty (AbilityId::kCount)
+            // until the player picks again. Slot G is still manually FanVolley (Ranged); respeccing
+            // Ranged away must clear it, not leave it pointing at a now-ineligible ability.
+            world.teleport_player(p19_key, kOverworld, hx, hy);  // back at the Hearth
+            advance(world, 1);
+            world.respec_skill(p19_key, Skill::kRanged, Skill::kCraft);
+            advance(world, 1);
+            const PlayerView lo3 = world.player_view(p19_slot);
+            chk.expect(lo3.ability[1] == AbilityId::kCount && lo3.loadout_raw[1] == kLoadoutAuto,
+                       "a respec that drops a branch below a manually-equipped ability's unlock "
+                       "tier clears that slot to genuinely empty, not a silent auto-pick fallback");
+
+            // Persistence round-trip (RFC-016 §4.1/RFC-011 §5.3), pure-function: the raw picker
+            // byte — not the resolved ability — is what must survive a restart, so a never-touched
+            // slot can never come back mistaken for a manual lock-in.
+            PlayerView pv{};
+            pv.loadout_raw[0] = static_cast<std::uint8_t>(AbilityId::kCrushBlow);
+            pv.loadout_raw[1] = kLoadoutAuto;
+            const PlayerProgression pp = progression_of(pv);
+            const RestoreProgression rp = restore_message(1, pp);
+            chk.expect(rp.loadout[0] == static_cast<std::uint8_t>(AbilityId::kCrushBlow) &&
+                           rp.loadout[1] == kLoadoutAuto,
+                       "the raw loadout byte round-trips through PlayerProgression unchanged, "
+                       "manual and auto slots alike");
         }
     }
     std::printf("RFC-019 progression & co-op fairness: the Essence gate, XP overflow-closure, "
                "respec, and the shared-kill contribution ledger (§5.1/§5.6/§5.7/§5.8) check out\n\n");
+    std::printf("RFC-011 combat HUD/input: the manual loadout picker's eligibility/no-duplicate/"
+               "out-of-combat gates, Reset to Auto, respec-clears-a-manual-slot, and the raw "
+               "loadout-byte persistence round-trip all check out\n\n");
 
     world.stop();
 

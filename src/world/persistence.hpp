@@ -117,10 +117,9 @@ inline constexpr std::uint32_t kManifestVersion = 1;
 // One row per account, folded from `player_items` (§4.1) into fixed-size arrays: kItemKinds and
 // kSkillCount are small compile-time constants, so a child table buys nothing here that a vector
 // field does not already give under a per-ActorId blob store (see file header, point 2).
-// `equipped_ability_0/1` (§4.1's reserved-but-NULL columns) are not added — nothing reads them
-// yet (RFC-011 does not exist), and adding a durable field later is exactly as additive under
-// this engine's own schema-versioning story (016) as adding a reserved SQL column would have
-// been, so there is no "add it now or pay a migration later" pressure to pre-empt.
+// `equipped_ability_0/1` (§4.1's reserved-but-NULL columns): RFC-011 now exists and is the first
+// code to write them — added below as `loadout`, exactly as additive as this file originally
+// predicted a reserved SQL column would have been (tag 17, never renumbering an existing tag).
 struct PlayerProgression {
     std::uint16_t map = 0;
     float x = 0.0f;
@@ -132,20 +131,29 @@ struct PlayerProgression {
     std::uint16_t respawn_tx = 0;
     std::uint16_t respawn_ty = 0;
     // §7: RFC-014's flagged return-location breadcrumb, resolved here — mirrors
-    // PlayerActor::instance_return_map_/x_/y_ (RFC-013 §6.2) verbatim.
+    // PlayerActor::instance_return_map_/x_/y_ (RFC-013 §6.2) verbatim. `return_x`/`return_y`
+    // are packed into one `uint32_t` (low 16 bits x, high 16 bits y) — the exact tx/ty-packing
+    // idiom `Door::tile` already uses elsewhere in this codebase — to free one tagged-field
+    // slot: `QUARK_SERIALIZE`'s underlying `QUARK_FOR_EACH` X-macro chain is authored only up
+    // to 16 `(tag, member)` pairs (`quark/core/describe.hpp`), a real ceiling in the shared,
+    // externally-owned QuarkCpp engine this project should not fork/patch around. RFC-011 §5.3's
+    // new `loadout` field below needed the slot this packing frees, not a 17th pair.
     std::uint16_t return_map = 0;
-    std::uint16_t return_x = 0;
-    std::uint16_t return_y = 0;
+    std::uint32_t return_xy = 0;
     std::vector<std::uint8_t> level;  // kSkillCount entries, Skill-enum order
     std::vector<std::uint32_t> xp;    // kSkillCount entries
     std::vector<std::int32_t> items;  // kItemKinds entries, ItemKind-enum order
     // RFC-019 §5.7: Essence units spent against each branch's Tier IV gate — without this, a
     // restart would silently re-lock levels 18-20 for a player who had already paid for them.
     std::vector<std::uint8_t> essence_paid;  // kSkillCount entries
+    // RFC-011 §5.3: the raw manual-loadout-picker state — `kLoadoutAuto` or a raw `AbilityId`
+    // value per slot, mirroring `PlayerView::loadout_raw` exactly (see that field's own comment
+    // for why this is not simply the resolved `ability[]`).
+    std::vector<std::uint8_t> loadout;  // kAbilitySlots entries
 };
 QUARK_SERIALIZE(PlayerProgression, (1, map), (2, x), (3, y), (4, hp), (5, mana), (6, stamina),
-                (7, deaths), (8, respawn_tx), (9, respawn_ty), (10, return_map), (11, return_x),
-                (12, return_y), (13, level), (14, xp), (15, items), (16, essence_paid))
+                (7, deaths), (8, respawn_tx), (9, respawn_ty), (10, return_map), (11, return_xy),
+                (12, level), (13, xp), (14, items), (15, essence_paid), (16, loadout))
 
 [[nodiscard]] inline PlayerProgression progression_of(const PlayerView& v) {
     PlayerProgression p;
@@ -159,12 +167,13 @@ QUARK_SERIALIZE(PlayerProgression, (1, map), (2, x), (3, y), (4, hp), (5, mana),
     p.respawn_tx = v.respawn_tx;
     p.respawn_ty = v.respawn_ty;
     p.return_map = v.return_map;
-    p.return_x = v.return_x;
-    p.return_y = v.return_y;
+    p.return_xy = static_cast<std::uint32_t>(v.return_x) |
+                  (static_cast<std::uint32_t>(v.return_y) << 16);
     p.level.assign(v.skill_level, v.skill_level + kSkillCount);
     p.xp.assign(v.skill_xp, v.skill_xp + kSkillCount);
     p.items.assign(v.items, v.items + kItemKinds);
     p.essence_paid.assign(v.essence_paid, v.essence_paid + kSkillCount);
+    p.loadout.assign(v.loadout_raw, v.loadout_raw + kAbilitySlots);
     return p;
 }
 
@@ -182,8 +191,8 @@ QUARK_SERIALIZE(PlayerProgression, (1, map), (2, x), (3, y), (4, hp), (5, mana),
     r.respawn_tx = p.respawn_tx;
     r.respawn_ty = p.respawn_ty;
     r.return_map = p.return_map;
-    r.return_x = p.return_x;
-    r.return_y = p.return_y;
+    r.return_x = static_cast<std::uint16_t>(p.return_xy & 0xFFFFu);
+    r.return_y = static_cast<std::uint16_t>(p.return_xy >> 16);
     for (int i = 0; i < kItemKinds && i < static_cast<int>(p.items.size()); ++i) {
         r.items[i] = p.items[static_cast<std::size_t>(i)];
     }
@@ -194,6 +203,14 @@ QUARK_SERIALIZE(PlayerProgression, (1, map), (2, x), (3, y), (4, hp), (5, mana),
                                 ? p.essence_paid[static_cast<std::size_t>(i)]
                                 : 0;
     }
+    for (int i = 0; i < kAbilitySlots; ++i) {
+        // A save written before this field existed has an empty vector — kLoadoutAuto (unchanged
+        // auto-pick behavior) is the only correct default, never a raw 0 (which would misread as
+        // a manual WhirlCleave pick).
+        r.loadout[i] = (i < static_cast<int>(p.loadout.size()))
+                           ? p.loadout[static_cast<std::size_t>(i)]
+                           : kLoadoutAuto;
+    }
     return r;
 }
 
@@ -203,11 +220,11 @@ QUARK_SERIALIZE(PlayerProgression, (1, map), (2, x), (3, y), (4, hp), (5, mana),
 inline void apply_recovery_defaults(PlayerProgression& p) noexcept {
     if (p.hp > 0) return;
     if (map_id_instanced(p.map)) {
-        const bool have_return = p.return_map != 0 || p.return_x != 0 || p.return_y != 0;
+        const bool have_return = p.return_map != 0 || p.return_xy != 0;
         if (have_return) {
             p.map = p.return_map;
-            p.x = static_cast<float>(p.return_x) + 0.5f;
-            p.y = static_cast<float>(p.return_y) + 0.5f;
+            p.x = static_cast<float>(p.return_xy & 0xFFFFu) + 0.5f;
+            p.y = static_cast<float>(p.return_xy >> 16) + 0.5f;
         } else {
             p.map = kOverworld;
             p.x = static_cast<float>(p.respawn_tx) + 0.5f;

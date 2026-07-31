@@ -56,6 +56,61 @@ struct InputFrame {
     bool quit = false;
 };
 
+// RFC-011 §6.1: one rebindable action per row of the table, in that table's own order. `ESC`
+// (universal pause/back) and `F3` (debug overlay) are deliberately absent — §6.1's own "reserved,
+// never rebindable" safety rails, never exposed to the rebind UI at all.
+enum class BindableAction : std::uint8_t {
+    kMoveUp = 0,
+    kMoveDown,
+    kMoveLeft,
+    kMoveRight,
+    kHeavyModifier,
+    kShoot,
+    kAbilityF,
+    kAbilityG,
+    kHarvest,
+    kTill,
+    kUpgrade,
+    kToggleBuild,
+    kHotbar1,
+    kHotbar2,
+    kHotbar3,
+    kHotbar4,
+    kMount,
+    kCharacterScreen,
+    kJournalScreen,
+    kCount,
+};
+inline constexpr int kBindableActionCount = static_cast<int>(BindableAction::kCount);
+
+// §6.5: one raw raylib keycode per bindable action, defaulted to the exact shipped hardcoded map
+// (§6.1). A plain array rather than named fields so client.cfg's per-action load/save and the
+// Options screen's rebind list can both iterate it uniformly — see `bindable_action_name`.
+//
+// Movement's arrow-key fallback, `ESC`, `F3`, and harvest's middle-mouse alternate are FIXED and
+// never stored here (§6.1/§6.3) — they are safety rails and unconditional alternates, not bindable
+// actions. The heavy-attack modifier and shoot each ship with TWO default physical keys (both Shift
+// keys; Q or Space) but exactly one bindable slot (§6.3): the second default key keeps working only
+// until the player rebinds that action, at which point the single new key replaces both — see
+// `poll_input`'s own handling of these two actions.
+struct KeyBindings {
+    int key[kBindableActionCount];
+    KeyBindings() noexcept;  // fills §6.1's defaults; defined in raylib_bridge.cpp (has raylib.h)
+};
+
+// The Options screen's rebind-list label for `a` (e.g. "Move Up") — plain text, no raylib type.
+[[nodiscard]] const char* bindable_action_name(BindableAction a) noexcept;
+
+// A short on-screen glyph for a raw raylib keycode (e.g. "F", "Space", "LShift") — used by the
+// rebind list and by `draw_ability_slots`'s corner label (§6.4), which must always track the live
+// binding rather than a hardcoded "F"/"G".
+[[nodiscard]] const char* key_glyph(int key) noexcept;
+
+// §6.2's conflict guard: is `key` already bound to some OTHER action? Returns `BindableAction::
+// kCount` if not (including when `key` is unbound or only bound to `except_for` itself).
+[[nodiscard]] BindableAction find_key_conflict(const KeyBindings& binds, BindableAction except_for,
+                                               int key) noexcept;
+
 class RaylibBridge final : public IRenderBridge {
 public:
     RaylibBridge(int width, int height);
@@ -73,8 +128,10 @@ public:
     void end_frame() override;
 
     // Reads the keyboard/mouse and converts to world intent, using the last drawn camera to turn
-    // the mouse position into a tile.
-    [[nodiscard]] InputFrame poll_input(const PlayerView& player) const;
+    // the mouse position into a tile. `binds` is the live rebind table (RFC-011 §6) — owned by the
+    // caller's `ui::ShellState`, not mirrored in here, the same "owned where it's edited, passed in
+    // for the one frame that needs it" pattern `build_mode`/`selected_slot` already use.
+    [[nodiscard]] InputFrame poll_input(const PlayerView& player, const KeyBindings& binds) const;
 
     [[nodiscard]] float frame_time() const;
 

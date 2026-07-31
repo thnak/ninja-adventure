@@ -60,7 +60,7 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
                  SetMounted, SetInstanceReturn, RestoreProgression, Ask<SpendItems, bool>,
                  Ask<GetPlayer, PlayerView>, Ask<PlanAttack, AttackPlan>,
                  Ask<UseAbility, AbilityPlan>, UseWaypoint, Ask<GetDiscovery, DiscoveryView>,
-                 Ask<IsFogRevealed, bool>>;
+                 Ask<IsFogRevealed, bool>, SetLoadout>;
 
     // Set once at bring-up, before the engine starts.
     std::uint64_t id = 0;
@@ -301,6 +301,16 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         level_[from] = 0;
         xp_[from] = 0;
         essence_paid_[from] = 0;
+        // RFC-011 §5.4/RFC-019 §5.6: "if a respec drops a branch below an unlock tier while an
+        // ability from that tier is currently equipped, the equipped slot is cleared" — only a
+        // MANUAL pick needs this: an auto-pick slot is a pure function of level_[] and self-heals
+        // on its next read (equipped_ability picks whichever school is now strongest instead).
+        for (int s = 0; s < kAbilitySlots; ++s) {
+            if (!manual_[s] || manual_ability_[s] == AbilityId::kCount) continue;
+            if (ability_def(manual_ability_[s]).school == r.from) {
+                manual_ability_[s] = AbilityId::kCount;  // manually-managed, now genuinely empty
+            }
+        }
         xp_[to] += static_cast<std::uint32_t>(static_cast<std::uint64_t>(committed) *
                                               kRespecRefundPm / 1000u);
         convert_xp(to);
@@ -363,6 +373,43 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
             fog_cell_of(m.query.tx, m.query.ty))));
     }
 
+    // RFC-011 §5.1/§5.3: manual, free, instant, cross-branch loadout assignment. The client-side
+    // eligibility/no-duplicate checks (§5.1) are UX only — this re-validates everything, the same
+    // "server decides, client asks" discipline every other write path in this actor already
+    // follows. `s.ability == AbilityId::kCount` is the "Reset to Auto" sentinel (§5.3): it always
+    // succeeds (there is nothing to validate about un-equipping) and hands the slot back to the
+    // shipped auto-pick rule forever, until the player opens the picker again.
+    // RFC-011 §5.1/§5.3: manual, free, instant, cross-branch loadout assignment. The client-side
+    // eligibility/no-duplicate checks (§5.1) are UX only — this re-validates everything, the same
+    // "server decides, client asks" discipline every other write path in this actor already
+    // follows. `s.ability == AbilityId::kCount` is the "Reset to Auto" sentinel (§5.3): it always
+    // succeeds (there is nothing to validate about un-equipping) and hands the slot back to the
+    // shipped auto-pick rule forever, until the player opens the picker again.
+    void handle(const SetLoadout& s) noexcept {
+        if (account_ == 0 || dead_ticks_ > 0) return;
+        if (s.slot >= kAbilitySlots) return;
+        // §5.1's out-of-combat gate — the exact flag RFC-013 §1's HP-regen rule already computes,
+        // not a new timer (§Interactions with RFC-013).
+        if (world_ms_ - last_hurt_ms_ <= kCombatCooldownMs) return;
+        if (s.ability == AbilityId::kCount) {
+            manual_[s.slot] = false;
+            manual_ability_[s.slot] = AbilityId::kCount;
+            publish();
+            return;
+        }
+        if (static_cast<int>(s.ability) < 0 || static_cast<int>(s.ability) >= kAbilityCount) return;
+        const AbilityDef def = ability_def(s.ability);
+        if (level_[static_cast<int>(def.school)] < def.unlock_level) return;  // not eligible
+        // No duplicate slot (§5.1): the fixed two-slot kit means "the other slot" is simply 1-slot.
+        for (int other = 0; other < kAbilitySlots; ++other) {
+            if (other == s.slot) continue;
+            if (resolved_ability(other) == s.ability) return;
+        }
+        manual_[s.slot] = true;
+        manual_ability_[s.slot] = s.ability;
+        publish();
+    }
+
     void handle(const SetRespawn& r) noexcept {
         respawn_tx_ = r.tx;
         respawn_ty_ = r.ty;
@@ -401,6 +448,14 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
             level_[i] = r.level[i];
             xp_[i] = r.xp[i];
             essence_paid_[i] = r.essence_paid[i];
+        }
+        // RFC-011 §5.3: restore the RAW picker state, not a derived guess — a slot at kLoadoutAuto
+        // stays on auto-pick forever (even one that happens to auto-resolve to the same ability a
+        // manual pick would have); only a real stored AbilityId re-arms manual_.
+        for (int s = 0; s < kAbilitySlots; ++s) {
+            const bool is_manual = r.loadout[s] != kLoadoutAuto;
+            manual_[s] = is_manual;
+            manual_ability_[s] = is_manual ? static_cast<AbilityId>(r.loadout[s]) : AbilityId::kCount;
         }
         publish();
     }
@@ -506,7 +561,7 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
             return;
         }
         const int slot = (m.query.slot < kAbilitySlots) ? static_cast<int>(m.query.slot) : 0;
-        const AbilityId id = equipped_ability(level_, slot);
+        const AbilityId id = resolved_ability(slot);
         p.ability = id;
         if (id == AbilityId::kCount) {
             p.reason = AbilityReject::kLocked;  // no fighting school has reached level 5 yet
@@ -624,7 +679,7 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         // the HUD draws a slot from without asking. A slot whose school is still too low reports its
         // intended ability (so the greyed icon is the right one) and zero cooldown.
         for (int s = 0; s < kAbilitySlots; ++s) {
-            const AbilityId id = equipped_ability(level_, s);
+            const AbilityId id = resolved_ability(s);
             v.ability[s] = id;
             const std::uint64_t ready_at = (id == AbilityId::kCount)
                                                ? 0
@@ -633,6 +688,9 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
             // changed, from a decrementing counter to an absolute tick (Section 8's I4 discipline).
             v.ability_cd[s] =
                 (ready_at > tick_) ? static_cast<std::uint16_t>(ready_at - tick_) : 0;
+            // RFC-011 §5.3: the raw picker state, kept separate from the resolved value above.
+            v.loadout_raw[s] = manual_[s] ? static_cast<std::uint8_t>(manual_ability_[s])
+                                          : kLoadoutAuto;
         }
         return v;
     }
@@ -641,6 +699,16 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
     void publish_now() noexcept { publish(); }
 
 private:
+    // RFC-011 §5.1/§5.3: which ability slot `s` actually resolves to right now — the manual pick,
+    // if the player has ever set one for this slot, else the shipped auto-pick. This is the ONE
+    // place both `Ask<UseAbility>` and `view()` read a slot's ability from, so a manual pick and
+    // its displayed icon/cooldown can never drift apart.
+    [[nodiscard]] AbilityId resolved_ability(int slot) const noexcept {
+        if (manual_[slot]) return manual_ability_[slot];
+        return equipped_ability(level_, slot);
+    }
+
+
     // May the player's CENTRE stand on this point? One tile, not a box: the sprite is a tile wide,
     // and a box test with the same footprint cannot pass through a one-tile doorway without either
     // a smaller box (which then clips walls) or a special case for doors (which is the same bug
@@ -858,6 +926,14 @@ private:
     // remaining" (its wire shape is unchanged) but the stored value survives being read at any tick,
     // not just ticked down one at a time.
     std::uint64_t ready_at_tick_[kAbilityCount] = {};
+    // RFC-011 §5.1/§5.3: the manual loadout picker's own state, per slot — independent of, and
+    // read BEFORE, the shipped auto-pick (`equipped_ability`). `manual_[s]` is false until the
+    // player ever touches slot `s`'s picker (or after an explicit "Reset to Auto"); while false,
+    // `manual_ability_[s]` is meaningless and `resolved_ability` ignores it. Once true,
+    // `manual_ability_[s]` is authoritative — including `AbilityId::kCount`, which here means
+    // "manually managed, genuinely empty" (a respec cleared it, §5.4), NOT "fall back to auto."
+    bool manual_[kAbilitySlots] = {};
+    AbilityId manual_ability_[kAbilitySlots] = {AbilityId::kCount, AbilityId::kCount};
     // RFC-001's head instance (Section 9): at most one in flight at a time (Invariant I1). Every
     // shipped ability has `cast_ticks == 0`, so in practice this is always kIdle again by the time
     // any other handler observes it — Cast collapses straight to Release inside the very

@@ -369,6 +369,16 @@ struct AbilityPlan {
 
 struct GetPlayer {};
 
+// RFC-011 §5.3: "may I put this ability in this slot?" — a tell, not an ask, matching RespecSkill's
+// shape: the client names the intent, the trusted actor re-validates (eligibility, no-duplicate,
+// out-of-combat) and either applies it or silently drops it, exactly like a rejected RespecSkill.
+// `ability == AbilityId::kCount` is the "Reset to Auto" sentinel (§5.1) — it clears the slot back
+// to the shipped auto-pick rule, not to a genuinely empty slot.
+struct SetLoadout {
+    std::uint8_t slot = 0;
+    AbilityId ability = AbilityId::kCount;
+};
+
 // RFC-021 §4.3: cash in a discovered, tier->=2 village for an instant same-map arrival. The
 // player's choice of resource (Stone or Wood, §4.3's cost table); anything else is refused. One
 // atomic check-and-debit-and-move handler, the same shape as SpendItems/PlanAttack.
@@ -512,6 +522,13 @@ struct RestoreProgression {
     // already been paid — must survive a restart or a returning specialist re-faces a gate they
     // already cleared.
     std::uint8_t essence_paid[kSkillCount] = {};
+    // RFC-011 §5.3: the raw manual-loadout-picker state per slot — `kLoadoutAuto` (never touched
+    // the picker, or explicitly reset to it) or a raw `AbilityId` value (a real manual pick, where
+    // `kCount` itself means "manually cleared to empty" by a respec invalidating it, §5.4/RFC-019
+    // §5.6). Deliberately NOT the resolved `ability[]` PlayerView already carries — restoring only
+    // the resolved value would wrongly lock a never-touched, auto-pick slot into whatever it
+    // happened to auto-resolve to at save time.
+    std::uint8_t loadout[kAbilitySlots] = {kLoadoutAuto, kLoadoutAuto};
 };
 
 }  // namespace mmo

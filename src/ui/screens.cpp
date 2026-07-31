@@ -205,11 +205,24 @@ void bar(int x, int y, int w, int h, float frac, Color fill, const char* label) 
 // The two ability slots, drawn to the right of the element/build hotbar. Everything a slot needs it
 // reads from the published PlayerView (which ability, its cooldown) and derives the rest from the
 // shared ability table plus the vitals already in the view — no `ask`, no client-side ability state.
-void draw_ability_slots(const PlayerView& player, int x0, int y, int slot_px) {
-    static const char* kKeys[kAbilitySlots] = {"F", "G"};
+void draw_ability_slots(const PlayerView& player, int x0, int y, int slot_px,
+                        const KeyBindings& binds) {
+    static const BindableAction kSlotAction[kAbilitySlots] = {BindableAction::kAbilityF,
+                                                              BindableAction::kAbilityG};
     for (int i = 0; i < kAbilitySlots; ++i) {
         const int x = x0 + i * (slot_px + 6);
         const AbilityId id = player.ability[i];
+        // RFC-011 §5.4: the picker's landmine guard. `id == kCount` means the loadout picker left
+        // this slot genuinely empty (a manual pick, or a respec that cleared one) — `ability_def`
+        // would silently recurse to WhirlCleave for kCount, so this must be special-cased BEFORE
+        // that call, not folded into `locked`. A plain dimmed outline, no icon, no F/G glyph logic.
+        if (id == AbilityId::kCount) {
+            DrawRectangle(x, y, slot_px, slot_px, Color{0, 0, 0, 150});
+            DrawRectangleLines(x, y, slot_px, slot_px, Color{70, 74, 84, 255});
+            DrawText(key_glyph(binds.key[static_cast<int>(kSlotAction[i])]), x + 4, y + 2, 12,
+                     Color{140, 144, 152, 255});
+            continue;
+        }
         const AbilityDef def = ability_def(id);
         const bool locked = player.skill_level[static_cast<int>(def.school)] < def.unlock_level;
         const std::int16_t have =
@@ -235,8 +248,10 @@ void draw_ability_slots(const PlayerView& player, int x0, int y, int slot_px) {
 
         DrawRectangleLines(x, y, slot_px, slot_px,
                            disabled ? Color{92, 96, 108, 255} : Color{240, 214, 130, 255});
-        // Keybind, top-left; and the unlock level, bottom, while the school is still too low for it.
-        DrawText(kKeys[i], x + 4, y + 2, 12, Color{210, 214, 222, 255});
+        // Keybind, top-left — tracks §6.4's live rebind table, never a hardcoded "F"/"G"; and the
+        // unlock level, bottom, while the school is still too low for it.
+        DrawText(key_glyph(binds.key[static_cast<int>(kSlotAction[i])]), x + 4, y + 2, 12,
+                 Color{210, 214, 222, 255});
         if (locked) {
             const char* need = TextFormat("Lv%d", def.unlock_level);
             DrawText(need, x + (slot_px - MeasureText(need, 10)) / 2, y + slot_px - 12, 10,
@@ -316,7 +331,7 @@ void draw_hud_feedback(HudFeedback& fx, int w, int h) {
 }
 
 void draw_hud(const WorldStatus& status, const PlayerView& player, bool build_mode,
-              int selected_slot, HudFeedback& fx) {
+              int selected_slot, HudFeedback& fx, const KeyBindings& binds) {
     const int w = GetScreenWidth();
     const int h = GetScreenHeight();
 
@@ -377,7 +392,7 @@ void draw_hud(const WorldStatus& status, const PlayerView& player, bool build_mo
     }
     if (!build_mode) {
         const int ax0 = hx + slots * (kSlotPx + 6) + 12;
-        draw_ability_slots(player, ax0, h - 60, kSlotPx);
+        draw_ability_slots(player, ax0, h - 60, kSlotPx, binds);
     }
     // Above the slots rather than beside them: at the narrowest supported window the hotbar reaches
     // most of the way across and a label to its left lands on top of slot one.
@@ -406,7 +421,83 @@ void draw_hud(const WorldStatus& status, const PlayerView& player, bool build_mo
 // --- Character sheet -------------------------------------------------------------------------
 static const char* kSkillNames[kSkillCount] = {"Melee", "Ranged", "Magic", "Craft"};
 
-void draw_character(const PlayerView& player) {
+// RFC-011 §5.2: the manual loadout picker, extending the read-only unlock-tier list RFC-019 §5.10
+// already puts here into a clickable surface. Only shown once a genuine choice exists — "at least
+// one unlocked ability beyond the game's automatic pick" (guide-level text) means more eligible
+// abilities exist than the two slots can already hold. One compact row per slot — a name flanked by
+// `<`/`>` cycling through the eligible, non-duplicate choices, plus a "Reset" button — rather than a
+// full button list, so this fits the Character sheet's already-tight vertical budget.
+int draw_loadout_picker(ShellState& st, const PlayerView& player, int x, int y, int panel_w) {
+    int eligible_total = 0;
+    for (int a = 0; a < kAbilityCount; ++a) {
+        const AbilityDef d = ability_def(static_cast<AbilityId>(a));
+        if (player.skill_level[static_cast<int>(d.school)] >= d.unlock_level) ++eligible_total;
+    }
+    DrawText("Loadout", x, y, 20, Color{230, 206, 140, 255});
+    y += 26;
+    if (eligible_total <= kAbilitySlots) {
+        DrawText("Unlock a second ability to choose your own loadout.", x, y, 15,
+                 Color{150, 158, 168, 255});
+        return y + 24;
+    }
+    static const char* const kSlotLabel[kAbilitySlots] = {"F", "G"};
+    for (int s = 0; s < kAbilitySlots; ++s) {
+        // §5.1's no-duplicate rule, enforced client-side too (UX only — PlayerActor re-validates):
+        // an ability already sitting in the OTHER slot is never offered as a cycle target here.
+        const AbilityId other_cur = player.ability[1 - s];
+        AbilityId choices[kAbilityCount];
+        int n = 0;
+        for (int a = 0; a < kAbilityCount; ++a) {
+            const auto id = static_cast<AbilityId>(a);
+            const AbilityDef d = ability_def(id);
+            if (player.skill_level[static_cast<int>(d.school)] < d.unlock_level) continue;
+            if (id == other_cur) continue;
+            choices[n++] = id;
+        }
+        const AbilityId cur = player.ability[s];
+        const bool is_manual = player.loadout_raw[s] != kLoadoutAuto;
+        int idx = -1;  // -1 = "Empty" (a manually-cleared slot, §5.4), never in `choices`
+        for (int i = 0; i < n; ++i) {
+            if (choices[i] == cur) idx = i;
+        }
+        // A row that grows a "Reset" button only once there is something to reset (§5.1's default-
+        // forever contract means the common case — never touched the picker — stays a plain 2-arrow
+        // row, not a 3-button one).
+        const int reset_w = is_manual ? 84 : 0;
+        const Rectangle prev_r{static_cast<float>(x), static_cast<float>(y), 26.0f, 24.0f};
+        const Rectangle next_r{static_cast<float>(x + panel_w - 26), static_cast<float>(y), 26.0f,
+                               24.0f};
+        if (n > 0 && GuiButton(prev_r, "<")) {
+            const int ni = idx < 0 ? n - 1 : (idx + n - 1) % n;
+            st.pending_loadout_slot = s;
+            st.pending_loadout_ability = choices[ni];
+        }
+        if (n > 0 && GuiButton(next_r, ">")) {
+            const int ni = idx < 0 ? 0 : (idx + 1) % n;
+            st.pending_loadout_slot = s;
+            st.pending_loadout_ability = choices[ni];
+        }
+        if (is_manual) {
+            const Rectangle reset_r{static_cast<float>(x + panel_w - 26 - reset_w),
+                                    static_cast<float>(y), static_cast<float>(reset_w), 24.0f};
+            if (GuiButton(reset_r, "Reset")) {
+                st.pending_loadout_slot = s;
+                st.pending_loadout_ability = AbilityId::kCount;
+            }
+        }
+        const char* name = cur == AbilityId::kCount ? "Empty" : kAbilityName[static_cast<int>(cur)];
+        const char* label =
+            TextFormat("[%s]  %s%s", kSlotLabel[s], name, is_manual ? "" : "  (auto)");
+        const int label_w = panel_w - 30 - 30 - reset_w;
+        const int lw = MeasureText(label, 15);
+        DrawText(label, x + 30 + std::max(0, (label_w - lw) / 2), y + 4, 15,
+                 Color{224, 228, 234, 255});
+        y += 30;
+    }
+    return y;
+}
+
+void draw_character(ShellState& st, const PlayerView& player) {
     dim_background();
     const int panel_w = 560;
     const int x = (GetScreenWidth() - panel_w) / 2;
@@ -467,12 +558,14 @@ void draw_character(const PlayerView& player) {
             DrawText(hint, x + panel_w - MeasureText(hint, 14), y + 2, 14,
                      Color{150, 158, 168, 255});
         }
-        y += 30;
+        y += 27;
     }
-    y += 18;
-    DrawText("Magic sets a status. A physical blow detonates it.", x, y, 17,
+    y += 8;
+    y = draw_loadout_picker(st, player, x, y, panel_w);
+    y += 6;
+    DrawText("Magic sets a status. A physical blow detonates it.", x, y, 16,
              Color{176, 190, 176, 255});
-    y += 24;
+    y += 21;
     static const char* kCombos[] = {
         "Frozen  + heavy melee   ->  Shatter    x2.5",
         "Burning + arrow         ->  Blast      splash",
@@ -481,8 +574,8 @@ void draw_character(const PlayerView& player) {
         "Shocked + melee         ->  Arc        returns mana",
     };
     for (const char* c : kCombos) {
-        DrawText(c, x + 8, y, 16, Color{196, 200, 208, 255});
-        y += 21;
+        DrawText(c, x + 8, y, 15, Color{196, 200, 208, 255});
+        y += 18;
     }
 }
 
@@ -548,6 +641,13 @@ bool handle_shell_keys(ShellState& st) {
         return true;
     }
     if (IsKeyPressed(KEY_ESCAPE)) {
+        // RFC-011 §6.1: ESC is the fixed safety rail and always works — but while the Options
+        // screen is listening for a rebind, ESC's first job is to cancel THAT, not to also leave
+        // the screen in the same keypress.
+        if (st.rebinding != BindableAction::kCount) {
+            st.rebinding = BindableAction::kCount;
+            return true;
+        }
         switch (st.screen) {
             case Screen::kPlaying: st.screen = Screen::kPaused; return true;
             case Screen::kPaused: st.screen = Screen::kPlaying; return true;
@@ -698,7 +798,7 @@ Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player,
         }
 
         case Screen::kPlaying:
-            draw_hud(status, player, build_mode, selected_slot, st.hud);
+            draw_hud(status, player, build_mode, selected_slot, st.hud, st.binds);
             return Action::kNone;
 
         case Screen::kMainMenu: {
@@ -718,7 +818,7 @@ Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player,
         }
 
         case Screen::kPaused: {
-            draw_hud(status, player, build_mode, selected_slot, st.hud);
+            draw_hud(status, player, build_mode, selected_slot, st.hud, st.binds);
             dim_background();
             title("Paused", GetScreenHeight() / 2 - 170);
             subtitle("The world keeps going while you are here.", GetScreenHeight() / 2 - 120);
@@ -734,7 +834,7 @@ Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player,
         }
 
         case Screen::kCharacter:
-            draw_character(player);
+            draw_character(st, player);
             return Action::kNone;
 
         case Screen::kJournal: {
@@ -818,8 +918,70 @@ Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player,
             if (music_click == 1) st.music_on = false;
             y += 66;
 
-            subtitle("Key rebinding is still owed - it lands with the input pass.", y);
-            y += 30;
+            // RFC-011 §6.2: the rebind list, replacing the old stub. Two columns rather than one
+            // scrolling list (§6.2's own wording) — with 19 bindable actions this fits the screen
+            // without a scroll viewport, the same "fits without needing to reach for a new widget"
+            // reasoning the rest of this file already applies (`segment_pair`, `slider`).
+            {
+                DrawText("Key Bindings", x, y - 22, 16, kLabel);
+                constexpr int kCols = 2;
+                constexpr int kRowH = 25;
+                const int rebind_w = kPanelW + 280;
+                const int rx = (GetScreenWidth() - rebind_w) / 2;
+                const int col_w = (rebind_w - kGap) / kCols;
+                const int rows = (kBindableActionCount + kCols - 1) / kCols;
+                for (int i = 0; i < kBindableActionCount; ++i) {
+                    const auto action = static_cast<BindableAction>(i);
+                    const int col = i / rows;
+                    const int row = i % rows;
+                    const int cx = rx + col * (col_w + kGap);
+                    const int cy = y + row * kRowH;
+                    DrawText(bindable_action_name(action), cx, cy + 4, 13,
+                             Color{190, 196, 204, 255});
+                    const bool listening = st.rebinding == action;
+                    const Rectangle key_r{static_cast<float>(cx + col_w - 92),
+                                          static_cast<float>(cy), 92.0f, 21.0f};
+                    if (GuiButton(key_r, listening ? "..." : key_glyph(st.binds.key[i])) &&
+                        !listening) {
+                        st.rebinding = action;
+                        st.rebind_warning[0] = '\0';
+                    }
+                }
+                y += rows * kRowH + 14;
+
+                // Capture the next key for whichever action is listening. `ESC` cancels rather than
+                // binds — it is §6.1's fixed safety rail, never a rebind target — and a key already
+                // bound elsewhere is refused with an inline warning, never silently swapped (§6.2).
+                if (st.rebinding != BindableAction::kCount) {
+                    const int pressed = GetKeyPressed();
+                    if (pressed == KEY_ESCAPE) {
+                        st.rebinding = BindableAction::kCount;
+                    } else if (pressed != 0) {
+                        const BindableAction conflict =
+                            find_key_conflict(st.binds, st.rebinding, pressed);
+                        if (conflict != BindableAction::kCount) {
+                            std::snprintf(st.rebind_warning, sizeof st.rebind_warning,
+                                         "%s is already bound to %s", key_glyph(pressed),
+                                         bindable_action_name(conflict));
+                            st.rebind_warning_age = 0.0f;
+                        } else {
+                            st.binds.key[static_cast<int>(st.rebinding)] = pressed;
+                        }
+                        st.rebinding = BindableAction::kCount;
+                    }
+                }
+                if (st.rebind_warning[0] != '\0') {
+                    st.rebind_warning_age += GetFrameTime();
+                    if (st.rebind_warning_age > 3.0f) {
+                        st.rebind_warning[0] = '\0';
+                    } else {
+                        const int ww = MeasureText(st.rebind_warning, 15);
+                        DrawText(st.rebind_warning, (GetScreenWidth() - ww) / 2, y, 15,
+                                 Color{224, 150, 140, 255});
+                    }
+                }
+                y += 26;
+            }
 
             static const char* items[] = {"Back"};
             if (button_column(items, 1, y) == 0) st.screen = Screen::kPaused;

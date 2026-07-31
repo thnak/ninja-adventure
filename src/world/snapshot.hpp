@@ -68,6 +68,11 @@ struct PlayerView {
     // the vitals already in this view.
     AbilityId ability[kAbilitySlots] = {AbilityId::kCount, AbilityId::kCount};
     std::uint16_t ability_cd[kAbilitySlots] = {};
+    // RFC-011 §5.3: the raw manual-loadout-picker state (`kLoadoutAuto`, or a raw `AbilityId` value
+    // — `kCount` meaning "manually cleared to empty") — kept separate from the resolved `ability[]`
+    // above purely so persistence can round-trip "never touched the picker" without ever mistaking
+    // a save for a manual lock-in. Nothing in the HUD reads this; only `progression_of` does.
+    std::uint8_t loadout_raw[kAbilitySlots] = {kLoadoutAuto, kLoadoutAuto};
 
     // World tick of this player's last SUCCESSFUL swing, published by PlayerActor when a PlanAttack
     // is granted. The renderer alone reads it: `world_tick - last_swing_tick` under a small window

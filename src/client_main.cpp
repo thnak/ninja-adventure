@@ -13,6 +13,7 @@
 // Build:  cmake -B build -DMMO_BUILD_CLIENT=ON && cmake --build build -j4 --target mmo_client
 // Run  :  taskset -c 0-3 build/mmo_client
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -35,6 +36,34 @@ namespace {
 // file means defaults, never a crash. P5 (the real cluster join) owns anything better.
 constexpr const char* kClientCfgPath = "client.cfg";
 
+// RFC-011 §6.5: `key.<action>=<raylib keycode int>`, one line per bindable action, following the
+// exact tolerant contract already established for volume=/music=/join= — an unknown or missing key
+// line means the shipped default (already the constructed `KeyBindings()`), never a crash. Machine-
+// local preference, deliberately NOT routed through RFC-016's server-side store, same as volume.
+void load_key_bindings(const char* line, ui::ShellState& shell) {
+    if (std::strncmp(line, "key.", 4) != 0) return;
+    const char* rest = line + 4;
+    for (int i = 0; i < kBindableActionCount; ++i) {
+        const auto action = static_cast<BindableAction>(i);
+        // `bindable_action_name` returns a display string ("Move Up"); the cfg key is the same
+        // string with spaces turned to underscores and lowercased, computed here rather than
+        // stored twice.
+        char cfg_name[40];
+        const char* disp = bindable_action_name(action);
+        std::size_t n = 0;
+        for (; disp[n] != '\0' && n < sizeof(cfg_name) - 1; ++n) {
+            cfg_name[n] = (disp[n] == ' ') ? '_' : static_cast<char>(std::tolower(static_cast<unsigned char>(disp[n])));
+        }
+        cfg_name[n] = '\0';
+        const std::size_t nlen = std::strlen(cfg_name);
+        if (std::strncmp(rest, cfg_name, nlen) == 0 && rest[nlen] == '=') {
+            shell.binds.key[i] = std::atoi(rest + nlen + 1);
+            return;
+        }
+    }
+    // An unrecognised action name is ignored — forward compatibility, matching every other key.
+}
+
 void load_client_cfg(const char* path, ui::ShellState& shell) {
     std::FILE* f = std::fopen(path, "rb");
     if (f == nullptr) return;  // no file yet -> defaults, which is the intended first-run behaviour
@@ -50,6 +79,8 @@ void load_client_cfg(const char* path, ui::ShellState& shell) {
             shell.master_volume = std::clamp(std::atoi(line + 7), 0, 100);
         } else if (std::strncmp(line, "music=", 6) == 0) {
             shell.music_on = std::atoi(line + 6) != 0;
+        } else if (std::strncmp(line, "key.", 4) == 0) {
+            load_key_bindings(line, shell);
         }
         // Unknown keys are ignored — a newer build's cfg must not trip an older one.
     }
@@ -61,6 +92,16 @@ void save_client_cfg(const char* path, const ui::ShellState& shell) {
     if (f == nullptr) return;  // best-effort; a write failure here is never worth aborting a login
     std::fprintf(f, "join=%d\njoin_addr=%s\nvolume=%d\nmusic=%d\n", shell.join_mode ? 1 : 0,
                  shell.join_addr, shell.master_volume, shell.music_on ? 1 : 0);
+    for (int i = 0; i < kBindableActionCount; ++i) {
+        char cfg_name[40];
+        const char* disp = bindable_action_name(static_cast<BindableAction>(i));
+        std::size_t n = 0;
+        for (; disp[n] != '\0' && n < sizeof(cfg_name) - 1; ++n) {
+            cfg_name[n] = (disp[n] == ' ') ? '_' : static_cast<char>(std::tolower(static_cast<unsigned char>(disp[n])));
+        }
+        cfg_name[n] = '\0';
+        std::fprintf(f, "key.%s=%d\n", cfg_name, shell.binds.key[i]);
+    }
     std::fclose(f);
 }
 
@@ -170,6 +211,7 @@ int main(int argc, char** argv) {
     audio.set_music_enabled(shell.music_on);
     int applied_volume = shell.master_volume;
     bool applied_music = shell.music_on;
+    KeyBindings applied_binds = shell.binds;  // RFC-011 §6.5: same change-detect persistence idiom
 
     // Unattended mode signs itself in, so a screenshot is of the game rather than of a login box.
     if (shot_path != nullptr) {
@@ -556,7 +598,8 @@ int main(int argc, char** argv) {
         // input at all — otherwise walking around behind the pause menu would still work.
         audio.update();
         const bool shell_took_input = ui::handle_shell_keys(shell);
-        const InputFrame in = shell_took_input ? InputFrame{} : bridge.poll_input(player);
+        const InputFrame in =
+            shell_took_input ? InputFrame{} : bridge.poll_input(player, shell.binds);
         if (in.quit) break;
 
         // Dead players do not act. The countdown is the entire cost of dying, and being able to
@@ -740,6 +783,22 @@ int main(int argc, char** argv) {
             audio.set_music_enabled(shell.music_on);
             applied_music = shell.music_on;
             save_client_cfg(kClientCfgPath, shell);
+        }
+        // RFC-011 §6.5: persist a rebind the moment it happens, the same change-detect idiom as
+        // volume/music above (there is no device to push a keybind into — client.cfg is the whole
+        // effect).
+        if (std::memcmp(shell.binds.key, applied_binds.key, sizeof shell.binds.key) != 0) {
+            applied_binds = shell.binds;
+            save_client_cfg(kClientCfgPath, shell);
+        }
+
+        // RFC-011 §5.2/§5.3: the Character screen's loadout picker hands its intent back through
+        // these two fields rather than a data-carrying Action — apply it once, then clear it, the
+        // same "ShellState owns it, the caller watches" pattern as the fields above.
+        if (shell.pending_loadout_slot >= 0 && slot >= 0) {
+            world.set_loadout(me, static_cast<std::uint8_t>(shell.pending_loadout_slot),
+                              shell.pending_loadout_ability);
+            shell.pending_loadout_slot = -1;
         }
 
         if (shell.debug_overlay) {

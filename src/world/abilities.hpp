@@ -32,6 +32,13 @@ enum class AbilityId : std::uint8_t {
 
 inline constexpr int kAbilityCount = static_cast<int>(AbilityId::kCount);
 
+// RFC-011 §5.3: the "use the shipped auto-pick" sentinel for a manual loadout slot, both on the
+// wire (`SetLoadout`) and in the persisted/replicated raw loadout byte (`PlayerView::loadout_raw`,
+// `PlayerProgression::loadout`). Deliberately outside `[0, kAbilityCount]` so it can never collide
+// with a real `AbilityId`, including `kCount` itself (which IS a valid raw-loadout value — see
+// player_actor.hpp's `manual_ability_` comment — so the auto sentinel cannot reuse it).
+inline constexpr std::uint8_t kLoadoutAuto = 255;
+
 // Two equipped slots. For F1a the loadout is FIXED (see `equipped_ability` below): slot A is the
 // level-5 ability of your strongest fighting school, slot B the level-10 one. The array shape is
 // ready for player-chosen loadouts; only the picker is deferred.

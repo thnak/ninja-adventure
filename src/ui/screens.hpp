@@ -16,6 +16,7 @@
 
 #include <cstdint>
 
+#include "render/raylib_bridge.hpp"
 #include "world/snapshot.hpp"
 
 namespace mmo::ui {
@@ -115,6 +116,25 @@ struct ShellState {
     // Progression feedback drawn over the HUD. Lives here because, like the sign-in buffers, it must
     // survive between immediate-mode frames.
     HudFeedback hud;
+
+    // RFC-011 §6: the live rebind table, persisted to client.cfg exactly like master_volume/
+    // music_on above — machine-local preference, not RFC-016 progression state (§6.5).
+    KeyBindings binds;
+    // Which bindable action, if any, is waiting for the next keypress in the Options screen's
+    // rebind list (§6.2) — kCount means "not currently rebinding anything."
+    BindableAction rebinding = BindableAction::kCount;
+    // A transient inline warning (§6.2: "blocked with an inline warning, not silently swapped"),
+    // shown for a couple of seconds after a blocked rebind attempt. Empty means nothing to show.
+    char rebind_warning[64] = {};
+    float rebind_warning_age = 1e9f;
+
+    // RFC-011 §5.2/§5.3: the Character screen's loadout picker hands its intent back this way
+    // rather than growing `Action` with a data-carrying variant — the caller (client_main) watches
+    // for `pending_loadout_slot >= 0` after `draw`, calls `World::set_loadout`, and clears it, the
+    // same "ShellState owns the field, the caller watches for a change" pattern master_volume/
+    // music_on already use. `AbilityId::kCount` doubles as the wire's own "Reset to Auto" sentinel.
+    int pending_loadout_slot = -1;
+    AbilityId pending_loadout_ability = AbilityId::kCount;
 };
 
 // Handles the keys that belong to the shell rather than to gameplay: Esc pauses/backs out, J opens
