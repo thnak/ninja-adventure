@@ -2944,6 +2944,75 @@ int main(int argc, char** argv) {
     std::printf("RFC-016 persistence: manifest, progression/overlay durability, and login-restore "
                "all check out\n\n");
 
+    // RFC-024 §3.5: World::connected_player_count() — the host-side courtesy notice's input. A
+    // fresh login/disconnect pair, isolated from every other slot this file may have bound, so the
+    // assertion holds regardless of what ran earlier.
+    {
+        const int p24_before = world.connected_player_count();
+        LoginOutcome p24_out{};
+        const int p24_slot = world.login("rfc024courtesy", "hunter2", p24_out);
+        chk.expect(p24_slot >= 0, "the courtesy-notice test account logs in");
+        if (p24_slot >= 0) {
+            chk.expect(world.connected_player_count() == p24_before + 1,
+                       "connected_player_count() counts the newly bound slot");
+            world.disconnect_player(world.key_of(p24_slot), kOverworld, world.account_of(p24_slot));
+            chk.expect(world.connected_player_count() == p24_before + 1,
+                       "disconnect_player() is data-level only (RFC-014) and never frees `bound_` — "
+                       "connected_player_count() stays inflated by design, documented on the method");
+        }
+    }
+
+    // RFC-024 §2.2/§3.2: ClientLivenessTracker — pure state machine, no transport, exercised
+    // directly (mirrors ReplicationSession's own "exercised directly by tests" precedent, RFC-015).
+    {
+        ClientLivenessTracker t;
+        chk.expect(t.state() == ConnectionState::kConnected,
+                   "a freshly constructed tracker starts Connected");
+        chk.expect(t.advance(10'000) == ConnectionState::kConnected,
+                   "no traffic ever received yet never times out on its own");
+
+        t.on_traffic(0);
+        chk.expect(t.advance(kClientLeaderTimeoutTicks - 1) == ConnectionState::kConnected,
+                   "one tick short of the timeout stays Connected");
+        chk.expect(t.advance(kClientLeaderTimeoutTicks) == ConnectionState::kLeaderUnreachable,
+                   "kClientLeaderTimeoutTicks with no traffic declares LeaderUnreachable (§3.2)");
+
+        t.on_traffic(kClientLeaderTimeoutTicks + 5);
+        chk.expect(t.state() == ConnectionState::kConnected,
+                   "traffic resuming moves LeaderUnreachable back to Connected (§3.2)");
+
+        t.on_world_closing();
+        chk.expect(t.state() == ConnectionState::kHostClosed,
+                   "WorldClosing moves straight to HostClosed, skipping the timeout wait");
+        t.on_traffic(kClientLeaderTimeoutTicks + 1000);
+        chk.expect(t.state() == ConnectionState::kHostClosed,
+                   "HostClosed is terminal - no diagram edge leads back out of it (§3.2)");
+    }
+
+    // RFC-024 §2.1: NodeLivenessTracker — the peer-node-side counterpart, against Tick fan-out.
+    {
+        NodeLivenessTracker n;
+        chk.expect(!n.leader_unreachable(1'000'000),
+                   "a node that has never seen a Tick does not declare unreachable on its own");
+        n.on_tick(100);
+        chk.expect(!n.leader_unreachable(100 + kNodeLeaderTimeoutTicks - 1),
+                   "one tick short of kNodeLeaderTimeoutTicks stays reachable");
+        chk.expect(n.leader_unreachable(100 + kNodeLeaderTimeoutTicks),
+                   "kNodeLeaderTimeoutTicks with no further Tick declares the leader unreachable");
+    }
+
+    // RFC-024 §3.5: the host-side courtesy line — a fact, never a gate.
+    {
+        chk.expect(host_closing_notice(1) ==
+                       "1 other player is connected - closing now will disconnect them.",
+                   "host_closing_notice() singularizes for exactly one other player");
+        chk.expect(host_closing_notice(3) ==
+                       "3 other players are connected - closing now will disconnect them.",
+                   "host_closing_notice() pluralizes for more than one");
+    }
+    std::printf("RFC-024 leader failure & session recovery: connected_player_count() and the pure "
+               "liveness trackers check out\n\n");
+
     world.stop();
 
     // RFC-016 §6.4, direct: ChunkActor::apply_recovered_overlay() — the exact call

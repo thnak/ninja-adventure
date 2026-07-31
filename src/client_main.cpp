@@ -806,6 +806,16 @@ int main(int argc, char** argv) {
         }
     }
 
+    // RFC-024 §3.5: a fact-stating courtesy line, never a blocking confirmation — printed, not
+    // gated on. Only ever fires once a real second slot binds (no networked second client exists
+    // today), same "written for P6, exercised by the same shutdown path either way" shape as
+    // RFC-014's Unbind/Rebind.
+    {
+        int others = world.connected_player_count();
+        if (slot >= 0) --others;
+        if (others > 0) std::printf("%s\n", mmo::host_closing_notice(others).c_str());
+    }
+
     // §6.3/§ Multiplayer: the "lúc thoát" half of "periodic + on-exit saves" — the mechanism
     // ARCHITECTURE.md §2 named and left unspecified. MUST run BEFORE stop(): checkpoint_progression()
     // reads each player through a blocking ask(), which would hang forever once the engine's

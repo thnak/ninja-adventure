@@ -416,6 +416,14 @@ struct Rebind {
     std::uint32_t account = 0;
 };
 
+// RFC-024 §3.5: the one new wire message that RFC specifies — a reliable, ordered broadcast the
+// leader sends BEFORE tearing down on a clean quit, so a connected client can skip
+// `kClientLeaderTimeoutTicks`'s wait and show "The host closed the world" instead of waiting out a
+// timeout for a reason it could have been told immediately. Same "data-level mechanism a future
+// detector would send" shape as `Unbind` above — no client-facing network layer exists yet
+// (P6/RFC-015's territory) to actually carry this across a socket.
+struct WorldClosing {};
+
 // RFC-013 §6.2: caches a MapSession's return coordinates on the dying player's own actor, mirroring
 // SetRespawn exactly. Sent once by whichever call already lands a Teleport onto a freshly-joined-or-
 // created instanced MapSession (World::use_portal()), so death-time ejection (handle(HurtPlayer)) is

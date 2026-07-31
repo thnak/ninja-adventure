@@ -38,6 +38,7 @@
 #include "world/chunk_actor.hpp"
 #include "world/flow_field.hpp"
 #include "world/instance_manager.hpp"
+#include "world/liveness.hpp"
 #include "world/map_director.hpp"
 #include "world/map_system.hpp"
 #include "world/persistence.hpp"
@@ -373,6 +374,22 @@ public:
 
     [[nodiscard]] std::uint64_t key_of(int slot) const noexcept { return player_key(slot); }
     [[nodiscard]] AccountId account_of(int slot) const noexcept { return bound_[slot]; }
+
+    // RFC-024 §3.5: input to the host-side courtesy notice ("N other players are connected —
+    // closing now will disconnect them"). Counts every slot bound since this process started,
+    // including the caller's own (`client_main.cpp` subtracts its own slot) — NOT "currently online"
+    // in any stronger sense: `disconnect_player()` is data-level only (RFC-014's own scoping,
+    // `disconnect_player`'s comment above) and never frees `bound_`, so an account that disconnected
+    // and never reconnected still counts here. That is the one real limitation this number carries;
+    // building true online/offline presence tracking is a separate, unrequested feature, not this
+    // RFC's job.
+    [[nodiscard]] int connected_player_count() const noexcept {
+        int n = 0;
+        for (int slot = 0; slot < kMaxPlayers; ++slot) {
+            if (bound_[slot] != kNoAccount) ++n;
+        }
+        return n;
+    }
 
     // One simulation step. The caller owns the pacing — a fixed-step loop in the headless runner, a
     // frame-rate-independent accumulator in the client.
