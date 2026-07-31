@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "entity.rock_spike",
+  "notes": "Mirrors the shipped kRockSpike row (Ground collision, arm 8, life 200, cracked scar on death) — RFC-008 Worked example 2.",
+  "material": "stone",
+  "scale": "small",
+  "hp": 30,
+  "arm_ticks": 8,
+  "lifetime_ticks": 200,
+  "collision": "ground",
+  "team": "caster",
+  "destroyable": true,
+  "tags": ["rock", "obstacle", "control_source"],
+  "aura": {
+    "channel": "earth",
+    "radius": 600,
+    "gain": 6,
+    "period": 5,
+    "team_mask": "enemies"
+  },
+  "render": {"fx": "fx.rock_spike_idle", "anchor": "ground"},
+  "on_death": {"fx": "fx.rock_break", "sound": "snd.rock_break", "scar": "crack"},
+  "on_expire": {"fx": "fx.rock_crumble", "scar": "crack"}
+}

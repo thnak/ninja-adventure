@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "id": "status.cold",
+  "notes": "Ice school's ladder. RFC-002 stage names: Chilled -> Slow -> Frozen.",
+  "kind": "channel",
+  "channel": "cold",
+  "decay_per_s": 6,
+  "stage_ticks": [80, 50, 25],
+  "tint": [140, 190, 255, 120]
+}

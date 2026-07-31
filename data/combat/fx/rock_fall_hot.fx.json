@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "id": "fx.rock_fall_hot",
+  "notes": "Zero new art: the pack's 14-frame Rock strip, hot tint (RFC-008 Worked example 1).",
+  "sheet": "ninja/FX/Elemental/Rock/SpriteSheet.png",
+  "frames": 14,
+  "ticks_per_frame": 1,
+  "anchor": "center",
+  "tint": [255, 110, 70, 255],
+  "sound": "snd.meteor_whoosh"
+}

@@ -19,6 +19,8 @@
 #include <sstream>
 #include <string>
 
+#include "world/combat_ids.hpp"
+#include "world/combat_pack.hpp"
 #include "world/gate_sidecar.hpp"
 #include "world/map_system.hpp"
 #include "world/replication.hpp"
@@ -3012,6 +3014,65 @@ int main(int argc, char** argv) {
     }
     std::printf("RFC-024 leader failure & session recovery: connected_player_count() and the pure "
                "liveness trackers check out\n\n");
+
+    // RFC-008: load the real generated combat pack (tools/build_combat_pack.py's output) and
+    // verify it end-to-end - hash check, JSON parse, typed skill/entity lookups by u16 id. Not a
+    // mock: this is the exact `assets/_gen/combat_pack.json` the packer wrote from
+    // `data/combat/**.json`.
+    {
+        std::shared_ptr<const CombatPack> pack;
+        for (const char* dir : {"assets/_gen", "../assets/_gen", "../../assets/_gen"}) {
+            pack = CombatPack::load(dir);
+            if (pack) break;
+        }
+        chk.expect(pack != nullptr, "CombatPack::load() finds and hash-verifies the generated pack");
+        if (pack) {
+            chk.expect(pack->struct_hash() == kCombatPackStructHash &&
+                           pack->full_hash() == kCombatPackFullHash,
+                       "the loaded pack's hashes match combat_ids.hpp's generated constants");
+            chk.expect(pack->id_of("skill.meteor") == combat_ids::kSkillMeteor &&
+                           pack->id_of("skill.spike") == combat_ids::kSkillSpike,
+                       "id_of() agrees with the packer's own id assignment");
+
+            const SkillDoc* meteor = pack->skill_by_id(combat_ids::kSkillMeteor);
+            chk.expect(meteor != nullptr && meteor->name == "Meteor" && meteor->element == "rock",
+                       "skill_by_id() returns Meteor's real authored fields");
+            if (meteor != nullptr) {
+                chk.expect(meteor->player_castable && meteor->cost_vital == "mana" &&
+                               meteor->cost_amount == 35 && meteor->cooldown_ticks == 200,
+                           "Meteor's player-cast fields round-trip through the pack");
+                chk.expect(meteor->payload_damage == 120 && meteor->payload_crush == 180 &&
+                               meteor->payload_impulse == 220 && meteor->payload_explosion == 200 &&
+                               meteor->payload_heat == 40,
+                           "Meteor's impact payload matches RFC-003 §10's canonical numbers");
+            }
+
+            const SkillDoc* spike = pack->skill_by_id(combat_ids::kSkillSpike);
+            chk.expect(spike != nullptr && spike->name == "Spike" && spike->payload_pierce == 100 &&
+                           spike->payload_crush == 60,
+                       "skill_by_id() returns Spike's real authored fields");
+
+            const EntityDoc* meteor_body = pack->entity_by_id(combat_ids::kEntityMeteorBody);
+            chk.expect(meteor_body != nullptr && meteor_body->hp == 40 &&
+                           meteor_body->collision == "none" && meteor_body->destroyable,
+                       "entity_by_id() returns meteor_body's real authored fields");
+
+            const EntityDoc* rock_spike = pack->entity_by_id(combat_ids::kEntityRockSpike);
+            chk.expect(rock_spike != nullptr && rock_spike->hp == 30 &&
+                           rock_spike->collision == "ground" && rock_spike->material == "stone",
+                       "entity_by_id() returns rock_spike's real authored fields");
+
+            chk.expect(pack->skill_by_id(0) == nullptr && pack->entity_by_id(0) == nullptr,
+                       "id 0 is reserved (V10) and never resolves to a document");
+
+            const JsonValue* wet = pack->find("status", "status.wet");
+            chk.expect(wet != nullptr && wet->get_string("kind") == "coating" &&
+                           wet->get_int("default_ticks") == 80,
+                       "find() reaches the generic (untyped) status domain too");
+        }
+    }
+    std::printf("RFC-008 data-driven skill definition: the generated combat pack loads, "
+               "hash-verifies, and resolves real skill/entity documents by id\n\n");
 
     world.stop();
 

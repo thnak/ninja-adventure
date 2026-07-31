@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "fx.rock_spike_rise",
+  "notes": "The pack's dedicated RockSpike strip, untinted (RFC-008 Worked example 2 — frame count illustrative, verified by the packer's own V14 grid check once assets/_src exists).",
+  "sheet": "ninja/FX/Elemental/RockSpike/SpriteSheet.png",
+  "frames": 9,
+  "ticks_per_frame": 1,
+  "anchor": "ground"
+}

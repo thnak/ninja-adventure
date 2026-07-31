@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "id": "fx.telegraph_ring_rock",
+  "notes": "Illustrative sheet path/frame count, pending an assets/_src audit pass (RFC-008 §2's own caveat on worked examples not yet cross-checked against the fetched CC0 pack).",
+  "sheet": "ninja/FX/UI/TelegraphRing/SpriteSheet.png",
+  "frames": 4,
+  "ticks_per_frame": 2,
+  "anchor": "ground",
+  "tint": [220, 90, 60, 160]
+}

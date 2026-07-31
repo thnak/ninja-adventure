@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "id": "fx.rock_blast",
+  "notes": "Illustrative sheet path, pending an assets/_src audit pass.",
+  "sheet": "ninja/FX/Elemental/Explosion/SpriteSheet.png",
+  "frames": 8,
+  "ticks_per_frame": 1,
+  "anchor": "center",
+  "tint": [255, 140, 60, 255]
+}

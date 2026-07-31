@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "id": "status.heat",
+  "notes": "Fire school's ladder. RFC-002 stage names: Singed -> Burning -> Ablaze.",
+  "kind": "channel",
+  "channel": "heat",
+  "decay_per_s": 8,
+  "stage_ticks": [60, 50, 25],
+  "tint": [255, 120, 60, 120]
+}

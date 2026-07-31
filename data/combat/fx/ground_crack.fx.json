@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "fx.ground_crack",
+  "notes": "Spike's telegraph — pure FX, no monster pose exists to reference (RFC-008 Worked example 2). Illustrative sheet path, pending an assets/_src audit pass.",
+  "sheet": "ninja/FX/Elemental/GroundCrack/SpriteSheet.png",
+  "frames": 3,
+  "ticks_per_frame": 2,
+  "anchor": "ground"
+}

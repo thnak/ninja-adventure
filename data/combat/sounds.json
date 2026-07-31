@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "sounds": {
+    "snd.meteor_whoosh": {"files": ["ninja/Audio/Sounds/Elemental/Whoosh1.wav"], "gain_pm": 900},
+    "snd.cast_heavy": {"files": ["ninja/Audio/Sounds/Magic/CastHeavy.wav"], "gain_pm": 1000},
+    "snd.explosion_heavy": {"files": ["ninja/Audio/Sounds/Elemental/Explosion2.wav",
+                                       "ninja/Audio/Sounds/Elemental/Explosion3.wav"], "gain_pm": 900},
+    "snd.cast": {"files": ["ninja/Audio/Sounds/Magic/Cast1.wav"], "gain_pm": 1000},
+    "snd.rock_break": {"files": ["ninja/Audio/Sounds/Hit & Impact/Hit3.wav"], "gain_pm": 1000}
+  }
+}

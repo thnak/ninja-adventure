@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "fx.rock_break",
+  "notes": "The spike's on_death shatter, distinct from fx.rock_crumble's on_expire crumble (RFC-008 Worked example 2). Illustrative sheet path, pending an assets/_src audit pass.",
+  "sheet": "ninja/FX/Elemental/Rock/Break/SpriteSheet.png",
+  "frames": 5,
+  "ticks_per_frame": 1,
+  "anchor": "ground"
+}

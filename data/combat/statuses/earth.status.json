@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "id": "status.earth",
+  "notes": "Rock school's ladder. RFC-002 stage names: Encumbered -> Mired -> Root (RECONCILIATION.md ruling 1: Root is the Earth terminal; there is no separate Muddy coating in v1).",
+  "kind": "channel",
+  "channel": "earth",
+  "decay_per_s": 7,
+  "stage_ticks": [60, 50, 20],
+  "tint": [150, 110, 70, 120]
+}

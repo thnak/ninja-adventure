@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "id": "skill.spike",
+  "name": "Spike",
+  "notes": "Ground spike: telegraphed crack, then a rooting destroyable pillar. Monster-usable: telegraph is pure FX (walk-only sheets). RFC-008 Worked example 2 — Root is representable as the Earth terminal (RECONCILIATION.md ruling 1), so this authors earth build-up directly.",
+  "element": "rock",
+  "icon": "icon.book_rock",
+  "tags": ["magic", "control", "single_tile"],
+  "player": {
+    "pose": "ability1",
+    "cost": {"vital": "mana", "amount": 30},
+    "cooldown_ticks": 90,
+    "unlock": {"school": "magic", "level": 2}
+  },
+  "phases": {
+    "cast": {
+      "ticks": 5,
+      "telegraph": {
+        "fx": "fx.ground_crack",
+        "at": "target",
+        "shape": {"kind": "tile"}
+      },
+      "interruptible": true,
+      "sound": "snd.cast"
+    },
+    "release": {"kind": "spawn_entity", "count": 1, "entity": "entity.rock_spike"},
+    "impact": {
+      "payload": {"pierce": 100, "crush": 60},
+      "shape": {"kind": "tile"},
+      "statuses": [{"channel": "earth", "amount": 600}, {"channel": "stagger", "amount": 40}],
+      "fx": "fx.rock_spike_rise",
+      "sound": "snd.rock_break"
+    }
+  }
+}

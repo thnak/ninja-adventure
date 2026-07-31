@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "id": "status.stagger",
+  "notes": "Non-elemental build-up every heavy physical hit contributes to. RFC-002 stage names: Braced -> Staggered -> Knockdown.",
+  "kind": "channel",
+  "channel": "stagger",
+  "decay_per_s": 14,
+  "stage_ticks": [40, 30, 15],
+  "tint": [230, 230, 230, 100]
+}

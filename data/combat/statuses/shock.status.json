@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "id": "status.shock",
+  "notes": "Thunder school's ladder. RFC-002 stage names: Sparked -> Shocked -> Paralyze.",
+  "kind": "channel",
+  "channel": "shock",
+  "decay_per_s": 10,
+  "stage_ticks": [60, 30, 12],
+  "tint": [255, 230, 90, 120]
+}

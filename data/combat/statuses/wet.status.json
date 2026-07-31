@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "status.wet",
+  "notes": "The one v1 coating. No build-up meter (RFC-002 §5/X2-X6): binary presence + a tick countdown.",
+  "kind": "coating",
+  "coating": "wet",
+  "default_ticks": 80,
+  "tint": [150, 190, 255, 120]
+}

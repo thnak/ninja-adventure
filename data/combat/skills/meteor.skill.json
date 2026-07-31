@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "id": "skill.meteor",
+  "name": "Meteor",
+  "notes": "Rock siege spell. Red-tinted Rock strip + sky drop = Meteor (umbrella §14). RFC-008 Worked example 1 — impact payload matches RFC-003 §10's canonical Meteor verbatim.",
+  "element": "rock",
+  "icon": "icon.book_rock",
+  "tags": ["magic", "aoe", "siege"],
+  "player": {
+    "pose": "ability2",
+    "cost": {"vital": "mana", "amount": 35},
+    "cooldown_ticks": 200,
+    "unlock": {"school": "magic", "level": 6}
+  },
+  "phases": {
+    "cast": {
+      "ticks": 8,
+      "telegraph": {
+        "fx": "fx.telegraph_ring_rock",
+        "at": "target",
+        "shape": {"kind": "circle", "radius_mt": 1800}
+      },
+      "interruptible": true,
+      "sound": "snd.cast_heavy"
+    },
+    "release": {"kind": "from_sky", "count": 1},
+    "travel": {
+      "ticks": 6,
+      "fx": "fx.rock_fall_hot",
+      "body": {"entity": "entity.meteor_body"}
+    },
+    "impact": {
+      "payload": {"damage": 120, "crush": 180, "impulse": 220, "explosion": 200, "heat": 40},
+      "shape": {"kind": "circle", "radius_mt": 1800},
+      "statuses": [{"channel": "earth", "amount": 600}],
+      "fx": "fx.rock_blast",
+      "sound": "snd.explosion_heavy",
+      "terrain": {"effect": "rubble", "radius_mt": 1200}
+    }
+  }
+}

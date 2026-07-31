@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "id": "fx.rock_spike_idle",
+  "notes": "Idle loop for a standing rock_spike entity. Illustrative sheet path, pending an assets/_src audit pass.",
+  "sheet": "ninja/FX/Elemental/RockSpikeIdle/SpriteSheet.png",
+  "frames": 2,
+  "ticks_per_frame": 5,
+  "anchor": "ground",
+  "loop": true
+}

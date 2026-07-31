@@ -1,0 +1,39 @@
+{
+  "assigned": {
+    "entity.meteor_body": 1,
+    "entity.rock_spike": 2,
+    "fx.ground_crack": 1,
+    "fx.rock_blast": 2,
+    "fx.rock_break": 3,
+    "fx.rock_crumble": 4,
+    "fx.rock_fall_hot": 5,
+    "fx.rock_spike_idle": 6,
+    "fx.rock_spike_rise": 7,
+    "fx.telegraph_ring_rock": 8,
+    "icon.book_rock": 1,
+    "skill.meteor": 1,
+    "skill.spike": 2,
+    "snd.cast": 1,
+    "snd.cast_heavy": 2,
+    "snd.explosion_heavy": 3,
+    "snd.meteor_whoosh": 4,
+    "snd.rock_break": 5,
+    "status.cold": 1,
+    "status.earth": 2,
+    "status.heat": 3,
+    "status.shock": 4,
+    "status.stagger": 5,
+    "status.wet": 6
+  },
+  "next": {
+    "boss": 1,
+    "entity": 3,
+    "fx": 9,
+    "icon": 2,
+    "skill": 3,
+    "snd": 6,
+    "status": 7
+  },
+  "retired": {},
+  "schema": 1
+}

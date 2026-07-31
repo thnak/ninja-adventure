@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "fx.rock_crumble",
+  "notes": "Shared on_death/on_expire crumble for both worked-example entities. Illustrative sheet path, pending an assets/_src audit pass.",
+  "sheet": "ninja/FX/Elemental/Rock/Crumble/SpriteSheet.png",
+  "frames": 6,
+  "ticks_per_frame": 1,
+  "anchor": "ground"
+}
