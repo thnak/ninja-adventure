@@ -21,7 +21,9 @@
 #include <vector>
 
 #include "world/abilities.hpp"
+#include "world/battlefield.hpp"
 #include "world/combat_entity.hpp"
+#include "world/telegraph.hpp"
 #include "world/tiles.hpp"
 
 namespace mmo {
@@ -112,6 +114,9 @@ struct ChunkView {
     std::vector<Scar> scars;
     std::vector<Crop> crops;
     std::vector<Building> buildings;
+    std::vector<TilePatch> patches;  // RFC-010 §4.2 — capped at kMaxPatches (48) by the owning chunk
+    std::vector<FieldState> fields;  // RFC-010 §4.3 — capped at kMaxFields (2) by the owning chunk
+    std::vector<Telegraph> telegraphs;  // RFC-006 §2 — capped at kMaxTelegraphs (8) by the owning chunk
 };
 
 using ChunkViewPtr = std::shared_ptr<const ChunkView>;

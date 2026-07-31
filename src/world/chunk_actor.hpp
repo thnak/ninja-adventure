@@ -35,12 +35,17 @@
 #include "quark/core/actor_ref.hpp"
 #include "quark/core/placement_policies.hpp"
 
+#include "world/battlefield.hpp"
 #include "world/boss.hpp"
+#include "world/boss_kit.hpp"
 #include "world/combat_entity.hpp"
 #include "world/flow_field.hpp"
 #include "world/physics.hpp"
 #include "world/player_actor.hpp"
 #include "world/protocol.hpp"
+#include "world/rl_action.hpp"
+#include "world/rl_obs.hpp"
+#include "world/telegraph.hpp"
 #include "world/snapshot.hpp"
 #include "world/tiles.hpp"
 
@@ -66,7 +71,38 @@ struct BossState {
     bool winding_charge = false;      // the current wind-up will begin a charge, not land a blow
     bool dash_hit = false;            // the current dash has already connected (one hit per dash)
     float charge_dx = 0.0f, charge_dy = 0.0f;  // committed dash direction (unit)
+    std::uint32_t telegraph_id = 0;   // RFC-006: the live Telegraph this boss committed, 0 = none
 };
+
+// RFC-002/009: the uniform Power anchor RFC-009 §4.5 calibrates for Ice (`kIceBoltPower = 600`)
+// applied to all four elements alike — P2's own status-duration table was already symmetric across
+// schools, so this preserves that symmetry rather than inventing per-element splits.
+inline constexpr std::uint16_t kSpellPower = 600;
+
+// RFC-003 §2.1/§10: authored impulse for the two hit shapes that already carry an explicit
+// "this is a heavy/authored blow" flag today (physics.hpp's header note: no multi-channel payload
+// exists yet to author this per skill in data, so it is a compile-time constant here, mirroring
+// `kSpellPower`'s own posture). 220 is the RFC's own §10 worked-example value.
+//
+// Namespace scope (not a ChunkActor member) so RFC-017's `--sweep` mode (sim_main.cpp) can read the
+// exact same production constant rather than re-declaring the number — a duplicated literal here
+// would be exactly the kind of second source of truth RFC-017 §1 forbids the sweep from creating.
+inline constexpr std::uint16_t kHeavyMeleeImpulse = 220;
+inline constexpr std::uint16_t kCrushBlowImpulse = 260;
+
+// Which build-up channel a cast element feeds. Namespace scope alongside the constants above, for
+// the same RFC-017 reason: `--sweep` needs the exact production mapping, not a re-typed switch.
+[[nodiscard]] inline constexpr Channel channel_of(Element e) noexcept {
+    switch (e) {
+        case Element::kFire: return Channel::kHeat;
+        case Element::kIce: return Channel::kCold;
+        case Element::kEarth: return Channel::kEarth;
+        case Element::kShock: return Channel::kShock;
+        case Element::kNone:
+        case Element::kCount: break;
+    }
+    return Channel::kNone;
+}
 
 struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<1>,
                                  quark::DrainBudget<64>, quark::Placement<quark::HashById>> {
@@ -115,7 +151,8 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         expire_beacons();
 
         const bool empty = creatures_.empty() && crops_.empty() && buildings_.empty() &&
-                           shots_.empty() && effects_.empty() && entities_.empty() && scars_.empty();
+                           shots_.empty() && effects_.empty() && entities_.empty() && scars_.empty() &&
+                           patches_.empty() && fields_.empty() && telegraphs_.empty();
         // A chunk that owns a boss never takes the idle fast path: even while its boss is DEAD (its
         // body gone from creatures_) the respawn timer has to tick down, and that is step_bosses'.
         if (empty && bosses_.empty()) {
@@ -128,9 +165,12 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         step_status();
         step_entities();  // before creatures: an entity's aura/aggro-suppress changes what they do
         step_scars();
+        step_fields();       // RFC-010 §4.4: before creatures/projectiles — a field changes what they do THIS tick
         step_creatures(rng);
         step_projectiles();
         step_effects();
+        step_patches();      // RFC-010 §4.4: decay chains + fire spread, after effects, before reap
+        step_telegraphs();   // RFC-006 §1.4: age out FIZZLE records; windup-tied ones tick in step_creatures
         reap_dead();
         step_bosses();  // after reap: a boss killed this tick is already gone, so its slot respawns
 
@@ -239,7 +279,19 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
 
     void handle(const CastSpell& s) noexcept {
         const Channel ch = channel_of(s.element);
-        if (owns_point(s.x, s.y)) add_effect(s.x, s.y, effect_of(s.element));
+        if (owns_point(s.x, s.y)) {
+            add_effect(s.x, s.y, effect_of(s.element));
+            // RFC-010 §4.2's trigger table: Fire/Ice impacts write a tile patch at the spell's own
+            // target tile (once per cast, not once per creature it happens to hit); Rock (kEarth)
+            // impacts stamp/escalate a scar directly instead — the table's own "no patch" ruling.
+            const auto tx = static_cast<int>(s.x);
+            const auto ty = static_cast<int>(s.y);
+            if (s.element == Element::kFire || s.element == Element::kIce) {
+                apply_surface_impact(tx, ty, s.element);
+            } else if (s.element == Element::kEarth) {
+                stamp_scar(tx, ty, ScarKind::kCracked);
+            }
+        }
         for (Creature& c : creatures_) {
             const float dx = c.x - s.x;
             const float dy = c.y - s.y;
@@ -337,7 +389,18 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
 
         // A ring around the caster (WhirlCleave, Nova). The flash goes at the caster whether or not
         // it connects — a whiff is information, exactly as a plain swing's arc is.
-        if (owns_point(s.x, s.y)) add_effect(s.x, s.y, s.fx);
+        if (owns_point(s.x, s.y)) {
+            add_effect(s.x, s.y, s.fx);
+            // RFC-010 §4.2: same per-cast (not per-creature) surface/scar impact CastSpell applies —
+            // Nova is the only ring ability that ever carries a real element (WhirlCleave's is kNone).
+            const auto tx = static_cast<int>(s.x);
+            const auto ty = static_cast<int>(s.y);
+            if (s.element == Element::kFire || s.element == Element::kIce) {
+                apply_surface_impact(tx, ty, s.element);
+            } else if (s.element == Element::kEarth) {
+                stamp_scar(tx, ty, ScarKind::kCracked);
+            }
+        }
         const Channel ch = channel_of(s.element);
         for (Creature& c : creatures_) {
             if (c.hp <= 0) continue;
@@ -542,6 +605,12 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         s.crops = static_cast<std::uint32_t>(crops_.size());
         s.buildings = static_cast<std::uint32_t>(buildings_.size());
         s.tilled = tilled_;
+        s.patches = static_cast<std::uint32_t>(patches_.size());
+        s.fields = static_cast<std::uint32_t>(fields_.size());
+        s.telegraphs = static_cast<std::uint32_t>(telegraphs_.size());
+        for (const TilePatch& p : patches_) {
+            if (p.s == Surface::kBurning) ++s.burning;
+        }
         for (const Creature& c : creatures_) {
             if (c.disposition == Disposition::kHostile || c.anger_ticks > 0) ++s.hostile;
             // "Afflicted" is any status at all — a ladder primary OR a coexisting coating (Wet no
@@ -737,29 +806,8 @@ private:
     // --- elemental status (RFC-002/009) -------------------------------------------------------------
     // Every status_gain call below computes its `mult_pm` from the creature's own material/tier via
     // `mult_pm_of` (combat_math.hpp) — RFC-009's real gain formula, no longer an identity stand-in.
-    // The uniform Power anchor RFC-009 §4.5 calibrates for Ice (`kIceBoltPower = 600`) applied to
-    // all four elements alike — P2's own status-duration table was already symmetric across
-    // schools, so this preserves that symmetry rather than inventing per-element splits.
-    static constexpr std::uint16_t kSpellPower = 600;
-
-    // RFC-003 §2.1/§10: authored impulse for the two hit shapes that already carry an explicit
-    // "this is a heavy/authored blow" flag today (physics.hpp's header note: no multi-channel
-    // payload exists yet to author this per skill in data, so it is a compile-time constant here,
-    // mirroring `kSpellPower`'s own posture). 220 is the RFC's own §10 worked-example value.
-    static constexpr std::uint16_t kHeavyMeleeImpulse = 220;
-    static constexpr std::uint16_t kCrushBlowImpulse = 260;
-
-    [[nodiscard]] static constexpr Channel channel_of(Element e) noexcept {
-        switch (e) {
-            case Element::kFire: return Channel::kHeat;
-            case Element::kIce: return Channel::kCold;
-            case Element::kEarth: return Channel::kEarth;
-            case Element::kShock: return Channel::kShock;
-            case Element::kNone:
-            case Element::kCount: break;
-        }
-        return Channel::kNone;
-    }
+    // `kSpellPower`/`kHeavyMeleeImpulse`/`kCrushBlowImpulse`/`channel_of` moved to namespace scope
+    // above the class (RFC-017): still this file's, just reachable from outside a ChunkActor too.
 
     // RFC-009 §4.5's derived-Stagger rule, simplified to a single-channel proxy: this engine has one
     // flat `damage` scalar per hit, not RFC-003's unbuilt 7-channel taxonomy (Crush/Explosion/
@@ -1076,6 +1124,227 @@ private:
         }
     }
 
+    // --- battlefield: tile patches (RFC-010 §4.2) ---------------------------------------------------
+
+    // Heat/tick a live kBurning patch feeds an occupant — a chosen tunable (RFC-010's own text leaves
+    // the rate to RFC-009), picked to match kFirePatch's existing aura_gain=350 per 10-tick pulse
+    // (combat_entity.hpp) so standing in ambient fire and standing on a combat-ignited patch burn at
+    // comparable rates.
+    static constexpr std::uint16_t kBurnPatchPower = 35;
+
+    [[nodiscard]] bool surface_at(int tx, int ty, Surface& out) const noexcept {
+        for (const TilePatch& p : patches_) {
+            if (p.tx == tx && p.ty == ty) {
+                out = p.s;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Insert/replace at a map-global tile this chunk owns. §4.2: one patch per tile — a new patch on
+    // a patched tile REPLACES it; when the array is full, the record with the smallest `end_ms` is
+    // overwritten, or the incoming patch is dropped if IT would be the soonest to expire.
+    void write_patch(int tx, int ty, Surface s, std::int64_t end_ms) noexcept {
+        for (TilePatch& p : patches_) {
+            if (p.tx == tx && p.ty == ty) {
+                p.s = s;
+                p.end_ms = end_ms;
+                return;
+            }
+        }
+        const TilePatch fresh{static_cast<std::uint16_t>(tx), static_cast<std::uint16_t>(ty), s, 0, end_ms};
+        if (patches_.size() >= kMaxPatches) {
+            std::size_t oldest = 0;
+            for (std::size_t i = 1; i < patches_.size(); ++i) {
+                if (patch_expires_before(patches_[i], patches_[oldest])) oldest = i;
+            }
+            if (patch_expires_before(patches_[oldest], fresh)) patches_[oldest] = fresh;
+            return;
+        }
+        patches_.push_back(fresh);
+    }
+
+    void remove_patch(int tx, int ty) noexcept {
+        for (std::size_t i = 0; i < patches_.size(); ++i) {
+            if (patches_[i].tx == tx && patches_[i].ty == ty) {
+                patches_.erase(patches_.begin() + static_cast<std::ptrdiff_t>(i));
+                return;
+            }
+        }
+    }
+
+    // Fire/Ice spell impact at the spell's own target tile (§4.2's trigger table). Rock (kEarth)
+    // impacts stamp a scar directly at their own call site instead of going through this table — the
+    // Rock row is "no patch" by the RFC's own text; Thunder never produces a patch either.
+    void apply_surface_impact(int tx, int ty, Element element) noexcept {
+        Surface existing{};
+        const bool has = surface_at(tx, ty, existing);
+        if (element == Element::kFire) {
+            if (!has && !flammable_of(terrain_at(tx, ty))) return;
+            const SurfaceOutcome o = fire_impact(has, existing);
+            if (o.event == SurfaceEvent::kRemoved) {
+                remove_patch(tx, ty);
+                return;
+            }
+            write_patch(tx, ty, o.result, world_ms_ + dur_ms_of(o.result));
+        } else if (element == Element::kIce) {
+            const SurfaceOutcome o = ice_impact(has, existing);
+            if (o.event == SurfaceEvent::kRemoved) {
+                remove_patch(tx, ty);
+                return;
+            }
+            write_patch(tx, ty, o.result, world_ms_ + dur_ms_of(o.result));
+        }
+    }
+
+    void step_patches() noexcept {
+        // Decay chain: burnout stamps an RFC-004 kScorched scar (which heals on ITS OWN clock); the
+        // other two surfaces simply revert to baseline. `end_ms` is an absolute deadline, never a
+        // countdown (Invariant L-2) — correct under any future tick-rate LOD without rework.
+        for (std::size_t i = patches_.size(); i-- > 0;) {
+            if (world_ms_ < patches_[i].end_ms) continue;
+            if (patches_[i].s == Surface::kBurning) {
+                stamp_scar(patches_[i].tx, patches_[i].ty, ScarKind::kScorched);
+            }
+            patches_.erase(patches_.begin() + static_cast<std::ptrdiff_t>(i));
+        }
+
+        // Occupant Burn build-up: every live kBurning patch feeds Heat to whatever stands on its tile.
+        for (const TilePatch& p : patches_) {
+            if (p.s != Surface::kBurning) continue;
+            for (Creature& c : creatures_) {
+                if (c.hp <= 0) continue;
+                if (static_cast<int>(c.x) != p.tx || static_cast<int>(c.y) != p.ty) continue;
+                status_gain(c.status, c.gauges, BuildupPacket{Channel::kHeat, kBurnPatchPower, 0, 0},
+                           mult_pm_of(c.material, c.tier, Channel::kHeat), tick_);
+            }
+        }
+
+        // Fire spread (§4.2), array-layout-independent per §5's D3 requirement: candidates are
+        // gathered from ALL kBurning patches, merged onto their canonical (tx,ty) keeping the
+        // strongest inherited window, sorted lexicographic, then rolled in THAT order on a stream
+        // salted separately from step_creatures'/step_bosses' own per-tick Rng instances (§5: "each
+        // D3 consumer constructs its own Rng instance").
+        std::size_t burning_count = 0;
+        for (const TilePatch& p : patches_) {
+            if (p.s == Surface::kBurning) ++burning_count;
+        }
+        if (tick_ % kSpreadPeriod == 0 && burning_count > 0 && burning_count < kMaxBurning) {
+            struct Candidate {
+                std::uint16_t tx, ty;
+                std::int64_t inherit_end_ms;
+            };
+            std::vector<Candidate> cand;
+            static constexpr int kDx[4] = {1, -1, 0, 0};
+            static constexpr int kDy[4] = {0, 0, 1, -1};
+            for (const TilePatch& p : patches_) {
+                if (p.s != Surface::kBurning) continue;
+                for (int d = 0; d < 4; ++d) {
+                    const int nx = static_cast<int>(p.tx) + kDx[d];
+                    const int ny = static_cast<int>(p.ty) + kDy[d];
+                    if (nx < 0 || ny < 0 || nx >= kMapTiles || ny >= kMapTiles) continue;
+                    if (!owns(static_cast<std::uint16_t>(nx), static_cast<std::uint16_t>(ny))) continue;
+                    Surface unused{};
+                    if (surface_at(nx, ny, unused)) continue;  // already patched
+                    // Also the closest thing to a fireproof-claim/village-wall check this engine has:
+                    // no ownership or wall-ring lookup exists anywhere in the codebase yet (confirmed
+                    // by survey), so §4.6 rule 3's guarantee is only PARTIALLY honored — a village's
+                    // rampart tiles are `Terrain::kBuilding`, hence never flammable, but an unwalled
+                    // claim interior on grass is not fireproofed this pass. Named divergence, not an
+                    // oversight: building the claim system is out of this RFC's scope entirely.
+                    if (!flammable_of(terrain_at(nx, ny))) continue;
+                    cand.push_back({static_cast<std::uint16_t>(nx), static_cast<std::uint16_t>(ny), p.end_ms});
+                }
+            }
+            std::sort(cand.begin(), cand.end(), [](const Candidate& a, const Candidate& b) {
+                if (a.tx != b.tx) return a.tx < b.tx;
+                return a.ty < b.ty;
+            });
+            std::vector<Candidate> merged;
+            for (const Candidate& c : cand) {
+                if (!merged.empty() && merged.back().tx == c.tx && merged.back().ty == c.ty) {
+                    merged.back().inherit_end_ms = std::max(merged.back().inherit_end_ms, c.inherit_end_ms);
+                } else {
+                    merged.push_back(c);
+                }
+            }
+            Rng spread_rng((chunk_key(coord) ^ 0x5EED'F17Eull) * 0x9E37'79B9'7F4A'7C15ull + tick_);
+            for (const Candidate& c : merged) {
+                if (burning_count >= kMaxBurning) break;
+                if (spread_rng.below(1000) >= kSpreadChancePm) continue;
+                if (c.inherit_end_ms <= world_ms_) continue;  // the igniter is itself about to expire
+                write_patch(c.tx, c.ty, Surface::kBurning, c.inherit_end_ms);
+                ++burning_count;
+            }
+        }
+    }
+
+    // --- battlefield: field states (RFC-010 §4.3) ---------------------------------------------------
+    // No in-game path creates a FieldState this pass — see battlefield.hpp's header note (RFC-005
+    // boss authoring and a StrongholdActor raid event, this RFC's only two creation authorities,
+    // neither built yet). step_fields/field_intensity_at are wired for real so strike()/
+    // step_projectiles already do the right thing the day a creator lands.
+
+    void step_fields() noexcept {
+        for (std::size_t i = fields_.size(); i-- > 0;) {
+            if (world_ms_ >= fields_[i].end_ms) {
+                fields_.erase(fields_.begin() + static_cast<std::ptrdiff_t>(i));
+            }
+        }
+    }
+
+    // §4.3 stacking: an actor inside several fields takes the single highest intensity.
+    [[nodiscard]] std::uint8_t field_intensity_at(float x, float y) const noexcept {
+        std::uint8_t best = 0;
+        for (const FieldState& f : fields_) {
+            const float dx = x - static_cast<float>(f.cx);
+            const float dy = y - static_cast<float>(f.cy);
+            if (dx * dx + dy * dy > static_cast<float>(f.radius) * static_cast<float>(f.radius)) continue;
+            best = highest_intensity(best, f.intensity);
+        }
+        return best;
+    }
+
+    // --- battlefield: telegraphs (RFC-006 §1.4/§2) --------------------------------------------------
+    // Only FIZZLE aging happens here: a windup-tied telegraph's `left` is decremented in lockstep with
+    // `c.windup` (step_boss_ai), never independently, so the two can never drift apart.
+
+    void step_telegraphs() noexcept {
+        for (std::size_t i = telegraphs_.size(); i-- > 0;) {
+            if ((telegraphs_[i].flags & kTelegraphFizzling) == 0) continue;
+            if (telegraphs_[i].left == 0 || --telegraphs_[i].left == 0) {
+                telegraphs_.erase(telegraphs_.begin() + static_cast<std::ptrdiff_t>(i));
+            }
+        }
+    }
+
+    [[nodiscard]] Telegraph* find_telegraph(std::uint32_t id) noexcept {
+        if (id == 0) return nullptr;
+        for (Telegraph& t : telegraphs_) {
+            if (t.id == id) return &t;
+        }
+        return nullptr;
+    }
+
+    // §2's cap/eviction rule. Returns the new record's id, or 0 if the commit is refused (a
+    // well-defined Hold no-op — the caller must not spend the ability's cooldown).
+    std::uint32_t push_telegraph(Telegraph t) noexcept {
+        t.id = next_telegraph_id_ + 1;
+        if (telegraphs_.size() >= kMaxTelegraphs) {
+            std::array<Telegraph, kMaxTelegraphs> live{};
+            std::copy_n(telegraphs_.begin(), kMaxTelegraphs, live.begin());
+            const int evict = telegraph_eviction_index(live, kMaxTelegraphs, t.tier);
+            if (evict < 0) return 0;  // refused: the newest commit is not strictly higher tier
+            telegraphs_[static_cast<std::size_t>(evict)] = t;
+            ++next_telegraph_id_;
+            return t.id;
+        }
+        telegraphs_.push_back(t);
+        ++next_telegraph_id_;
+        return t.id;
+    }
+
     // --- creatures ---------------------------------------------------------------------------------
     void step_creatures(Rng& rng) noexcept {
         const float dt = static_cast<float>(kTickMs) / 1000.0f;
@@ -1358,6 +1627,13 @@ private:
     // a normal creature: the scripted brain, the committed charge dash, the room clamp, the leash and
     // the respawn. All of it drives the SAME wind-up/strike machinery a creature uses (Creature::
     // windup for the telegraph, HurtPlayer for the blow), so a boss reads exactly like a big creature.
+    // RFC-005: every dojo boss in this pass is the one real kit (see boss_kit.hpp's header note on
+    // why a second kit/phase is not modeled yet). `step_boss_ai`/`spawn_boss`/`boss_commit`/
+    // `boss_resolve`/`boss_dash` read their numbers from here instead of `boss.hpp`'s scattered
+    // constants directly — this is the literal sense in which the shipped machinery is "generalized
+    // into data": the FSM below is kit-driven, even though only one kit exists to drive it.
+    static constexpr BossKitDef kSamuraiKit = samurai_red_kit();
+
     void step_bosses() noexcept {
         if (bosses_.empty()) return;
         Rng rng(chunk_key(coord) * 0xB055'0F17'11EEull + tick_);
@@ -1367,7 +1643,7 @@ private:
                 // Killed (reaped this tick, or a DoT took the last point): begin the respawn wait.
                 b.alive = false;
                 b.body = 0;
-                b.respawn_timer = kBossRespawnTicks;
+                b.respawn_timer = kSamuraiKit.respawn_ticks;
                 continue;
             }
             if (!b.alive) {
@@ -1390,9 +1666,9 @@ private:
         c.id = ++next_id_ | (static_cast<std::uint32_t>(chunk_key(coord)) << 12);
         c.x = static_cast<float>(b.spawn_tx) + 0.5f;
         c.y = static_cast<float>(b.spawn_ty) + 0.5f;
-        c.max_hp = kBossMaxHp;
-        c.hp = kBossMaxHp;
-        c.damage = kBossDamage;
+        c.max_hp = kSamuraiKit.base_hp;
+        c.hp = kSamuraiKit.base_hp;
+        c.damage = kSamuraiKit.abilities[0].damage;
         c.kind = CreatureKind::kBoss;
         c.disposition = Disposition::kHostile;
         const DefenderProfile def = defender_of(CreatureKind::kBoss);
@@ -1410,6 +1686,8 @@ private:
         b.charging = 0;
         b.winding_charge = false;
         b.dash_hit = false;
+        b.telegraph_id = 0;  // a fresh body owns no leftover telegraph (e.g. one orphaned by a mid-
+                              // windup death — reap_dead never resolves/erases it, this does)
     }
 
     [[nodiscard]] Creature* find_creature(std::uint32_t id) noexcept {
@@ -1425,22 +1703,34 @@ private:
         if (b.charge_cd > 0) --b.charge_cd;
         if (c.attack_cd > 0) --c.attack_cd;
 
-        // Stun cancels a committed wind-up or dash, exactly as it does for any creature (F2).
+        // Stun cancels a committed wind-up or dash, exactly as it does for any creature (F2). RFC-006
+        // T4: the telegraph does not simply vanish — it FIZZLEs (a 2-tick grey collapse, no impact
+        // FX), so the player can tell "I interrupted it" from "it fired and missed".
         if (c.status.primary == Channel::kStagger && c.status.stage == 3) {
+            if (c.windup > 0 || b.charging > 0) {
+                if (Telegraph* t = find_telegraph(b.telegraph_id)) {
+                    t->flags = static_cast<std::uint8_t>(t->flags | kTelegraphFizzling);
+                    t->left = kFizzleTicks;
+                }
+            }
             c.windup = 0;
             c.windup_target = 0;
             b.charging = 0;
             b.winding_charge = false;
+            b.telegraph_id = 0;
             c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
             return;
         }
 
-        // A committed wind-up: freeze and telegraph (Creature::windup drives F2's red pulse + smoke),
-        // and resolve the tick it reaches zero — an attack lands, a charge begins its dash.
+        // A committed wind-up: freeze and telegraph (Creature::windup drives F2's red pulse + smoke,
+        // and now the real RFC-006 Telegraph record ticks in lockstep), and resolve the tick it
+        // reaches zero — an attack lands, a charge begins its dash.
         if (c.windup > 0) {
             c.boss_pose = static_cast<std::uint8_t>(b.winding_charge ? BossPose::kCharge
                                                                      : BossPose::kAttack);
-            if (--c.windup == 0) boss_resolve(c, b);
+            --c.windup;
+            if (Telegraph* t = find_telegraph(b.telegraph_id)) t->left = c.windup;
+            if (c.windup == 0) boss_resolve(c, b);
             return;
         }
 
@@ -1459,13 +1749,13 @@ private:
             // Nobody in the room. Drift back to the post, and after the leash window reset to full —
             // fleeing through the door "resets the boss", so a player cannot chip it down across trips.
             c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
-            if (++b.no_target >= kBossLeashTicks) {
+            if (++b.no_target >= kSamuraiKit.leash_ticks) {
                 boss_reset(c, b);
             } else {
                 const float sx = static_cast<float>(b.spawn_tx) + 0.5f;
                 const float sy = static_cast<float>(b.spawn_ty) + 0.5f;
                 if (std::abs(sx - c.x) > 0.2f || std::abs(sy - c.y) > 0.2f) {
-                    boss_move(c, b, sx, sy, kBossApproachSpeed);
+                    boss_move(c, b, sx, sy, kSamuraiKit.approach_speed);
                     c.boss_pose = static_cast<std::uint8_t>(BossPose::kWalk);
                 }
             }
@@ -1482,41 +1772,362 @@ private:
         o.winding_up = c.windup > 0;
         const BossAction a = boss_policy(o);
 
-        switch (a.kind) {
-            case BossActionKind::kHold:
-                c.facing = facing_of(target->x - c.x, target->y - c.y);
+        // RFC-007: the RL observation is assembled every decision this pass makes, at the same
+        // cadence a real trainer would consume it — the result is currently unread (see
+        // rl_obs.hpp's header note: no trainer is vendored into this repo to read it), proving the
+        // encoder is live and crash-safe against real chunk state rather than merely compiling.
+        (void)build_boss_obs(c, b, target);
+
+        // Execute through the RFC-007 §3 action space, not the old 5-case switch — this IS the RL
+        // seam: `boss_policy` still emits the legacy 5-action `BossAction` (RFC-005's own decision to
+        // leave the gen-0 script untouched), translated here into the 15-id space a future network
+        // would emit directly. `execute_rl_action` is total — every one of the 15 ids is safe to pass
+        // it, even the 11 gen-0 never produces.
+        execute_rl_action(to_rl_action(a.kind), c, b, target);
+    }
+
+    // §3's total-function executor: every id in `RlActionId` is safe here, in every FSM state this
+    // is ever called from (idle, not committed — `step_boss_ai` only reaches this branch when
+    // `c.windup == 0 && b.charging == 0`, so the "promise rule" of §3.1 is already satisfied by the
+    // caller; this function does not need to re-check it). Dead/cooling Cast slots and Lead's
+    // missing velocity data (see rl_obs.hpp's header note) degrade to safe, documented fallbacks —
+    // never a crash, never silent wrong behavior.
+    void execute_rl_action(RlActionId a, Creature& c, BossState& b, const PlayerBeacon* target) noexcept {
+        switch (a) {
+            case RlActionId::kHold:
+                if (target != nullptr) c.facing = facing_of(target->x - c.x, target->y - c.y);
                 c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
-                break;
-            case BossActionKind::kApproach:
-                boss_move(c, b, target->x, target->y, kBossApproachSpeed);
+                return;
+            case RlActionId::kStepN:
+                boss_step(c, b, 0.0f, -1.0f, kSamuraiKit.approach_speed);
                 c.boss_pose = static_cast<std::uint8_t>(BossPose::kWalk);
-                break;
-            case BossActionKind::kAttackLeft:
-                c.facing = Facing::kLeft;
-                boss_commit(c, b, *target, /*charge*/ false);
-                break;
-            case BossActionKind::kAttackRight:
-                c.facing = Facing::kRight;
-                boss_commit(c, b, *target, /*charge*/ false);
-                break;
-            case BossActionKind::kCharge:
+                return;
+            case RlActionId::kStepE:
+                boss_step(c, b, 1.0f, 0.0f, kSamuraiKit.approach_speed);
+                c.boss_pose = static_cast<std::uint8_t>(BossPose::kWalk);
+                return;
+            case RlActionId::kStepS:
+                boss_step(c, b, 0.0f, 1.0f, kSamuraiKit.approach_speed);
+                c.boss_pose = static_cast<std::uint8_t>(BossPose::kWalk);
+                return;
+            case RlActionId::kStepW:
+                boss_step(c, b, -1.0f, 0.0f, kSamuraiKit.approach_speed);
+                c.boss_pose = static_cast<std::uint8_t>(BossPose::kWalk);
+                return;
+            case RlActionId::kApproach:
+                if (target == nullptr) { c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle); return; }
+                boss_move(c, b, target->x, target->y, kSamuraiKit.approach_speed);
+                c.boss_pose = static_cast<std::uint8_t>(BossPose::kWalk);
+                return;
+            case RlActionId::kRetreat: {
+                if (target == nullptr) { c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle); return; }
+                float dx = c.x - target->x;
+                float dy = c.y - target->y;
+                const float len = std::sqrt(dx * dx + dy * dy);
+                if (len > 0.01f) { dx /= len; dy /= len; } else { dx = facing_dx(c.facing); dy = facing_dy(c.facing); }
+                boss_step(c, b, dx, dy, kSamuraiKit.approach_speed);
+                c.boss_pose = static_cast<std::uint8_t>(BossPose::kWalk);
+                return;
+            }
+            case RlActionId::kCastSlot0Direct:
+            case RlActionId::kCastSlot1Direct:
+            case RlActionId::kCastSlot2Direct:
+            case RlActionId::kCastSlot3Direct:
+            case RlActionId::kCastSlot0Lead:
+            case RlActionId::kCastSlot1Lead:
+            case RlActionId::kCastSlot2Lead:
+            case RlActionId::kCastSlot3Lead: {
+                // Direct and Lead currently commit to the same point (see rl_obs.hpp's header note:
+                // no target-velocity state exists to extrapolate Lead's aim with) — both total-
+                // function-safe, Lead just isn't a distinct behavior yet.
+                const int slot = (a >= RlActionId::kCastSlot0Lead)
+                                     ? static_cast<int>(a) - static_cast<int>(RlActionId::kCastSlot0Lead)
+                                     : static_cast<int>(a) - static_cast<int>(RlActionId::kCastSlot0Direct);
+                if (target == nullptr || slot >= kSamuraiKit.ability_count) {
+                    c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
+                    return;  // dead slot: §3.2's mandatory Hold coercion
+                }
+                const std::uint16_t cd = (slot == 0) ? c.attack_cd : b.charge_cd;
+                if (cd > 0) {
+                    c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
+                    return;  // cooling slot: §3.2's mandatory Hold coercion
+                }
                 c.facing = (target->x < c.x) ? Facing::kLeft : Facing::kRight;
-                boss_commit(c, b, *target, /*charge*/ true);
-                break;
+                boss_commit(c, b, *target, /*charge*/ slot == 1);
+                return;
+            }
+            case RlActionId::kCount: break;
         }
+    }
+
+    // One tick of movement along a fixed unit heading (as opposed to `boss_move`'s seek-a-point
+    // shape) — the RFC-007 Step N/E/S/W actions.
+    void boss_step(Creature& c, BossState& b, float ux, float uy, float speed) noexcept {
+        const float sp = speed * speed_scale_of(c.status);
+        if (sp <= 0.001f) return;
+        const float dt = static_cast<float>(kTickMs) / 1000.0f;
+        float nx = c.x + ux * sp * dt;
+        float ny = c.y + uy * sp * dt;
+        (void)clamp_to_room(b, nx, ny);
+        c.facing = facing_of(nx - c.x, ny - c.y);
+        c.x = nx;
+        c.y = ny;
+    }
+
+    // RFC-007 §2: assemble the 120-float observation for `c`/`b` against CURRENT chunk state only
+    // (§2.8's statelessness rule — no history is stored anywhere for this). `target`/`target2` are
+    // the nearest and second-nearest living players in the boss's own room. See rl_obs.hpp's header
+    // note for exactly which blocks this engine can genuinely source today (Self, Ray, Ground, and
+    // Entity are real; several Target/Secondary-target floats are honestly left at 0 for lack of a
+    // cross-trust-tier data source, never fabricated).
+    [[nodiscard]] RlObs build_boss_obs(const Creature& c, const BossState& b,
+                                       const PlayerBeacon* target) const noexcept {
+        RlObs obs{};
+        float* v = obs.v.data();
+
+        // --- Block S: self, idx 0-22 -----------------------------------------------------------
+        v[0] = obs_frac(static_cast<float>(c.hp), static_cast<float>(c.max_hp));
+        if (c.status.primary != Channel::kNone) {
+            v[1 + gauge_index_of(c.status.primary)] = 1.0f;
+            v[6] = static_cast<float>(c.status.stage) / 3.0f;
+            v[7] = std::min(1.0f, static_cast<float>(c.status.stage_ticks) / 80.0f);
+        }
+        if ((c.status.coatings & (1u << static_cast<std::uint8_t>(Coating::kWet))) != 0) v[8] = 1.0f;
+        // idx 9 reserved (RFC-002 OQ5 — only Wet is a real coating in v1).
+
+        // Own pipeline phase (idx 10-13: Idle/Windup/Active/Recover), SYNTHESIZED — no single stored
+        // phase enum exists on Creature/BossState (see header note). Active has no ticks-remaining
+        // source of its own (RFC-005's `active` field is declared, not a runtime sub-state), so it is
+        // detected only as "mid-dash"; a resolving attack is instantaneous and never observed mid-Active.
+        if (c.windup > 0) {
+            v[11] = 1.0f;  // Windup
+            v[14] = 1.0f - static_cast<float>(c.windup) /
+                               static_cast<float>(b.winding_charge ? kSamuraiKit.abilities[1].windup
+                                                                    : kSamuraiKit.abilities[0].windup);
+        } else if (b.charging > 0) {
+            v[12] = 1.0f;  // Active (the committed dash)
+            v[14] = 1.0f - static_cast<float>(b.charging) /
+                               static_cast<float>(kSamuraiKit.abilities[1].active);
+        } else if (c.attack_cd > 0 || b.charge_cd > 0) {
+            v[13] = 1.0f;  // Recover
+        } else {
+            v[10] = 1.0f;  // Idle
+        }
+
+        // Ability cooldown fractions, slots 0-3 (idx 15-18) — 0 when ready OR slot absent, per §2's
+        // own convention (a padded slot reads identically to a ready one, both harmless to a policy).
+        if (kSamuraiKit.ability_count > 0) {
+            v[15] = obs_frac(static_cast<float>(c.attack_cd),
+                             static_cast<float>(kSamuraiKit.abilities[0].cooldown));
+        }
+        if (kSamuraiKit.ability_count > 1) {
+            v[16] = obs_frac(static_cast<float>(b.charge_cd),
+                             static_cast<float>(kSamuraiKit.abilities[1].cooldown));
+        }
+
+        switch (c.facing) {
+            case Facing::kDown: v[19] = 1.0f; break;
+            case Facing::kUp: v[20] = 1.0f; break;
+            case Facing::kLeft: v[21] = 1.0f; break;
+            case Facing::kRight: v[22] = 1.0f; break;
+        }
+
+        // --- Block T: primary target, idx 23-42 ------------------------------------------------
+        if (target != nullptr) {
+            v[23] = 1.0f;  // a live beacon this tick is maximally fresh; no staleness model here
+            v[24] = obs_offset(target->x - c.x, kObsRange);
+            v[25] = obs_offset(target->y - c.y, kObsRange);
+            // idx 26-27 (velocity), 29-37 (status), 38-42 (pipeline phase/progress): left at 0 — see
+            // rl_obs.hpp's header note. A chunk cannot see a player's own status/pipeline (both live
+            // on the trusted PlayerActor) or compute velocity without stored history this pass adds
+            // none of.
+            v[28] = obs_frac(static_cast<float>(target->hp), static_cast<float>(kPlayerMaxHp));
+        }
+
+        // --- Block T2: secondary target, idx 43-48 ----------------------------------------------
+        const PlayerBeacon* target2 = nullptr;
+        float best_d2 = 1e18f;
+        for (const PlayerBeacon& p : players_) {
+            if (p.hp <= 0 || !in_room(b, p)) continue;
+            if (target != nullptr && p.player == target->player) continue;
+            const float dx = p.x - c.x;
+            const float dy = p.y - c.y;
+            const float d2 = dx * dx + dy * dy;
+            if (d2 < best_d2) { best_d2 = d2; target2 = &p; }
+        }
+        if (target2 != nullptr) {
+            v[43] = 1.0f;
+            v[44] = obs_offset(target2->x - c.x, kObsRange);
+            v[45] = obs_offset(target2->y - c.y, kObsRange);
+            v[46] = obs_frac(static_cast<float>(target2->hp), static_cast<float>(kPlayerMaxHp));
+            // idx 47 (winding-up flag): left at 0, same cross-trust-tier gap as Block T.
+        }
+
+        // --- Block R: 8 compass rays, idx 49-64 -------------------------------------------------
+        // A coarse whole-tile walk (see rl_obs.hpp's header note: no DDA/Bresenham helper exists in
+        // this engine to reuse).
+        static constexpr float kRayDx[8] = {0, 1, 1, 1, 0, -1, -1, -1};
+        static constexpr float kRayDy[8] = {-1, -1, 0, 1, 1, 1, 0, -1};
+        for (int ray = 0; ray < 8; ++ray) {
+            float blocked_c = 0.0f;
+            float hazard_c = 0.0f;
+            bool blocked_found = false;
+            bool hazard_found = false;
+            for (int t = 1; t <= static_cast<int>(kObsRange) && !(blocked_found && hazard_found); ++t) {
+                const auto tx = static_cast<int>(c.x + kRayDx[ray] * static_cast<float>(t));
+                const auto ty = static_cast<int>(c.y + kRayDy[ray] * static_cast<float>(t));
+                if (!blocked_found && !is_walkable(terrain_at(tx, ty))) {
+                    blocked_c = obs_closeness(kObsRange, static_cast<float>(t));
+                    blocked_found = true;
+                }
+                if (!hazard_found) {
+                    Surface s{};
+                    const bool burning = surface_at(tx, ty, s) && s == Surface::kBurning;
+                    bool entity_hazard = false;
+                    for (const CombatEntity& e : entities_) {
+                        if (entity_def(e.kind).obs_class != ObsClass::kHazardZone) continue;
+                        const float edx = static_cast<float>(tx) + 0.5f - e.x;
+                        const float edy = static_cast<float>(ty) + 0.5f - e.y;
+                        if (edx * edx + edy * edy <= e.radius * e.radius) { entity_hazard = true; break; }
+                    }
+                    if (burning || entity_hazard) {
+                        hazard_c = obs_closeness(kObsRange, static_cast<float>(t));
+                        hazard_found = true;
+                    }
+                }
+            }
+            v[kObsBlockR + 2 * ray] = blocked_c;
+            v[kObsBlockR + 2 * ray + 1] = hazard_c;
+        }
+
+        // --- Block G: ground & confinement, idx 65-70 -------------------------------------------
+        const auto sx = static_cast<int>(c.x);
+        const auto sy = static_cast<int>(c.y);
+        const TerrainPhys tphys = terrain_phys(terrain_at(sx, sy), scar_kind_at(sx, sy));
+        Surface self_surf{};
+        const bool has_self_surf = surface_at(sx, sy, self_surf);
+        if (tphys.conductivity >= 50 || (has_self_surf && self_surf == Surface::kIced)) {
+            v[65 + 2] = 1.0f;  // Conductive
+        } else if (tphys.friction >= 85 || (has_self_surf && self_surf == Surface::kMudded) ||
+                  scar_kind_at(sx, sy) == ScarKind::kRubble || scar_kind_at(sx, sy) == ScarKind::kCrater) {
+            v[65 + 1] = 1.0f;  // Slow
+        } else if (scar_kind_at(sx, sy) == ScarKind::kCracked) {
+            v[65 + 3] = 1.0f;  // Unstable
+        } else {
+            v[65 + 0] = 1.0f;  // Normal
+        }
+        bool in_hazard = false;
+        for (const CombatEntity& e : entities_) {
+            if (entity_def(e.kind).obs_class != ObsClass::kHazardZone) continue;
+            const float edx = c.x - e.x;
+            const float edy = c.y - e.y;
+            if (edx * edx + edy * edy <= e.radius * e.radius) { in_hazard = true; break; }
+        }
+        v[69] = in_hazard ? 1.0f : 0.0f;
+        int wall_d = 5;
+        for (int r = 0; r <= 4 && wall_d > 4; ++r) {
+            for (int dy = -r; dy <= r && wall_d > 4; ++dy) {
+                for (int dx = -r; dx <= r && wall_d > 4; ++dx) {
+                    if (std::max(std::abs(dx), std::abs(dy)) != r) continue;
+                    if (!is_walkable(terrain_at(sx + dx, sy + dy))) wall_d = r;
+                }
+            }
+        }
+        v[70] = obs_closeness(4.0f, static_cast<float>(wall_d));
+
+        // --- Block E: 3 nearest observable CombatEntity slots, idx 71-106 ----------------------
+        std::array<const CombatEntity*, 3> slots{nullptr, nullptr, nullptr};
+        std::array<float, 3> slot_d2{1e18f, 1e18f, 1e18f};
+        for (const CombatEntity& e : entities_) {
+            const EntityDef def = entity_def(e.kind);
+            if (!def.observable) continue;
+            const float dx = e.x - c.x;
+            const float dy = e.y - c.y;
+            const float d2 = dx * dx + dy * dy;
+            if (d2 > kObsRange * kObsRange) continue;
+            for (int i = 0; i < 3; ++i) {
+                if (d2 < slot_d2[static_cast<std::size_t>(i)]) {
+                    for (int j = 2; j > i; --j) {
+                        slot_d2[static_cast<std::size_t>(j)] = slot_d2[static_cast<std::size_t>(j - 1)];
+                        slots[static_cast<std::size_t>(j)] = slots[static_cast<std::size_t>(j - 1)];
+                    }
+                    slot_d2[static_cast<std::size_t>(i)] = d2;
+                    slots[static_cast<std::size_t>(i)] = &e;
+                    break;
+                }
+            }
+        }
+        for (int k = 0; k < 3; ++k) {
+            const CombatEntity* e = slots[static_cast<std::size_t>(k)];
+            if (e == nullptr) continue;
+            const std::size_t base = kObsBlockE + 12 * static_cast<std::size_t>(k);
+            v[base + 0] = 1.0f;
+            v[base + 1] = obs_offset(e->x - c.x, kObsRange);
+            v[base + 2] = obs_offset(e->y - c.y, kObsRange);
+            const EntityDef def = entity_def(e->kind);
+            v[base + 3 + static_cast<std::size_t>(def.obs_class)] = 1.0f;
+            // Element one-hot (+7..+10): derived from the entity's aura channel where it has an
+            // aura-emitting kind — EntityDef carries no standalone `element` field (RFC-004 never
+            // added one), so a barrier-class entity with no aura (e.g. kIceWall) reads elementless
+            // here despite its name. A real, named gap, not a bug in this encoder.
+            if (def.aura_kind == AuraKind::kChannel) {
+                switch (def.aura_channel) {
+                    case Channel::kHeat: v[base + 7] = 1.0f; break;
+                    case Channel::kCold: v[base + 8] = 1.0f; break;
+                    case Channel::kEarth: v[base + 9] = 1.0f; break;
+                    case Channel::kShock: v[base + 10] = 1.0f; break;
+                    default: break;
+                }
+            }
+            v[base + 11] = obs_frac(static_cast<float>(e->expire_tick > tick_ ? e->expire_tick - tick_ : 0),
+                                    100.0f);
+        }
+
+        // --- Reserved, idx 107-119: always 0 in v1 ----------------------------------------------
+        return obs;
     }
 
     // Commit to a telegraphed action. Freeze for the wind-up (the biggest telegraph in the game),
     // remember WHO and WHERE, and throw the smoke puff F2 reads as "incoming". No damage here — it
     // lands (or the dash begins) when the counter reaches zero.
     void boss_commit(Creature& c, BossState& b, const PlayerBeacon& prey, bool charge) noexcept {
-        c.windup = charge ? kBossChargeWindup : kBossAttackWindup;
+        const BossAbilityKit& ability = kSamuraiKit.abilities[charge ? 1 : 0];
+        c.windup = ability.windup;
         c.windup_target = prey.player;
         c.windup_x = prey.x;
         c.windup_y = prey.y;
         b.winding_charge = charge;
         c.boss_pose = static_cast<std::uint8_t>(charge ? BossPose::kCharge : BossPose::kAttack);
         add_effect(c.x, c.y, EffectKind::kSmoke);
+
+        // RFC-006 §2/T2: the telegraph's geometry is frozen at commit, from the same committed aim
+        // point (`prey.x/y`) `boss_resolve`'s grace check and `boss_dash`'s heading already use — one
+        // replicated record, no second source of truth. Cone (cleave) points at the committed target;
+        // Line (charge) runs from the boss to the committed point.
+        Telegraph t{};
+        t.element = Element::kNone;  // both abilities are plain physical blows (§1.2 "Physical")
+        t.tier = ability.telegraph_tier;
+        t.total = static_cast<std::uint8_t>(ability.windup);
+        t.left = static_cast<std::uint8_t>(ability.windup);
+        t.x = c.x;
+        t.y = c.y;
+        float dx = prey.x - c.x;
+        float dy = prey.y - c.y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len > 0.01f) { dx /= len; dy /= len; } else { dx = facing_dx(c.facing); dy = facing_dy(c.facing); }
+        if (charge) {
+            t.shape = TelegraphShape::kLine;
+            t.ex = prey.x;
+            t.ey = prey.y;
+            t.radius = std::max(1.0f, ability.shape_radius * 0.5f);  // R1: line width floor, 1.0 tile
+        } else {
+            t.shape = TelegraphShape::kCone;
+            t.ex = dx;
+            t.ey = dy;
+            t.radius = ability.shape_radius;
+            t.arc_deg_half = static_cast<std::uint8_t>(ability.shape_arc_deg / 2.0f);
+        }
+        b.telegraph_id = push_telegraph(t);
     }
 
     // A committed wind-up reaches zero. A charge begins its dash toward the aimed-at spot; an attack
@@ -1524,6 +2135,18 @@ private:
     // slash on the empty spot if they left — the same grace and the same "a miss you can see" rule as
     // resolve_windup, so a dodge works against the boss exactly as it does against a slime.
     void boss_resolve(Creature& c, BossState& b) noexcept {
+        // RFC-006: the promise is fulfilled the instant windup hits zero — the decal dies here either
+        // way (an attack hands off to the impact Effect below; a charge's dash is no longer a
+        // promise, it IS the resolved action, per §1.4's lifecycle table).
+        if (b.telegraph_id != 0) {
+            for (std::size_t i = 0; i < telegraphs_.size(); ++i) {
+                if (telegraphs_[i].id == b.telegraph_id) {
+                    telegraphs_.erase(telegraphs_.begin() + static_cast<std::ptrdiff_t>(i));
+                    break;
+                }
+            }
+            b.telegraph_id = 0;
+        }
         if (b.winding_charge) {
             b.winding_charge = false;
             float dx = c.windup_x - c.x;
@@ -1536,16 +2159,16 @@ private:
             }
             b.charge_dx = dx / len;
             b.charge_dy = dy / len;
-            b.charging = kBossChargeDashTicks;
+            b.charging = kSamuraiKit.abilities[1].active;
             b.dash_hit = false;
-            b.charge_cd = kBossChargeCd;
+            b.charge_cd = kSamuraiKit.abilities[1].cooldown;
             c.boss_pose = static_cast<std::uint8_t>(BossPose::kCharge);
             return;
         }
-        c.attack_cd = kBossAttackCd;
+        c.attack_cd = kSamuraiKit.abilities[0].recover;
         const std::uint64_t tgt = c.windup_target;
         c.windup_target = 0;
-        const float grace = kBossReach * 1.15f;
+        const float grace = kSamuraiKit.abilities[0].shape_radius * 1.15f;
         if (const PlayerBeacon* p = beacon_of(tgt)) {
             const float dx = p->x - c.x;
             const float dy = p->y - c.y;
@@ -1568,13 +2191,14 @@ private:
     void boss_dash(Creature& c, BossState& b) noexcept {
         c.boss_pose = static_cast<std::uint8_t>(BossPose::kCharge);
         const float dt = static_cast<float>(kTickMs) / 1000.0f;
-        float nx = c.x + b.charge_dx * kBossChargeSpeed * dt;
-        float ny = c.y + b.charge_dy * kBossChargeSpeed * dt;
+        float nx = c.x + b.charge_dx * kSamuraiKit.abilities[1].shape_speed * dt;
+        float ny = c.y + b.charge_dy * kSamuraiKit.abilities[1].shape_speed * dt;
         const bool clamped = clamp_to_room(b, nx, ny);
         c.x = nx;
         c.y = ny;
         if (!b.dash_hit) {
-            if (const PlayerBeacon* p = nearest_player_in_room(b, c.x, c.y, kBossReach)) {
+            if (const PlayerBeacon* p =
+                    nearest_player_in_room(b, c.x, c.y, kSamuraiKit.abilities[1].shape_radius)) {
                 if (router != nullptr) {
                     router->get<PlayerActor>(p->player).tell(HurtPlayer{c.damage, c.id});
                 }
@@ -1584,7 +2208,7 @@ private:
         }
         if (--b.charging == 0 || clamped) {
             b.charging = 0;
-            c.attack_cd = kBossAttackCd;  // a beat of recovery, like any strike
+            c.attack_cd = kSamuraiKit.abilities[1].recover;  // a beat of recovery, like any strike
             c.boss_pose = static_cast<std::uint8_t>(BossPose::kIdle);
         }
     }
@@ -1679,6 +2303,7 @@ private:
         b.winding_charge = false;
         b.charge_cd = 0;
         b.no_target = 0;
+        b.telegraph_id = 0;
     }
 
     // --- projectiles ------------------------------------------------------------------------------
@@ -1692,6 +2317,23 @@ private:
                 continue;
             }
             --p.life;
+            // RFC-010 §4.3: a shot inside an active field drifts perpendicular to its own heading, a
+            // fixed per-tick offset (tiles/tick), pure in (shot id, launch tick, tick, intensity). No
+            // `launch_tick` field is stored on `Projectile` (byte-budget discipline, matching the
+            // Creature knockback state's own minimal-footprint precedent) — it is derived from the
+            // life counter already decremented above, which is equivalent for a shot that never
+            // migrates chunks mid-flight (arrows are short-lived, kArrowLife=12 ticks).
+            const std::uint8_t field_int = field_intensity_at(p.x, p.y);
+            if (field_int > 0) {
+                const float speed = std::sqrt(p.vx * p.vx + p.vy * p.vy);
+                if (speed > 0.001f) {
+                    const auto launch_tick =
+                        static_cast<std::uint32_t>(tick_) - (kArrowLife - static_cast<std::uint32_t>(p.life));
+                    const float d = drift_perp(static_cast<std::uint32_t>(tick_), p.id, launch_tick, field_int);
+                    p.x += (-p.vy / speed) * d;
+                    p.y += (p.vx / speed) * d;
+                }
+            }
             p.x += p.vx * dt;
             p.y += p.vy * dt;
 
@@ -1822,14 +2464,30 @@ private:
         if (c.hp <= 0 || damage <= 0) return;
         const TerrainPhys tphys = terrain_phys(terrain_at(static_cast<int>(c.x), static_cast<int>(c.y)),
                                                scar_kind_at(static_cast<int>(c.x), static_cast<int>(c.y)));
+        // RFC-010 §4.2: a live kMudded/kIced patch overrides the baseline terrain's knockback/damage
+        // coefficients wherever it sits, on top of (not instead of) RFC-004's scar overlay above.
+        Surface surf{};
+        const bool has_surf = surface_at(static_cast<int>(c.x), static_cast<int>(c.y), surf);
+        const SurfaceCoeff sc = surface_coeff(has_surf, surf);
+
         std::int32_t adj_damage = damage;
         if (slip_applies(tphys.grip)) adj_damage = (adj_damage * kSlipMitigationPm) / 1000;
+        if (has_surf && surf == Surface::kIced) adj_damage = (adj_damage * sc.direct_damage_pm) / 1000;
 
         std::uint16_t effective_impulse = 0;
         if (impulse > 0) {
             effective_impulse = transmit_impulse(impulse, c.material);
-            adj_damage += force_transfer_crush(effective_impulse, kb_terrain_pm(tphys.friction), tphys.grip);
+            std::int32_t force_bonus =
+                force_transfer_crush(effective_impulse, kb_terrain_pm(tphys.friction), tphys.grip);
+            if (has_surf && surf == Surface::kMudded) force_bonus = (force_bonus * sc.force_transfer_pm) / 1000;
+            adj_damage += force_bonus;
         }
+
+        // RFC-010 §4.3: a struck target inside an active field takes the deterministic per-mille
+        // accuracy penalty — no separate M_outer battlefield slot exists in combat_math.hpp, so this
+        // folds in directly, same posture as the mud/ice coefficients just above.
+        const std::uint8_t field_int = field_intensity_at(c.x, c.y);
+        if (field_int > 0) adj_damage = (adj_damage * field_accuracy_pm(field_int)) / 1000;
 
         // RFC-009 §4.4's five-step formula: M_outer (the combo scale, Shatter ignoring DR), DR
         // stacking, flat toughness, chip floor. `dr`/`toughness` are real per-creature fields
@@ -1842,7 +2500,8 @@ private:
         provoke(c, player, /*by_attack*/ true);
 
         if (c.hp > 0 && effective_impulse > 0) {
-            const float kb = knockback_tiles(effective_impulse, mass_of(c.tier), tphys.friction);
+            float kb = knockback_tiles(effective_impulse, mass_of(c.tier), tphys.friction);
+            if (has_surf) kb = (kb * static_cast<float>(sc.knockback_pm)) / 1000.0f;
             if (kb >= kFlinchTiles) {
                 // §5: "new knockback replaces remaining" — this simply overwrites all three fields.
                 c.kb_dx = impulse_dir_x * kb;
@@ -2127,6 +2786,9 @@ private:
         v->scars = scars_;
         v->crops = crops_;
         v->buildings = buildings_;
+        v->patches = patches_;
+        v->fields = fields_;
+        v->telegraphs = telegraphs_;
         bus->publish(coord, std::move(v));
     }
 
@@ -2136,6 +2798,10 @@ private:
     std::vector<Effect> effects_;
     std::vector<CombatEntity> entities_;
     std::vector<Scar> scars_;
+    std::vector<TilePatch> patches_;  // RFC-010 §4.2, capped at kMaxPatches
+    std::vector<FieldState> fields_;  // RFC-010 §4.3, capped at kMaxFields
+    std::vector<Telegraph> telegraphs_;  // RFC-006 §2, capped at kMaxTelegraphs
+    std::uint32_t next_telegraph_id_ = 0;
     // Derived from `entities_`, rebuilt on any entity state change (rebuild_occupancy_bits) — never
     // published, never stored beyond this chunk's own tick (RFC-004 §4's "derived, not stored").
     std::bitset<kChunkTiles * kChunkTiles> block_bits_;

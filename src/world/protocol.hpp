@@ -213,6 +213,10 @@ struct ChunkStats {
     std::uint32_t buildings = 0;
     std::uint32_t tilled = 0;
     std::uint32_t building_levels = 0;  // sum of levels — proves an upgrade landed
+    std::uint32_t patches = 0;    // RFC-010: live tile patches (burning/mud/ice) this chunk owns
+    std::uint32_t burning = 0;    // ... of those, how many are kBurning specifically
+    std::uint32_t fields = 0;     // RFC-010: live field states (earthquake) this chunk owns
+    std::uint32_t telegraphs = 0;  // RFC-006: live telegraph records this chunk owns
     std::uint64_t tick = 0;
 };
 struct GetChunkStats {};

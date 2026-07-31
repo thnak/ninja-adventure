@@ -14,7 +14,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
 
+#include "world/gate_sidecar.hpp"
+#include "world/map_system.hpp"
+#include "world/reward.hpp"
 #include "world/world.hpp"
 
 using namespace mmo;
@@ -47,10 +54,222 @@ void advance(World& w, int n) {
     w.sync_world();
 }
 
+// --- RFC-017 §2: `--sweep`, the payload-vs-material effective-channel table ------------------------
+//
+// Every number below comes from a REAL production function (combat_math.hpp's `resolve_damage`/
+// `mult_pm_of`, physics.hpp's `transmit_impulse`/`knockback_tiles`, status.hpp's own `status_gain`)
+// — never a second, hand-copied formula. See those headers' own divergence notes for what each
+// formula does and does not model yet (there is, for instance, deliberately no material-based
+// DAMAGE mitigation today — only build-up and knockback vary by material — which is why every
+// material row below shows the same `dmg` for a given payload; that is this build's real, current
+// behavior, not a sweep bug).
+//
+// Payload catalog: RFC-008's `skill.*` documents (§7.6) do not exist on disk yet (confirmed by
+// survey — no `data/` directory in this repo). Until they land, this reads the same compile-time
+// constants the live game itself calls (`tiles.hpp`'s `kBaseMeleeDamage`/`kBaseRangedDamage`/
+// `kBaseSpellDamage`, `chunk_actor.hpp`'s `kSpellPower`/`kHeavyMeleeImpulse`) rather than re-typing
+// the numbers — swapping this array for a directory read is the only change RFC-008 landing
+// requires here.
+int run_sweep() {
+    struct Payload {
+        const char* id;
+        std::int16_t base_damage;
+        std::uint16_t impulse;
+        Channel channel;         // Channel::kNone if this payload authors no build-up rider
+        std::uint16_t buildup_power;
+    };
+    static constexpr Payload kPayloads[] = {
+        {"skill.basic_melee_light", kBaseMeleeDamage, 0, Channel::kNone, 0},
+        {"skill.basic_melee_heavy", static_cast<std::int16_t>(kBaseMeleeDamage * 2), kHeavyMeleeImpulse,
+         Channel::kNone, 0},
+        {"skill.basic_ranged_arrow", kBaseRangedDamage, 0, Channel::kNone, 0},
+        {"skill.fire_bolt", kBaseSpellDamage, 0, Channel::kHeat, kSpellPower},
+        {"skill.ice_bolt", kBaseSpellDamage, 0, Channel::kCold, kSpellPower},
+        {"skill.earth_bolt", kBaseSpellDamage, 0, Channel::kEarth, kSpellPower},
+        {"skill.shock_bolt", kBaseSpellDamage, 0, Channel::kShock, kSpellPower},
+    };
+    static constexpr Material kMaterials[] = {Material::kFlesh, Material::kStone, Material::kSpirit,
+                                              Material::kMetal, Material::kWood,  Material::kPlant,
+                                              Material::kWater, Material::kSlime};
+    static constexpr const char* kMaterialNames[] = {"Flesh", "Stone", "Spirit", "Metal",
+                                                      "Wood",  "Plant", "Water",  "Slime"};
+    static constexpr const char* kChannelNames[] = {"none", "cold", "heat", "shock", "earth", "stagger"};
+
+    // RFC-017 §2's reference dummy. Mass 100 matches `mass_of(ScaleTier::kMedium)` exactly (no
+    // override needed); DR 0 / Toughness 0 are the RFC's own PINNED isolation values, not
+    // `tier_toughness(kMedium)`'s real 1 — the point of a reference dummy is to isolate the payload
+    // from a specific creature's derived stats. Friction is read from the real `terrain_phys` table
+    // for Grass rather than re-typed as a literal 60.
+    constexpr ScaleTier kDummyTier = ScaleTier::kMedium;
+    const std::uint16_t dummy_mass = mass_of(kDummyTier);
+    const TerrainPhys grass = terrain_phys(Terrain::kGrass);
+    const DefenderMitigation dummy_def{};  // dr={0,0}, toughness=0
+
+    std::printf("# mmo_sim sweep v1\n");
+    std::printf("# reference dummy: tier=Medium mass=%u dr=0 toughness=0 friction=%u buildup=empty\n",
+                dummy_mass, grass.friction);
+    std::printf("%-26s %-7s %6s %16s %16s\n", "payload", "material", "dmg", "buildup",
+                "knockback_tiles");
+
+    for (const Payload& p : kPayloads) {
+        for (std::size_t mi = 0; mi < 8; ++mi) {
+            const Material m = kMaterials[mi];
+
+            // Damage: RFC-009 §4.4 Steps 1-5, the live formula. Combo::kNone — the dummy carries no
+            // primed status to detonate ("first-hit numbers", per the dummy's own definition).
+            const std::int16_t dmg = resolve_damage(p.base_damage, Combo::kNone, dummy_def);
+
+            // Build-up gain: RFC-009 §4.3 via the SAME `status_gain` the live game calls, against a
+            // fresh (empty) gauge array — matching the dummy's "existing build-up: empty" row.
+            char buildup_buf[24] = "-";
+            if (p.channel != Channel::kNone) {
+                StatusState s{};
+                Gauge g[5]{};
+                const std::uint16_t mult_pm = mult_pm_of(m, kDummyTier, p.channel);
+                status_gain(s, g, BuildupPacket{p.channel, p.buildup_power, 0, 0}, mult_pm, 0);
+                std::snprintf(buildup_buf, sizeof buildup_buf, "%s:%u",
+                             kChannelNames[static_cast<int>(p.channel)],
+                             g[gauge_index_of(p.channel)].value);
+            }
+
+            // Knockback: RFC-003 §5, transmit_impulse then knockback_tiles, both live functions.
+            const std::uint16_t impulse_eff = transmit_impulse(p.impulse, m);
+            const float kb =
+                p.impulse == 0 ? 0.0f : knockback_tiles(impulse_eff, dummy_mass, grass.friction);
+
+            std::printf("%-26s %-7s %6d %16s %16.2f\n", p.id, kMaterialNames[mi], dmg, buildup_buf, kb);
+        }
+    }
+
+    // The acceptance check this mode owes RECONCILIATION.md Ruling 4 (RFC-017 §2): a Medium Flesh
+    // dummy hit with ice_bolt must reach Freeze (stage 3) in exactly 2 casts — Ruling 2's worked
+    // commitment curve for kIceBoltPower=600.
+    StatusState s{};
+    Gauge g[5]{};
+    const std::uint16_t mult_pm = mult_pm_of(Material::kFlesh, kDummyTier, Channel::kCold);
+    status_gain(s, g, BuildupPacket{Channel::kCold, kSpellPower, 0, 0}, mult_pm, 0);
+    (void)status_step(s, g, 1, 1);
+    const bool not_frozen_after_one = !(s.primary == Channel::kCold && s.stage == 3);
+    status_gain(s, g, BuildupPacket{Channel::kCold, kSpellPower, 0, 0}, mult_pm, 1);
+    (void)status_step(s, g, 1, 2);
+    const bool frozen_after_two = s.primary == Channel::kCold && s.stage == 3;
+    const bool ok = not_frozen_after_one && frozen_after_two;
+    std::printf("\nacceptance (Ruling 2/4): Medium Flesh + ice_bolt reaches Freeze in exactly 2 casts: "
+               "%s\n",
+               ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+// --- RFC-017 §4: `--gate-check` / `--gate-report` -----------------------------------------------
+//
+// Thin readers over `world/gate_sidecar.hpp` — no training loop, no episode running, no checkpoint
+// state machine. Both apply RFC-007 §6.3's arithmetic exactly once, the same way every time.
+
+std::string slurp_file(const std::string& path, bool& ok) {
+    std::ifstream in(path, std::ios::binary);
+    ok = static_cast<bool>(in);
+    if (!ok) return {};
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+int run_gate_check(int argc, char** argv) {
+    if (argc < 4) {
+        std::fprintf(stderr, "usage: mmo_sim --gate-check <policy_id> <meta.json path>\n");
+        return 2;
+    }
+    const std::string want_policy = argv[2];
+    const std::string path = argv[3];
+    bool opened = false;
+    const std::string doc = slurp_file(path, opened);
+    if (!opened) {
+        std::fprintf(stderr, "gate-check: cannot open '%s'\n", path.c_str());
+        return 2;
+    }
+    const auto sidecar = parse_sidecar(doc);
+    if (!sidecar) {
+        std::fprintf(stderr,
+                     "gate-check: '%s' is missing a required field (policy_id/generation/"
+                     "vs_incumbent_winrate/vs_persona_winrate/episodes)\n",
+                     path.c_str());
+        return 2;
+    }
+    if (sidecar->policy_id != want_policy) {
+        std::fprintf(stderr,
+                     "gate-check: sidecar policy_id '%s' does not match requested '%s' — refusing to "
+                     "evaluate the wrong checkpoint\n",
+                     sidecar->policy_id.c_str(), want_policy.c_str());
+        return 2;
+    }
+    const GateVerdict v = evaluate_gates(*sidecar);
+    std::printf("policy_id:             %s\n", sidecar->policy_id.c_str());
+    std::printf("generation:            %u\n", sidecar->generation);
+    std::printf("vs_incumbent_winrate:  %.2f   (Gate A: >= %.2f, %s)\n", sidecar->vs_incumbent_winrate,
+               kGateAWinrate, v.gate_a ? "PASS" : "FAIL");
+    std::printf("vs_persona_winrate:    %.2f   (Gate B: <= %.2f, %s)\n", sidecar->vs_persona_winrate,
+               kGateBWinrate, v.gate_b ? "PASS" : "FAIL");
+    std::printf("episodes:              %u    (>= %u required, %s)\n", sidecar->episodes,
+               kGateAEpisodes, sidecar->episodes >= kGateAEpisodes ? "PASS" : "FAIL");
+    std::printf("generation_cap:        %u/%u  (%s)\n", sidecar->generation, kGenerationCap,
+               v.cap_ok ? "PASS" : "FAIL");
+    std::printf("verdict:               %s\n", v.publish() ? "PUBLISH" : "HOLD");
+    return v.publish() ? 0 : 1;
+}
+
+int run_gate_report(const std::string& dir) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) {
+        std::fprintf(stderr, "gate-report: '%s' is not a directory\n", dir.c_str());
+        return 2;
+    }
+    int total = 0;
+    int not_publishable = 0;
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (ec || !entry.is_regular_file()) continue;
+        const std::string name = entry.path().filename().string();
+        static constexpr std::string_view kSuffix = ".meta.json";
+        if (name.size() < kSuffix.size() ||
+            name.compare(name.size() - kSuffix.size(), kSuffix.size(), kSuffix) != 0) {
+            continue;
+        }
+        bool opened = false;
+        const std::string doc = slurp_file(entry.path().string(), opened);
+        ++total;
+        const auto sidecar = opened ? parse_sidecar(doc) : std::nullopt;
+        if (!sidecar) {
+            std::printf("%-32s  UNREADABLE\n", name.c_str());
+            ++not_publishable;
+            continue;
+        }
+        const GateVerdict v = evaluate_gates(*sidecar);
+        std::printf("%-32s gen=%-3u  A=%s  B=%s  cap=%s  verdict=%s\n", sidecar->policy_id.c_str(),
+                   sidecar->generation, v.gate_a ? "PASS" : "FAIL", v.gate_b ? "PASS" : "FAIL",
+                   v.cap_ok ? "PASS" : "FAIL", v.publish() ? "PUBLISH" : "HOLD");
+        if (!v.publish()) ++not_publishable;
+    }
+    std::printf("\n%d policies checked, %d not publishable\n", total, not_publishable);
+    return not_publishable == 0 ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    const int ticks = argc > 1 ? std::atoi(argv[1]) : 1200;  // 1200 ticks == 120 s of world time
+    // RFC-017 §1: three new modes, dispatched on argv[1] BEFORE it ever reaches std::atoi, so
+    // `mmo_sim 600` (and `mmo_sim_smoke`, which depends on exactly that) is unaffected and
+    // `mmo_sim --sweep` never gets misread as a tick count.
+    if (argc > 1 && std::strcmp(argv[1], "--sweep") == 0) return run_sweep();
+    if (argc > 1 && std::strcmp(argv[1], "--gate-check") == 0) return run_gate_check(argc, argv);
+    if (argc > 1 && std::strcmp(argv[1], "--gate-report") == 0) {
+        if (argc < 3) {
+            std::fprintf(stderr, "usage: mmo_sim --gate-report <dir of *.meta.json>\n");
+            return 2;
+        }
+        return run_gate_report(argv[2]);
+    }
+    const bool dump_mode = argc > 1 && std::strcmp(argv[1], "--determinism-dump") == 0;
+    const int ticks = (argc > 1 && !dump_mode) ? std::atoi(argv[1]) : 1200;  // 1200 ticks == 120 s
 
     World world;
     world.build(/*workers*/ 4);
@@ -63,6 +282,129 @@ int main(int argc, char** argv) {
                 static_cast<long long>(kDayMs / 1000), static_cast<long long>(kNightMs / 1000));
 
     Check chk;
+
+    // --- RFC-017 §4: the gate-sidecar reader, against RFC-007 §6.2's own worked example -------------
+    {
+        static constexpr const char* kWorked = R"({
+  "policy_id": "boss.melee_bruiser",
+  "obs_version": 1,
+  "action_version": 1,
+  "generation": 47,
+  "parent_hash": "sha256:deadbeef",
+  "weights_hash": "sha256:cafef00d",
+  "eval": { "vs_incumbent_winrate": 0.58, "vs_persona_winrate": 0.63, "episodes": 200 }
+})";
+        const auto sidecar = parse_sidecar(kWorked);
+        chk.expect(sidecar.has_value(), "the gate-sidecar reader parses RFC-007 §6.2's own example");
+        if (sidecar) {
+            chk.expect(sidecar->policy_id == "boss.melee_bruiser", "policy_id parses through nesting");
+            chk.expect(sidecar->generation == 47, "generation parses");
+            chk.expect(sidecar->episodes == 200, "the nested eval.episodes parses");
+            const GateVerdict v = evaluate_gates(*sidecar);
+            chk.expect(v.publish(), "RFC-007's own worked example passes both gates and the cap");
+        }
+        // A sidecar that fails Gate A (too few episodes) and Gate B (over the ceiling) must HOLD, not
+        // PUBLISH — the mechanical reader has to fail loudly, not just parse cleanly.
+        CheckpointSidecar bad;
+        bad.policy_id = "boss.ranged_kiter";
+        bad.generation = 12;
+        bad.vs_incumbent_winrate = 0.52f;
+        bad.vs_persona_winrate = 0.91f;
+        bad.episodes = 150;
+        const GateVerdict bv = evaluate_gates(bad);
+        chk.expect(!bv.gate_a && !bv.gate_b && !bv.publish(),
+                   "a checkpoint under-episoded AND over the persona ceiling holds on both gates");
+    }
+    std::printf("RFC-017 gate-sidecar reader: RFC-007's own worked example publishes; "
+               "a double-failing sidecar holds\n\n");
+
+    // --- RFC-022 §4: the village-always-fits invariant, against plan_of()'s real shipped values -----
+    {
+        // §4.2's fit table, reproduced tier-by-tier (hw/hh come from the live village.hpp plan_of()).
+        struct FitRow {
+            int tier;
+            int full_w, full_h;
+        };
+        static constexpr FitRow kRows[] = {{1, 33, 29}, {2, 45, 39}, {3, 45, 49}, {4, 57, 49},
+                                           {5, 57, 59}};
+        for (const FitRow& r : kRows) {
+            chk.expect(village_full_width(r.tier) == r.full_w,
+                       "village_full_width matches RFC-022 §4.2's table for this tier");
+            chk.expect(village_full_height(r.tier) == r.full_h,
+                       "village_full_height matches RFC-022 §4.2's table for this tier");
+        }
+        chk.expect(!village_fits(1, 1), "a 1-chunk (32-tile) map fits no shipped village tier");
+        for (int tier = 1; tier <= 5; ++tier) {
+            chk.expect(village_fits(2, tier),
+                       "every shipped village tier fits a 2x2-chunk (64-tile) map, per §4.2");
+        }
+    }
+
+    // --- RFC-022 §2.3: the portal join-vs-create resolution rule -----------------------------------
+    {
+        std::vector<MapSession> live;
+
+        // kFixedTarget with no prior record synthesizes the one session directly — nothing to
+        // allocate, the destination is already known (§2.3).
+        PortalDef door;
+        door.id = 1;
+        door.from_map = kOverworld;
+        door.from_x = 10;
+        door.from_y = 20;
+        door.kind = PortalKind::kInteriorDoor;
+        door.binding = PortalBinding::kFixedTarget;
+        door.fixed_to_map = kInterior;
+        door.fixed_to_x = 5;
+        door.fixed_to_y = 6;
+        const ResolveResult door_r = resolve_portal(door, live, 0);
+        chk.expect(door_r.outcome == ResolveOutcome::kFound,
+                   "a kFixedTarget portal always resolves (never needs allocation)");
+        chk.expect(door_r.session.map_id == kInterior && door_r.session.return_map == kOverworld,
+                   "the synthesized session targets fixed_to_map and returns to from_map");
+
+        // kSharedPersistent: nothing live yet -> needs allocation; once recorded, any group finds it.
+        PortalDef gate;
+        gate.id = 2;
+        gate.kind = PortalKind::kRealmGate;
+        gate.binding = PortalBinding::kAllocateOnUse;
+        gate.scope = SessionScope::kSharedPersistent;
+        chk.expect(resolve_portal(gate, live, 7).outcome == ResolveOutcome::kNeedsAllocation,
+                   "kSharedPersistent with no live session needs allocation");
+        MapSession shared;
+        shared.map_id = 20;
+        shared.origin_portal = gate.id;
+        shared.scope = SessionScope::kSharedPersistent;
+        live.push_back(shared);
+        chk.expect(resolve_portal(gate, live, 999).outcome == ResolveOutcome::kFound,
+                   "kSharedPersistent joins the one running session regardless of group");
+
+        // kGroupInstance: one group's session does not satisfy a different group's request.
+        PortalDef dungeon;
+        dungeon.id = 3;
+        dungeon.kind = PortalKind::kRealmGate;
+        dungeon.binding = PortalBinding::kAllocateOnUse;
+        dungeon.scope = SessionScope::kGroupInstance;
+        MapSession group_a;
+        group_a.map_id = 21;
+        group_a.origin_portal = dungeon.id;
+        group_a.scope = SessionScope::kGroupInstance;
+        group_a.owner_group = 5;
+        live.push_back(group_a);
+        chk.expect(resolve_portal(dungeon, live, 5).outcome == ResolveOutcome::kFound,
+                   "kGroupInstance: the owning group rejoins its own open instance");
+        chk.expect(resolve_portal(dungeon, live, 6).outcome == ResolveOutcome::kNeedsAllocation,
+                   "kGroupInstance: a different group gets its own instance, not the first group's");
+
+        // kSoloInstance always allocates fresh, even with other sessions on the same portal live.
+        PortalDef solo;
+        solo.id = 4;
+        solo.binding = PortalBinding::kAllocateOnUse;
+        solo.scope = SessionScope::kSoloInstance;
+        chk.expect(resolve_portal(solo, live, 5).outcome == ResolveOutcome::kNeedsAllocation,
+                   "kSoloInstance always needs a fresh allocation");
+    }
+    std::printf("RFC-022 map system: village-fit table matches plan_of(), portal join-vs-create "
+               "resolves correctly for all four scopes\n\n");
 
     // --- RFC-001: the ability pipeline's generic state machine (no actor, no content needed) -------
     // ability_pipeline.hpp's functions take plain tick counts and flags rather than reaching into
@@ -308,6 +650,253 @@ int main(int argc, char** argv) {
         std::printf(
             "RFC-003 physics: material impulse transmission, mass/tier tables, terrain properties, "
             "the knockback law, the mud/ice rules, WallSlam and terrain stress all check out\n\n");
+    }
+
+    // --- RFC-010: battlefield simulation, as pure functions ------------------------------------------
+    {
+        // §4.2: the decay chain — every surface's duration in ms matches its authored tick count.
+        chk.expect(dur_ms_of(Surface::kBurning) == 4000, "kBurning's 40-tick duration is 4s");
+        chk.expect(dur_ms_of(Surface::kMudded) == 30000, "kMudded's 300-tick duration is 30s");
+        chk.expect(dur_ms_of(Surface::kIced) == 30000, "kIced's 300-tick duration is 30s");
+
+        // flammability, scoped to the two terrains the RFC's guide-level text names.
+        chk.expect(flammable_of(Terrain::kGrass) && flammable_of(Terrain::kTree),
+                   "grass and forest tiles are flammable");
+        chk.expect(!flammable_of(Terrain::kStone) && !flammable_of(Terrain::kBuilding),
+                   "stone and buildings are not — buildings are the engine's own fireproof-claim proxy");
+
+        // §4.2's trigger table: Fire on baseline ignites; on an existing ice/mud patch it steams the
+        // patch away instead; on an existing burn it refreshes.
+        chk.expect(fire_impact(false, Surface::kBurning).event == SurfaceEvent::kSet &&
+                       fire_impact(false, Surface::kBurning).result == Surface::kBurning,
+                   "fire on baseline sets kBurning");
+        chk.expect(fire_impact(true, Surface::kIced).event == SurfaceEvent::kRemoved,
+                   "fire steams an iced patch away — no patch remains");
+        chk.expect(fire_impact(true, Surface::kMudded).event == SurfaceEvent::kRemoved,
+                   "fire steams a mudded patch away too");
+        chk.expect(fire_impact(true, Surface::kBurning).event == SurfaceEvent::kRefreshed,
+                   "fire on an already-burning tile just refreshes it");
+        chk.expect(ice_impact(false, Surface::kBurning).result == Surface::kIced,
+                   "ice on baseline sets kIced");
+        chk.expect(ice_impact(true, Surface::kBurning).event == SurfaceEvent::kRemoved,
+                   "ice extinguishes a burning patch — no patch remains");
+        chk.expect(ice_impact(true, Surface::kMudded).result == Surface::kIced,
+                   "ice freezes a mudded patch into kIced");
+
+        // §4.2's coefficient rows: mud softens knockback but hardens the crush bonus; ice does the
+        // opposite trade — a harder shove, a softer direct hit.
+        const SurfaceCoeff mud = surface_coeff(true, Surface::kMudded);
+        chk.expect(mud.knockback_pm == 500 && mud.force_transfer_pm == 1250,
+                   "mud: knockback x0.5, force-transfer damage x1.25");
+        const SurfaceCoeff ice = surface_coeff(true, Surface::kIced);
+        chk.expect(ice.knockback_pm == 1500 && ice.direct_damage_pm == 800,
+                   "ice: knockback x1.5, direct damage x0.8");
+        chk.expect(surface_coeff(false, Surface::kMudded).knockback_pm == 1000,
+                   "no live patch means no coefficient at all — the identity default");
+
+        // §4.2's eviction tie-break: smallest end_ms first, then (tx, ty) lexicographic.
+        chk.expect(patch_expires_before(TilePatch{1, 1, Surface::kBurning, 0, 100},
+                                        TilePatch{2, 2, Surface::kBurning, 0, 200}),
+                   "the record with the smaller end_ms expires first");
+        chk.expect(patch_expires_before(TilePatch{1, 5, Surface::kBurning, 0, 100},
+                                        TilePatch{2, 1, Surface::kBurning, 0, 100}),
+                   "a tied end_ms breaks on tx, then ty, lexicographically");
+
+        // §4.3: the deterministic accuracy table and stacking rule.
+        chk.expect(field_accuracy_pm(1) == 900 && field_accuracy_pm(2) == 800 && field_accuracy_pm(3) == 700,
+                   "the earthquake accuracy multiplier matches the §4.3 table");
+        chk.expect(field_accuracy_pm(0) == 1000, "no field at all is the identity multiplier");
+        chk.expect(highest_intensity(1, 3) == 3 && highest_intensity(2, 1) == 2,
+                   "overlapping fields never stack — the actor takes the single highest intensity");
+
+        // §4.3's drift formula: pure in (shot id, launch tick, tick, intensity); zero outside any field.
+        chk.expect(field_drift_amplitude(0) == 0.0f, "intensity 0 (no field) drifts nothing");
+        chk.expect(drift_perp(0, 7, 0, 0) == 0.0f, "zero intensity is zero amplitude regardless of phase");
+        const float d1 = drift_perp(5, 42, 0, 2);
+        const float d2 = drift_perp(5, 42, 0, 2);
+        chk.expect(d1 == d2, "drift is a pure function — same inputs, same output, every call");
+        chk.expect(std::fabs(d1) <= field_drift_amplitude(2) + 0.0001f,
+                   "drift never exceeds its own intensity's amplitude");
+
+        std::printf(
+            "RFC-010 battlefield: the tile-patch decay chain, the fire/ice trigger table, mud/ice "
+            "coefficients, eviction tie-break, and the earthquake accuracy/drift formulas all check "
+            "out\n\n");
+    }
+
+    // --- RFC-005: boss ability authoring, as pure functions -------------------------------------------
+    {
+        // A new, minimal table (see boss_kit.hpp's header note) — Giant reproduces the RFC's own
+        // worked-example number exactly.
+        chk.expect(body_half_width_of(ScaleTier::kGiant) == 1.25f,
+                   "a Giant's body half-width matches the RFC's own §R4 worked example");
+
+        // §R2's escape-distance column.
+        chk.expect(escape_distance_arc(2.6f) == 2.6f, "an arc's escape distance is just its radius");
+        chk.expect(escape_distance_dash(body_half_width_of(ScaleTier::kGiant)) == 1.75f,
+                   "a Giant's dash escape distance (0.5 + 1.25) matches the RFC's own worked example");
+        chk.expect(escape_distance_ring(5.0f, 2.0f) == 3.0f, "a ring's escape distance is radius - hole");
+
+        // §R4's tier table.
+        chk.expect(tier_min_windup(0) == 5 && tier_min_windup(1) == 8 && tier_min_windup(2) == 12 &&
+                       tier_min_windup(3) == 16,
+                   "the danger-tier minimum windups match RFC-006 §1.3's table, delegated here");
+        const BossTierMult adept = tier_mult(BossTier::kAdept);
+        chk.expect(adept.hp_pm == 1400 && adept.damage_pm == 1250 && adept.cooldown_pm == 1000,
+                   "Adept (tier 2, 'the intended fight') matches the RFC's own §R4 table");
+        const BossTierMult elite = tier_mult(BossTier::kElite);
+        chk.expect(elite.hp_pm == 2400 && elite.cooldown_pm == 700,
+                   "Elite (tier 4) hits the RFC's own ceiling multipliers");
+
+        // §R4's readability floor, reproduced against the RFC's own two worked checks for the
+        // shipped Samurai.
+        const int cleave_floor = windup_floor_ticks(1, escape_distance_arc(kBossReach));
+        chk.expect(cleave_floor == 8,
+                   "cleave's floor is governed by the tier-1 minimum (8), exactly as the RFC's own "
+                   "worked check finds (geometric term is only 7)");
+        chk.expect(kBossAttackWindup >= cleave_floor,
+                   "the shipped cleave windup (10) clears its own floor with margin");
+        const int charge_floor =
+            windup_floor_ticks(2, escape_distance_dash(body_half_width_of(ScaleTier::kGiant)));
+        chk.expect(charge_floor == 12,
+                   "the charge dash's floor is governed by the tier-2 minimum (12), exactly as the "
+                   "RFC's own worked check finds (geometric term is only 5)");
+        chk.expect(kBossChargeWindup >= charge_floor,
+                   "the shipped charge windup (14) clears its own floor");
+
+        // The floor formula genuinely rejects an under-authored wind-up — proving the validator
+        // logic this RFC specifies would actually catch a bad kit, not just rubber-stamp the good one.
+        chk.expect(windup_floor_ticks(0, 20.0f) > kWindupFloorTicks,
+                   "a wide-reaching ability at the lowest danger tier still needs real geometric "
+                   "margin, not just the flat floor");
+        chk.expect(3 < windup_floor_ticks(3, 20.0f),
+                   "an authored windup of 3 ticks would fail a 20-tile-escape, tier-3 ability's floor");
+
+        // The one real kit reproduces the shipped Samurai's numbers verbatim (boss_kit.hpp reads
+        // FROM boss.hpp's own named constants rather than retyping them).
+        const BossKitDef samurai = samurai_red_kit();
+        chk.expect(samurai.ability_count == 2 && samurai.base_hp == kBossMaxHp,
+                   "the Samurai kit carries exactly cleave + charge_dash, at the shipped HP");
+        chk.expect(samurai.abilities[0].windup == kBossAttackWindup &&
+                       samurai.abilities[1].windup == kBossChargeWindup,
+                   "the kit's wind-ups are the shipped boss's own, not re-authored numbers");
+        chk.expect(samurai.abilities[1].cooldown > samurai.abilities[1].active + samurai.abilities[1].recover,
+                   "validator #9's FSM-sanity rule (cooldown > active + recover) holds for the real kit");
+
+        std::printf(
+            "RFC-005 boss authoring: the body-half-width/escape-distance tables, the tier multiplier "
+            "table, and the readability-floor formula all check out against the shipped Samurai's own "
+            "numbers\n\n");
+    }
+
+    // --- RFC-007: RL observation & action space, as pure functions ------------------------------------
+    {
+        chk.expect(kObsSize == 120 && kObsVersion == 1, "the obs contract is exactly the RFC's own size/version");
+        chk.expect(kActionCount == 15, "the action space is exactly 15, matching RLDrive's sampler bound");
+
+        // §2's closeness/offset/fraction encodings — "absent/far = 0" must hold at and beyond horizon.
+        chk.expect(obs_closeness(8.0f, 0.0f) == 1.0f, "touching the agent is maximally close");
+        chk.expect(obs_closeness(8.0f, 8.0f) == 0.0f, "exactly at the horizon reads as absent");
+        chk.expect(obs_closeness(8.0f, 20.0f) == 0.0f, "beyond the horizon never goes negative");
+        chk.expect(obs_offset(20.0f, 8.0f) == 1.0f && obs_offset(-20.0f, 8.0f) == -1.0f,
+                   "egocentric offsets clamp to +/-1 well beyond kObsRange");
+        chk.expect(obs_frac(150.0f, 100.0f) == 1.0f && obs_frac(-5.0f, 100.0f) == 0.0f,
+                   "fractions clamp into [0,1] even from out-of-range inputs");
+
+        // §3's generation-0 compatibility table, verbatim.
+        chk.expect(to_rl_action(BossActionKind::kHold) == RlActionId::kHold, "kHold -> id 0");
+        chk.expect(to_rl_action(BossActionKind::kApproach) == RlActionId::kApproach, "kApproach -> id 5");
+        chk.expect(to_rl_action(BossActionKind::kAttackLeft) == RlActionId::kCastSlot0Direct &&
+                       to_rl_action(BossActionKind::kAttackRight) == RlActionId::kCastSlot0Direct,
+                   "both attack sides collapse onto Cast slot 0 Direct (id 7) -- facing is derived, "
+                   "not chosen, per the RFC's own note");
+        chk.expect(to_rl_action(BossActionKind::kCharge) == RlActionId::kCastSlot1Direct,
+                   "kCharge -> Cast slot 1 Direct (id 8)");
+
+        // §5's reward shaping — the structural rules matter more than the coefficients.
+        chk.expect(reward_damage_dealt(50.0f, 700.0f, /*pipeline_delivered*/ true) > 0.0f,
+                   "pipeline-delivered damage earns a positive reward");
+        chk.expect(reward_damage_dealt(50.0f, 700.0f, /*pipeline_delivered*/ false) == 0.0f,
+                   "R-honesty: contact_damage (not pipeline-delivered) earns exactly zero");
+        chk.expect(reward_damage_taken(20.0f, 100.0f) < 0.0f, "taking damage is always penalized");
+        chk.expect(reward_terminal(/*won*/ true, /*lost*/ false) == kRewardTerminalWin &&
+                       reward_terminal(false, true) == kRewardTerminalLoss,
+                   "terminal reward matches the RFC's own §5 table");
+        chk.expect(reward_turtling(10, /*target_present*/ true, /*any_slot_ready*/ true) < 0.0f,
+                   "holding past the threshold with a live target and a ready slot is turtling");
+        chk.expect(reward_turtling(10, /*target_present*/ true, /*any_slot_ready*/ false) == 0.0f,
+                   "the guard condition protects legitimate post-strike recovery from the turtle penalty");
+        chk.expect(reward_turtling(3, true, true) == 0.0f,
+                   "holding is free below the RFC's own kTurtleHoldThreshold");
+        chk.expect(clip_reward(5.0f) == 1.0f && clip_reward(-5.0f) == -1.0f,
+                   "the per-decision reward sum clips to [-1,+1]");
+
+        std::printf(
+            "RFC-007 RL contract: the obs vector's encoding conventions, the generation-0 action "
+            "mapping, and the reward-shaping formulas all check out\n\n");
+    }
+
+    // --- RFC-006: visual FX & telegraph standards, as pure functions ----------------------------------
+    {
+        // §1.3's tier qualification, reproduced against the RFC's own worked check: the shipped
+        // Samurai's attack (20 damage on a 100-HP player, d=0.2) is tier 1 (moderate), whose 8-tick
+        // floor the authored windup (10) clears.
+        const float d = expected_damage_fraction(static_cast<float>(kBossDamage), 1.0f,
+                                                 static_cast<float>(kPlayerMaxHp));
+        chk.expect(d > 0.19f && d < 0.21f, "the Samurai's attack computes to d=0.2, the RFC's own number");
+        chk.expect(telegraph_tier_of(d, 0) == 1,
+                   "d=0.2 with no hard control qualifies as tier 1 (moderate), matching the RFC's own "
+                   "worked check");
+        chk.expect(telegraph_tier_of(0.05f, 0) == 0, "a light jab (d<0.10, no control) is tier 0");
+        chk.expect(telegraph_tier_of(0.30f, 0) == 2, "d=0.30 alone (no control) is tier 2 (heavy)");
+        chk.expect(telegraph_tier_of(0.0f, 25) == 3, "25 ticks of hard control alone is tier 3, by the "
+                                                     "cc clause regardless of damage");
+        chk.expect(telegraph_tier_of(0.60f, 5) == 3,
+                   "highest tier wins: a deadly-damage, mild-control hit is still tier 3");
+
+        // §1.4's fill fraction and lifecycle state machine.
+        chk.expect(telegraph_fill_frac(10, 10) == 0.0f && telegraph_fill_frac(10, 0) == 1.0f,
+                   "fill runs 0 at commit to 1 the instant the wind-up elapses");
+        chk.expect(telegraph_state_of(10, 9, false) == TelegraphState::kArm,
+                   "the first tick of a 10-tick wind-up is ARM");
+        chk.expect(telegraph_state_of(10, 5, false) == TelegraphState::kCharge,
+                   "the middle of a 10-tick wind-up is CHARGE");
+        chk.expect(telegraph_state_of(10, 3, false) == TelegraphState::kImminent,
+                   "the last 3 ticks are IMMINENT");
+        chk.expect(telegraph_state_of(5, 3, false) == TelegraphState::kImminent,
+                   "a total<=5 wind-up skips CHARGE entirely -- ARM hands straight to IMMINENT");
+        chk.expect(telegraph_state_of(10, 1, /*fizzling*/ true) == TelegraphState::kFizzle,
+                   "an interrupted wind-up reads as FIZZLE regardless of its remaining ticks");
+
+        // §2's cap/eviction rule: only a STRICTLY higher tier evicts, and only the lowest-tier (oldest
+        // among ties) record — never silently dropping a promise that was already drawn.
+        std::array<Telegraph, kMaxTelegraphs> live{};
+        for (std::size_t i = 0; i < kMaxTelegraphs; ++i) {
+            live[i].id = static_cast<std::uint32_t>(i + 1);
+            live[i].tier = 1;
+        }
+        chk.expect(telegraph_eviction_index(live, kMaxTelegraphs, 1) == -1,
+                   "an equal-tier commit against a full, uniform-tier chunk is refused, not swapped "
+                   "in -- a well-defined Hold no-op");
+        chk.expect(telegraph_eviction_index(live, kMaxTelegraphs, 0) == -1,
+                   "a strictly-lower-tier commit is refused too");
+        chk.expect(telegraph_eviction_index(live, kMaxTelegraphs, 2) == 0,
+                   "among tied-lowest records, the OLDEST (smallest id) is the one that yields to a "
+                   "strictly higher tier");
+        live[3].tier = 0;  // the one weak spot among 8 otherwise-tier-1 records
+        chk.expect(telegraph_eviction_index(live, kMaxTelegraphs, 1) == 3,
+                   "a strictly-higher-tier commit evicts the single lowest-tier live record, not the "
+                   "oldest overall");
+
+        // §1.2's element palette: the motif column is mandatory, but hue alone must still be a real,
+        // distinct value per element -- this is the data half of that accessibility rule.
+        chk.expect(telegraph_hue_of(Element::kNone).r == 255 && telegraph_hue_of(Element::kNone).g == 45,
+                   "physical telegraphs use the existing red wind-up pulse color");
+        chk.expect(telegraph_hue_of(Element::kIce).b == 255, "Ice reads unmistakably blue");
+
+        std::printf(
+            "RFC-006 telegraphs: the danger-tier qualification formula, the fill/lifecycle state "
+            "machine, the cap/eviction rule, and the element palette all check out\n\n");
     }
 
     // --- Accounts ---------------------------------------------------------------------------------
@@ -720,6 +1309,57 @@ int main(int argc, char** argv) {
     std::printf("arrow: %s, %u in flight\n", shot_ok ? "launched" : "refused",
                 airborne.projectiles);
     chk.expect(shot_ok, "the player could shoot");
+
+    // --- RFC-017 §3: `--determinism-dump` -----------------------------------------------------------
+    // Formalizes ARCHITECTURE.md §2c's already-proven GCC/MSVC tile-for-tile check: pull every value
+    // that check's own text names as invariant into one normalized, grep/diff-able block, reusing
+    // every value already computed above (never recomputed by a second code path), plus one fresh
+    // pass over `terrain_of` for the per-terrain tile tally (the same pure worldgen function every
+    // other terrain check in this file already calls).
+    //
+    // DIVERGENCE: this block is emitted immediately after the narrative prints above, not instead of
+    // them — suppressing ~15 existing `std::printf` call sites across this file for one CLI mode
+    // was a broad, risky edit for no functional gain, since every dump line is uniquely prefixed
+    // (`worldgen.`/`wildlife.`/`staged_fight.`) between the two marker lines below. `mmo_sim
+    // --determinism-dump | sed -n '/^--- determinism dump/,/^--- end determinism dump/p'` (or an
+    // equivalent grep on the prefixes) extracts exactly the "grep/diff-able block" §3 asks for.
+    //
+    // Chunk migrations are deliberately NEVER in this block (ARCHITECTURE.md §2c / RFC-017 §3's own
+    // normative rule): that counter depends on cross-actor message arrival order and is proven to
+    // vary run-to-run on the SAME binary and machine, so it can never be a cross-platform invariant.
+    if (dump_mode) {
+        std::uint64_t terrain_tally[static_cast<int>(Terrain::kCount)] = {};
+        for (int ty = 0; ty < kMapTiles; ++ty) {
+            for (int tx = 0; tx < kMapTiles; ++tx) {
+                ++terrain_tally[static_cast<int>(terrain_of(kWorldSeed, home, tx, ty))];
+            }
+        }
+        std::printf("\n--- determinism dump (RFC-017 §3) ---\n");
+        std::printf("worldgen.villages=%zu\n", layout.villages().size());
+        std::printf("worldgen.strongholds=%zu\n", layout.strongholds().size());
+        std::printf("worldgen.buildings=%zu\n", layout.structures().size());
+        std::printf("worldgen.spawn=%d,%d\n", static_cast<int>(spawn.x), static_cast<int>(spawn.y));
+        for (int i = 0; i < static_cast<int>(Terrain::kCount); ++i) {
+            std::printf("worldgen.terrain_tally.%d=%llu\n", i,
+                        static_cast<unsigned long long>(terrain_tally[i]));
+        }
+        std::printf("wildlife.bring_up=%u\n", wild_total);
+        std::printf("staged_fight.creatures=%u\n", staged.creatures);
+        std::printf("staged_fight.hostile=%u\n", staged.hostile);
+        std::printf("staged_fight.watchers=%u\n", staged.watchers);
+        std::printf("staged_fight.hp_slot0=%d\n", mauled.hp);
+        std::printf("staged_fight.hp_slot1=%d\n", other.hp);
+        std::printf("staged_fight.hits_landed=%d\n", swings);
+        std::printf("staged_fight.hits_refused=%d\n", refused_swings);
+        std::printf("staged_fight.kills=%u\n", player_kills);
+        std::printf("staged_fight.melee_xp=%u\n", fought.skill_xp[static_cast<int>(Skill::kMelee)]);
+        std::printf("staged_fight.cast_ok=%d\n", cast_ok ? 1 : 0);
+        std::printf("staged_fight.afflicted=%u\n", frozen.afflicted);
+        std::printf("staged_fight.shot_ok=%d\n", shot_ok ? 1 : 0);
+        std::printf("staged_fight.projectiles_airborne=%u\n", airborne.projectiles);
+        std::printf("--- end determinism dump ---\n");
+        return chk.failures == 0 ? 0 : 1;
+    }
 
     // --- The ability layer (F1a) -----------------------------------------------------------------
     // Abilities are the first thing in the game with a per-slot cooldown and a school-level gate, so
@@ -1330,6 +1970,48 @@ int main(int argc, char** argv) {
         world.teleport_player(me, home, spawn.x, spawn.y);
     }
 
+    // --- RFC-010 integration: a Fire cast ignites grass, burns out into an RFC-004 scar --------------
+    {
+        int gtx = -1;
+        int gty = -1;
+        for (int r = 0; r < 80 && gtx < 0; ++r) {
+            const int tx = static_cast<int>(spawn.x) + r;
+            const int ty = static_cast<int>(spawn.y);
+            if (terrain_of(kWorldSeed, home, tx, ty) == Terrain::kGrass) {
+                gtx = tx;
+                gty = ty;
+            }
+        }
+        chk.expect(gtx >= 0, "found a grass tile near spawn to set alight");
+        if (gtx >= 0) {
+            world.teleport_player(guest, home, static_cast<float>(gtx) + 0.5f,
+                                  static_cast<float>(gty) + 0.5f);
+            world.grant_vitals(guest, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
+            const ChunkCoord burn_chunk = chunk_of(home, static_cast<float>(gtx), static_cast<float>(gty));
+            const bool burned = world.cast(guest, Element::kFire, static_cast<float>(gtx) + 0.5f,
+                                           static_cast<float>(gty) + 0.5f);
+            advance(world, 1);
+            const ChunkStats lit = world.chunk_stats(burn_chunk);
+            std::printf("battlefield: fire cast %s on grass (%d,%d);  patches=%u burning=%u\n",
+                        burned ? "ok" : "refused", gtx, gty, lit.patches, lit.burning);
+            chk.expect(burned, "the player could cast fire");
+            chk.expect(lit.burning > 0, "the impact left a live kBurning tile patch");
+
+            const std::uint32_t scars_before = lit.scars;
+            advance(world, kBurningDurTicks + 2);
+            const ChunkStats burnt_out = world.chunk_stats(burn_chunk);
+            std::printf("  burnout: patches now=%u scars %u -> %u\n", burnt_out.patches, scars_before,
+                        burnt_out.scars);
+            chk.expect(burnt_out.burning == 0, "the patch burned itself out on its own bounded clock");
+            chk.expect(burnt_out.scars > scars_before,
+                       "burnout stamped an RFC-004 kScorched scar (Layer 0b), never a longer chain here");
+
+            world.teleport_player(guest, home, spawn.x, spawn.y);
+        }
+        std::printf("RFC-010 integration: a live combat fire patch spreads/decays and hands off to "
+                    "RFC-004's scar layer at burnout, all check out\n\n");
+    }
+
     // --- The dojo boss (F3) -----------------------------------------------------------------------
     // The first scripted BOSS. Everything above proves the fight SYSTEM; this proves the boss is a
     // first-class citizen of it: it is a Creature the player's ordinary verbs damage, its telegraph is
@@ -1418,6 +2100,14 @@ int main(int argc, char** argv) {
             const PlayerView at_commit = world.player_view(slot);
             chk.expect(committed, "the boss committed to a telegraphed attack (its wind-up is published)");
             chk.expect(at_commit.hp == kPlayerMaxHp, "no damage had landed at the moment of commit");
+
+            // RFC-006 §2: the commit above also wrote a real, replicated Telegraph record, not just
+            // the legacy `windup` counter — the same commit `boss_commit` (chunk_actor.hpp) now drives.
+            Creature committed_boss{};
+            boss_of_room(committed_boss);
+            const ChunkCoord droom_chunk = chunk_of(kInterior, committed_boss.x, committed_boss.y);
+            chk.expect(world.chunk_stats(droom_chunk).telegraphs >= 1,
+                       "the committed attack published a real RFC-006 Telegraph record");
             bool dmg_during = false;
             int held = 0;
             for (int i = 0; i < 16; ++i) {
@@ -1435,6 +2125,9 @@ int main(int argc, char** argv) {
             chk.expect(!dmg_during, "no HurtPlayer landed before the boss's wind-up elapsed");
             chk.expect(after.hp == kPlayerMaxHp - kBossDamage,
                        "the boss blow landed for exactly its damage once the wind-up elapsed");
+            chk.expect(world.chunk_stats(droom_chunk).telegraphs == 0,
+                       "the telegraph record disappeared the instant the blow resolved -- hand-off "
+                       "to the impact Effect, per §1.4's lifecycle table");
 
             // (b) Dodge mid-wind-up: wait for a fresh attack commit, then step out of reach (staying
             // in the room). The blow whiffs — no damage, and a slash the player can SEE on the empty
