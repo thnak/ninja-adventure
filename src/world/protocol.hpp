@@ -369,6 +369,28 @@ struct AbilityPlan {
 
 struct GetPlayer {};
 
+// RFC-021 §4.3: cash in a discovered, tier->=2 village for an instant same-map arrival. The
+// player's choice of resource (Stone or Wood, §4.3's cost table); anything else is refused. One
+// atomic check-and-debit-and-move handler, the same shape as SpendItems/PlanAttack.
+struct UseWaypoint {
+    std::uint16_t village_index = 0;  // index into WorldLayout::villages()
+    ItemKind pay_kind = ItemKind::kStone;
+};
+
+// RFC-021 §5.2/§4.3: what this player has discovered so far — the per-village visited/usable
+// bitsets, exposed for tools/tests/a future Map screen to poll. Deliberately NOT part of
+// PlayerView: §5.4 states plainly that map data "must not multiplex onto the same cadence" as the
+// per-tick chunk/player replication bus, so this rides its own ask instead of the hot publish path.
+struct GetDiscovery {};
+
+// RFC-021 §5.2: has this player's fog bitset revealed the cell containing (tx, ty)? A single-tile
+// query rather than dumping the whole 2 KiB bitset, for the same reason GetDiscovery stays off the
+// per-tick bus.
+struct IsFogRevealed {
+    std::uint16_t tx = 0;
+    std::uint16_t ty = 0;
+};
+
 // Toggle a mount. Travel across a 1024x1024 map is a design problem, not a convenience: the
 // diagonal is nearly four minutes on foot. Riding costs nothing but forbids attacking, which is the
 // trade that keeps it from simply being "the walk speed, but correct".

@@ -744,6 +744,25 @@ public:
         player_ref_by_key(player).tell(GrantEssence{skill, amount});
     }
 
+    void use_waypoint(std::uint64_t player, std::uint16_t village_index, ItemKind pay_kind) {
+        player_ref_by_key(player).tell(UseWaypoint{village_index, pay_kind});
+    }
+
+    // RFC-021 §5.2/§4.3: read a player's discovery state — the per-village visited/usable bitsets
+    // (`DiscoveryView`) and a single fog-cell query, both exposed for tests/tools/a future Map
+    // screen rather than the per-tick `PlayerView` bus (§5.4's own explicit cadence separation).
+    [[nodiscard]] DiscoveryView discovery_of(std::uint64_t player) {
+        quark::result<DiscoveryView> r =
+            quark::block_on(player_ref_by_key(player).ask<DiscoveryView>(GetDiscovery{}));
+        return r.has_value() ? r.value() : DiscoveryView{};
+    }
+
+    [[nodiscard]] bool fog_revealed(std::uint64_t player, std::uint16_t tx, std::uint16_t ty) {
+        quark::result<bool> r =
+            quark::block_on(player_ref_by_key(player).ask<bool>(IsFogRevealed{tx, ty}));
+        return r.has_value() && r.value();
+    }
+
     // Debug/tools: top a player's bars up. Amounts ADD and are clamped to the maxima by the trusted
     // actor, so passing the maxima refills from any state. Used by the headless runner to start each
     // staged ability fight from full, so the test measures the ability rather than the wildlife.

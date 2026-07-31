@@ -80,6 +80,14 @@ struct PlayerView {
 
 using PlayerViewPtr = std::shared_ptr<const PlayerView>;
 
+// RFC-021 §5.2/§4.3: the response to `Ask<GetDiscovery, DiscoveryView>` — one byte per village
+// (indexed exactly like `WorldLayout::villages()`), not a `PlayerView` field; see `GetDiscovery`'s
+// own comment (protocol.hpp) for why this stays off the per-tick publish bus.
+struct DiscoveryView {
+    std::uint8_t village_visited[kMaxVillages] = {};  // 0/1: the feature-detail trigger has fired
+    std::uint8_t village_usable[kMaxVillages] = {};    // 0/1: visited AND the village's own tier>=2
+};
+
 // The players' equivalent of `SnapshotBus`, one slot per session.
 //
 // WHO READS IT AND WHY THAT IS SOUND. Two readers: the renderer (which must not `ask` in a frame,

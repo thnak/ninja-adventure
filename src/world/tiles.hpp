@@ -1134,6 +1134,41 @@ inline constexpr std::uint32_t kRespecRefundPm = 750;  // 75% refunded, per-mill
 inline constexpr std::uint8_t kEssenceGateStartLevel = 18;  // first level requiring Essence
 inline constexpr std::uint8_t kEssenceGateTotal = 3;        // 1 unit per level, 18->20
 
+// --- RFC-021 §4.3/§5.2: village waypoint network + discovery fog -------------------------------
+// GAME.md §3 states plainly that mounts AND village teleport points must ship with the world
+// stage, not be deferred. Mounts shipped (SetMounted); this is the waypoint half.
+inline constexpr int kFogCellTiles = 8;                          // §5.2: one bit per 8x8-tile cell
+inline constexpr int kFogGridSize = kMapTiles / kFogCellTiles;   // 128
+inline constexpr int kFogCellCount = kFogGridSize * kFogGridSize;  // 16,384 bits = 2 KiB/player
+
+// DIVERGENCE from §5.2's literal mechanism: the RFC piggybacks fog reveal on the existing
+// chunk-side PlayerBeacon publish (a ~80-tile radius, a cross-actor mechanism). This reveals fog
+// directly off the player's own tick-local position instead — same end result ("walking past is
+// enough, no explicit action"), no new chunk->player message, smaller radius (a stand-in tunable,
+// not the beacon's own footprint, and a square stamp rather than a circle for the same reason).
+inline constexpr float kFogRevealRadiusTiles = 40.0f;
+inline constexpr int kFogRevealCellRadius = 5;  // ~kFogRevealRadiusTiles / kFogCellTiles
+
+// §4.3: the tight "have you actually stood at this village" trigger — distinct from and smaller
+// than the fog radius above, matching the RFC's own "Terrain fog" vs "Feature detail" split.
+inline constexpr float kVillageVisitRadiusTiles = 8.0f;
+
+// A fixed cap on how many villages a player's visited-bitset can track. Worldgen places "49-51"
+// villages (§2.2, not contractual) once, at bring-up, long before any player exists to visit one;
+// this leaves real headroom without needing a per-player array dynamically sized off the
+// process-global WorldLayout.
+inline constexpr int kMaxVillages = 96;
+
+inline constexpr std::uint8_t kWaypointMinTier = 2;    // §4.3 rule 1
+inline constexpr std::int32_t kWaypointFeeStone = 15;  // §4.3 cost table (tunable)
+inline constexpr std::int32_t kWaypointFeeWood = 10;   // (tunable)
+
+[[nodiscard]] inline constexpr int fog_cell_of(int tx, int ty) noexcept {
+    const int cx = (tx < 0) ? 0 : (tx >= kMapTiles ? kFogGridSize - 1 : tx / kFogCellTiles);
+    const int cy = (ty < 0) ? 0 : (ty >= kMapTiles ? kFogGridSize - 1 : ty / kFogCellTiles);
+    return cy * kFogGridSize + cx;
+}
+
 // --- Simulation cadence --------------------------------------------------------------------------
 inline constexpr int kTicksPerSecond = 10;
 inline constexpr std::int64_t kTickMs = 1000 / kTicksPerSecond;

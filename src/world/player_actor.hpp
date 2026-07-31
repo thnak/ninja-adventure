@@ -28,6 +28,7 @@
 #pragma once
 
 #include <algorithm>
+#include <bitset>
 #include <cstdint>
 #include <memory>
 
@@ -39,6 +40,7 @@
 #include "world/protocol.hpp"
 #include "world/snapshot.hpp"
 #include "world/tiles.hpp"
+#include "world/worldgen.hpp"
 
 namespace mmo {
 
@@ -54,10 +56,11 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
                                   quark::Placement<quark::HashById, Require<Trusted>>> {
     using protocol =
         Protocol<Tick, MoveIntent, Teleport, GrantItems, HurtPlayer, GrantVitals, GrantXp,
-                 RespecSkill, GrantEssence, SetRespawn, BindAccount, Unbind, Rebind, SetMounted,
-                 SetInstanceReturn, RestoreProgression, Ask<SpendItems, bool>,
+                 RespecSkill, GrantEssence, SetRespawn, BindAccount, Unbind, Rebind,
+                 SetMounted, SetInstanceReturn, RestoreProgression, Ask<SpendItems, bool>,
                  Ask<GetPlayer, PlayerView>, Ask<PlanAttack, AttackPlan>,
-                 Ask<UseAbility, AbilityPlan>>;
+                 Ask<UseAbility, AbilityPlan>, UseWaypoint, Ask<GetDiscovery, DiscoveryView>,
+                 Ask<IsFogRevealed, bool>>;
 
     // Set once at bring-up, before the engine starts.
     std::uint64_t id = 0;
@@ -73,6 +76,12 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         tick_ = t.tick;
         world_ms_ = t.world_ms;
         if (account_ == 0) return;  // unbound slot: inert, and not published
+
+        // RFC-021 §5.2/§4.3: discovery never requires an explicit action — walking past is enough.
+        // Both checks are cheap (a bitset stamp, a single nearest-village lookup) and run every
+        // tick a player is bound, the same tolerance `terrain_of`/`ring_of` calls already get.
+        reveal_fog(static_cast<int>(x_), static_cast<int>(y_));
+        mark_village_visited(static_cast<int>(x_), static_cast<int>(y_));
 
         // RFC-001 Section 2 (T2/T3/T4): while a head is mid-Cast/Channel, its clock is the caster's
         // own tick — this is what makes head phases progress "on the caster's ticks" per Section 4's
@@ -308,6 +317,50 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
             std::min<int>(kEssenceGateTotal, essence_paid_[s] + g.amount));
         convert_xp(s);
         publish();
+    }
+
+    // RFC-021 §4.3: cash in a discovered, tier-2+ village for an instant same-map arrival. One
+    // atomic check-and-debit-and-move handler, the same shape as `Ask<SpendItems, bool>` composed
+    // with `Teleport` — except this one caller already owns both halves, so there is no need to
+    // round-trip through World the way `world.hpp::build_at` does for a chunk-owned building.
+    // "USABLE" (visited AND tier>=2) is computed here, not cached: nothing today ever changes a
+    // village's tier after worldgen places it (P3's tier-growth system is unbuilt), so there is no
+    // second piece of state that could go stale between visits.
+    void handle(const UseWaypoint& w) noexcept {
+        if (account_ == 0 || dead_ticks_ > 0 || mounted_) return;
+        if (w.pay_kind != ItemKind::kWood && w.pay_kind != ItemKind::kStone) return;
+        const auto& villages = world_layout(kWorldSeed).villages();
+        if (w.village_index >= villages.size() || w.village_index >= kMaxVillages) return;
+        if (!village_visited_.test(w.village_index)) return;
+        const Village& v = villages[w.village_index];
+        if (v.tier < kWaypointMinTier) return;
+        const std::int32_t cost =
+            (w.pay_kind == ItemKind::kWood) ? kWaypointFeeWood : kWaypointFeeStone;
+        const int k = static_cast<int>(w.pay_kind);
+        if (items_[k] < cost) return;
+        items_[k] -= cost;
+        map = kOverworld;  // §4.3: same-map only — a waypoint never targets a realm interior
+        x_ = static_cast<float>(v.tx) + 0.5f;
+        y_ = static_cast<float>(v.ty) + 0.5f;
+        step_through_doors();
+        publish();
+    }
+
+    void handle(const Ask<GetDiscovery, DiscoveryView>& m) noexcept {
+        DiscoveryView v{};
+        const auto& villages = world_layout(kWorldSeed).villages();
+        const std::size_t n = std::min<std::size_t>(villages.size(), kMaxVillages);
+        for (std::size_t i = 0; i < n; ++i) {
+            const bool visited = village_visited_.test(i);
+            v.village_visited[i] = visited ? 1 : 0;
+            v.village_usable[i] = (visited && villages[i].tier >= kWaypointMinTier) ? 1 : 0;
+        }
+        m.respond(v);
+    }
+
+    void handle(const Ask<IsFogRevealed, bool>& m) noexcept {
+        m.respond(fog_.test(static_cast<std::size_t>(
+            fog_cell_of(m.query.tx, m.query.ty))));
     }
 
     void handle(const SetRespawn& r) noexcept {
@@ -643,6 +696,39 @@ private:
         }
     }
 
+    // RFC-021 §5.2: stamp every fog cell within `kFogRevealCellRadius` cells of the player's
+    // current position. A bounding SQUARE, not a circle — see the constant's own comment (tiles.hpp)
+    // for why that is an acceptable simplification at this cell granularity (8 tiles/cell).
+    void reveal_fog(int tx, int ty) noexcept {
+        const int ccx = std::clamp(tx / kFogCellTiles, 0, kFogGridSize - 1);
+        const int ccy = std::clamp(ty / kFogCellTiles, 0, kFogGridSize - 1);
+        for (int dy = -kFogRevealCellRadius; dy <= kFogRevealCellRadius; ++dy) {
+            const int cy = ccy + dy;
+            if (cy < 0 || cy >= kFogGridSize) continue;
+            for (int dx = -kFogRevealCellRadius; dx <= kFogRevealCellRadius; ++dx) {
+                const int cx = ccx + dx;
+                if (cx < 0 || cx >= kFogGridSize) continue;
+                fog_.set(static_cast<std::size_t>(cy * kFogGridSize + cx));
+            }
+        }
+    }
+
+    // RFC-021 §4.3/§5.2: the tight "have you actually stood here" trigger, distinct from and
+    // smaller than the fog reveal above. Once set, a village's bit never clears — matching §5.2's
+    // "no regrowth, ever" rule extended to waypoint eligibility.
+    void mark_village_visited(int tx, int ty) noexcept {
+        const auto& villages = world_layout(kWorldSeed).villages();
+        const Village* v = world_layout(kWorldSeed).nearest_village(tx, ty);
+        if (v == nullptr) return;
+        const auto idx = static_cast<std::size_t>(v - villages.data());
+        if (idx >= kMaxVillages) return;
+        const float dx = static_cast<float>(tx) - static_cast<float>(v->tx);
+        const float dy = static_cast<float>(ty) - static_cast<float>(v->ty);
+        if (dx * dx + dy * dy <= kVillageVisitRadiusTiles * kVillageVisitRadiusTiles) {
+            village_visited_.set(idx);
+        }
+    }
+
     [[nodiscard]] std::int16_t scaled(std::int16_t base, Skill s) const noexcept {
         return static_cast<std::int16_t>(static_cast<float>(base) *
                                          skill_scale(level_[static_cast<int>(s)]));
@@ -759,6 +845,11 @@ private:
     std::uint32_t xp_[kSkillCount] = {};
     // RFC-019 §5.7: Essence units spent against each branch's Tier IV gate (0..kEssenceGateTotal).
     std::uint8_t essence_paid_[kSkillCount] = {};
+    // RFC-021 §5.2: 2 KiB terrain-fog bitset (one bit per 8x8-tile cell) + a per-village
+    // "physically visited" bitset (§4.3's waypoint-eligibility predicate). Both monotonic —
+    // bits only ever set, matching §5.2's "no regrowth, ever."
+    std::bitset<kFogCellCount> fog_{};
+    std::bitset<kMaxVillages> village_visited_{};
     // Per-ability cooldown, keyed by AbilityId (not by slot, so the timer belongs to the move and
     // survives a future loadout-picker unchanged — with the fixed F1a loadout each slot maps to a
     // distinct ability, so this reads identically to per-slot). RFC-001 Section 8 stores cooldowns

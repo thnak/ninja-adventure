@@ -3240,12 +3240,24 @@ int main(int argc, char** argv) {
             // per the account-budget note above — rather than minting a third new one; `guest`'s own
             // Melee is likewise untouched (every earlier use of it casts spells or channels an
             // ability, never swings), so a kill's Melee XP is a clean, detectable signal for both.
-            const float lx = std::floor(std::clamp(spawn.x + 340.0f, 10.0f,
-                                                    static_cast<float>(kMapTiles - 10))) +
-                             0.5f;
-            const float ly = std::floor(std::clamp(spawn.y + 370.0f, 10.0f,
-                                                    static_cast<float>(kMapTiles - 10))) +
-                             0.5f;
+            // A blind coordinate offset is not good enough here — the slime's HP is ring-scaled
+            // (higher outside Meadow) and the tile itself might not even be walkable (a silent
+            // spawn_one_at rejection, chunk_actor.hpp's SpawnWave handler). `find_meadow_tile` is
+            // the same proven helper the WhirlCleave/RainCall fights above already stake their own
+            // walkable, ring-0 (flat 30 hp Slime, no scaling) ground on.
+            int lxi = -1, lyi = -1;
+            const bool have_ledger_tile = find_meadow_tile(kHomeTx + 150, kHomeTy + 150, lxi, lyi);
+            chk.expect(have_ledger_tile, "a walkable meadow tile exists for the ledger-test fight");
+            const float lx = static_cast<float>(lxi) + 0.5f;
+            const float ly = static_cast<float>(lyi) + 0.5f;
+            // `guest` fights several magic battles earlier in this file and can still be mid-
+            // respawn (`dead_ticks_ > 0`) from creature retaliation there — `grant_vitals` tops up
+            // hp/mana/stamina but does not clear that countdown, and `PlanAttack` refuses every
+            // swing while it is nonzero (player_actor.hpp). Wait it out first, the same way the
+            // death test earlier in this file waits with `advance(world, kRespawnTicks + 5)`.
+            if (world.player_view(slot2).dead_ticks > 0 || world.player_view(p19_slot).dead_ticks > 0) {
+                advance(world, kRespawnTicks + 5);
+            }
             world.teleport_player(p19_key, kOverworld, lx, ly);
             world.teleport_player(guest, kOverworld, lx, ly);
             world.grant_vitals(p19_key, kPlayerMaxHp, kPlayerMaxMana, kPlayerMaxStamina);
@@ -3255,15 +3267,18 @@ int main(int argc, char** argv) {
                                CreatureKind::kSlime, kOverworld);
             advance(world, 2);
 
-            const std::uint32_t kills_before =
-                world.status().player_kills.load(std::memory_order_relaxed);
             const std::uint32_t p19_melee_xp_before =
                 world.player_view(p19_slot).skill_xp[static_cast<int>(Skill::kMelee)];
             const std::uint32_t guest_xp_before =
                 world.player_view(slot2).skill_xp[static_cast<int>(Skill::kMelee)];
 
+            const ChunkCoord ledger_chunk = chunk_of(kOverworld, lx, ly);
+
             // `p19_key` lands ONE light swing (14 damage against a 30-hp slime — it survives) and
-            // never touches it again; `guest` alone finishes it off.
+            // never touches it again; `guest` alone finishes it off. `player_kills` is a world-wide
+            // counter (every player-caused kill anywhere), so the real signal is this chunk's own
+            // hostile count dropping — a global-counter delta could pass spuriously off an unrelated
+            // kill happening elsewhere during these same ticks.
             const bool tag_hit = world.swing(p19_key, /*heavy*/ false);
             advance(world, 2);
             chk.expect(tag_hit, "the tagging swing lands");
@@ -3272,9 +3287,7 @@ int main(int argc, char** argv) {
                 advance(world, 2);
             }
 
-            const std::uint32_t kills_after =
-                world.status().player_kills.load(std::memory_order_relaxed);
-            chk.expect(kills_after > kills_before, "the slime died");
+            chk.expect(world.chunk_stats(ledger_chunk).hostile == 0, "the slime died");
 
             const PlayerView p19_after = world.player_view(p19_slot);
             const PlayerView guest_after = world.player_view(slot2);
