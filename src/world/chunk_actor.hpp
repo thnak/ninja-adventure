@@ -621,6 +621,13 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         if (b.kind == BuildKind::kHearth && router != nullptr && b.player != 0) {
             router->get<PlayerActor>(b.player).tell(SetRespawn{b.tx, b.ty});
         }
+        // RFC-020 §4: the one live `kBuild` fact source this pass wires — the Build screen's own
+        // placement verb, matching the table's own citation of it.
+        if (router != nullptr && b.player != 0) {
+            router->get<PlayerActor>(b.player).tell(
+                GameplayFact{FactKind::kBuild, b.player, static_cast<std::uint16_t>(b.kind), 1, 0,
+                            static_cast<std::uint32_t>(tick_)});
+        }
     }
 
     // Upgrade in place: level up, and heal by exactly the HP the new level adds, so upgrading a
@@ -2612,6 +2619,13 @@ private:
                     router->get<PlayerActor>(e.player).tell(
                         GrantXp{e.skill, static_cast<std::uint32_t>(st.xp) * (1u + ring)});
                 }
+                // RFC-020 §4: `kKill` facts feed `clear` quest objectives, co-subscribing to this
+                // SAME per-contributor ledger walk rather than re-deriving kill attribution — every
+                // qualifying contributor gets a fact, not only whoever landed the last hit (§4's own
+                // resolution of the party-scope `clear` question).
+                router->get<PlayerActor>(e.player).tell(
+                    GameplayFact{FactKind::kKill, e.player, static_cast<std::uint16_t>(c.kind), 1,
+                                static_cast<std::uint8_t>(e.skill), static_cast<std::uint32_t>(tick_)});
             }
         }
         // A ledger miss (the caller's own hit fell outside every contributor's assist window, or
@@ -2624,6 +2638,9 @@ private:
                                    ? 400u
                                    : static_cast<std::uint32_t>(st.xp) * (1u + ring)});
             if (c.kind == CreatureKind::kBoss) grant_loot(c, player, ring_enum, realm_challenge);
+            router->get<PlayerActor>(player).tell(
+                GameplayFact{FactKind::kKill, player, static_cast<std::uint16_t>(c.kind), 1,
+                            static_cast<std::uint8_t>(skill), static_cast<std::uint32_t>(tick_)});
         }
         if (player != 0) {
             if (st.faction == Faction::kMonster && c.kind != CreatureKind::kBoss) {

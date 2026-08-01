@@ -60,7 +60,7 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
                  SetMounted, SetInstanceReturn, RestoreProgression, Ask<SpendItems, bool>,
                  Ask<GetPlayer, PlayerView>, Ask<PlanAttack, AttackPlan>,
                  Ask<UseAbility, AbilityPlan>, UseWaypoint, Ask<GetDiscovery, DiscoveryView>,
-                 Ask<IsFogRevealed, bool>, SetLoadout>;
+                 Ask<IsFogRevealed, bool>, SetLoadout, GameplayFact, AcceptQuest, AbandonQuest>;
 
     // Set once at bring-up, before the engine starts.
     std::uint64_t id = 0;
@@ -696,6 +696,71 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
 
     void handle(const Ask<GetPlayer, PlayerView>& m) noexcept { m.respond(view()); }
 
+    // RFC-020 §Q3/Multiplayer: the untrusted chunk actor where an action happened hands this off;
+    // every active `QuestInstance` gets a chance to match it (QI3 means at most one instance per
+    // quest id, so there is never a double-count against two copies of the same objective). A
+    // newly-complete instance pays immediately (every v1 quest is `auto_complete: true` — see
+    // quest.hpp's header note on why the `giver`/kTalk turn-in path is not built yet) and the slot is
+    // freed.
+    void handle(const GameplayFact& f) noexcept {
+        bool changed = false;
+        for (int i = 0; i < kMaxActiveQuests; ++i) {
+            QuestInstance& qi = quests_[i];
+            if (qi.id == QuestId::kCount) continue;
+            if (!quest_apply_fact(qi, f)) continue;
+            changed = true;
+            if (quest_instance_complete(qi)) {
+                pay_quest_rewards(qi);
+                // Always set — this is the "ever completed" record the Journal's Completed list and
+                // `quest_offerable`'s non-repeatable re-offer gate both read. A REPEATABLE quest
+                // still sets it (so it shows up as completed at least once) but is never blocked by
+                // it: `quest_offerable`'s guard is `already_completed && !def.repeatable`, which a
+                // repeatable quest always bypasses regardless of this bit.
+                quest_completed_.set(static_cast<std::size_t>(qi.id));
+                qi = QuestInstance{};
+            }
+        }
+        if (changed) publish();
+    }
+
+    // Q1->Q2: re-validates everything server-side (QI3, QI4, unlock) rather than trusting the
+    // client's own Journal-side offer list — the same "server decides, client asks" discipline
+    // `SetLoadout` already follows. A pure tell: on refusal the quest simply never appears in the
+    // next PlayerView's `quest_active_id`, matching `SetLoadout`'s own silent-refusal shape rather
+    // than inventing a round-trip just for this one verb.
+    void handle(const AcceptQuest& a) noexcept {
+        if (account_ == 0 || dead_ticks_ > 0) return;
+        if (static_cast<int>(a.id) < 0 || static_cast<int>(a.id) >= kQuestCount) return;
+        if (has_active_quest(a.id)) return;  // QI3
+        const QuestDef& def = quest_def_of(a.id);
+        if (quest_completed_.test(static_cast<std::size_t>(a.id)) && !def.repeatable) return;
+        if (max_visited_village_tier() < def.unlock_village_tier_min) return;
+        int slot = -1;
+        for (int i = 0; i < kMaxActiveQuests; ++i) {
+            if (quests_[i].id == QuestId::kCount) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0) return;  // QI4: at capacity
+        QuestInstance qi{};
+        qi.id = a.id;
+        qi.accepted_tick = static_cast<std::uint32_t>(tick_);
+        quests_[slot] = qi;
+        publish();
+    }
+
+    // Q5: free, silent, immediate — no guard beyond "player asked to" (Tone Guardrail §4).
+    void handle(const AbandonQuest& a) noexcept {
+        for (int i = 0; i < kMaxActiveQuests; ++i) {
+            if (quests_[i].id == a.id) {
+                quests_[i] = QuestInstance{};
+                publish();
+                return;
+            }
+        }
+    }
+
     // ================================ bring-up ====================================================
 
     [[nodiscard]] PlayerView view() const noexcept {
@@ -744,6 +809,19 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
             v.loadout_raw[s] = manual_[s] ? static_cast<std::uint8_t>(manual_ability_[s])
                                           : kLoadoutAuto;
         }
+        for (int i = 0; i < kMaxActiveQuests; ++i) {
+            v.quest_active_id[i] = quests_[i].id;
+            v.quest_active_progress[i] = quests_[i].count_current[0];
+        }
+        const std::uint8_t max_tier = max_visited_village_tier();
+        for (int i = 0; i < kQuestCount; ++i) {
+            const auto qid = static_cast<QuestId>(i);
+            const bool active = has_active_quest(qid);
+            const bool completed = quest_completed_.test(static_cast<std::size_t>(i));
+            v.quest_offerable[i] =
+                quest_offerable(qid, max_tier, active, completed) ? 1 : 0;
+            v.quest_completed[i] = completed ? 1 : 0;
+        }
         return v;
     }
 
@@ -758,6 +836,67 @@ private:
     [[nodiscard]] AbilityId resolved_ability(int slot) const noexcept {
         if (manual_[slot]) return manual_ability_[slot];
         return equipped_ability(level_, slot);
+    }
+
+    [[nodiscard]] bool has_active_quest(QuestId id) const noexcept {
+        for (int i = 0; i < kMaxActiveQuests; ++i) {
+            if (quests_[i].id == id) return true;
+        }
+        return false;
+    }
+
+    // RFC-020 Q1's unlock guard reads "village tier ≥ N," and RFC-021 gives every player only a
+    // per-village visited bitset, not a per-village standing scalar — so this is the highest tier
+    // among villages this player has physically visited, mirroring `handle(const UseWaypoint&)`'s
+    // own `world_layout(kWorldSeed).villages()` access pattern exactly.
+    [[nodiscard]] std::uint8_t max_visited_village_tier() const noexcept {
+        const auto& villages = world_layout(kWorldSeed).villages();
+        const std::size_t n = std::min<std::size_t>(villages.size(), kMaxVillages);
+        std::uint8_t best = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            if (village_visited_.test(i)) best = std::max(best, villages[i].tier);
+        }
+        return best;
+    }
+
+    // RFC-020 §7/QV18: quest XP CLAMPS at the 34-point cap rather than refusing — unlike ordinary
+    // `GrantXp` (which drops overflow outright, see its own comment, to keep the farm-then-respec
+    // exploit closed), a quest reward always banks into `xp_[branch]` and lets `convert_xp`'s own
+    // loop stop naturally at the cap; the pending level-up simply does not commit until the player
+    // frees a point elsewhere, mirroring RFC-019 §5.7's Essence-gate "waits, does not count down"
+    // pattern exactly. Only a fully-maxed branch (`kMaxSkillLevel`) truly has nothing left to bank.
+    void grant_quest_xp(Skill skill, std::uint32_t amount) noexcept {
+        const int s = static_cast<int>(skill);
+        if (s < 0 || s >= kSkillCount || amount == 0) return;
+        if (level_[s] >= kMaxSkillLevel) return;
+        xp_[s] += amount;
+        convert_xp(s);
+    }
+
+    // RFC-020 §7: pays every reward hook on a just-completed instance. `village_standing` has no
+    // `VillageActor`-equivalent to pay into yet (quest.hpp's header note) — banked into a counter
+    // here as the forward-compatible stand-in.
+    void pay_quest_rewards(const QuestInstance& qi) noexcept {
+        const QuestDef& def = quest_def_of(qi.id);
+        for (int i = 0; i < def.reward_count; ++i) {
+            const RewardHook& r = def.rewards[i];
+            switch (r.kind) {
+                case RewardKind::kXp: {
+                    const Skill branch =
+                        r.by_cause ? static_cast<Skill>(qi.dominant_branch) : r.branch;
+                    grant_quest_xp(branch, r.amount);
+                    break;
+                }
+                case RewardKind::kVillageStanding:
+                    village_standing_earned_ += r.amount;
+                    break;
+                case RewardKind::kItemTable: {
+                    const int k = static_cast<int>(r.item);
+                    if (k >= 0 && k < kItemKinds) items_[k] += r.item_count;
+                    break;
+                }
+            }
+        }
     }
 
 
@@ -980,6 +1119,15 @@ private:
     // bits only ever set, matching §5.2's "no regrowth, ever."
     std::bitset<kFogCellCount> fog_{};
     std::bitset<kMaxVillages> village_visited_{};
+    // RFC-020: the quest log. `QuestInstance{}`'s default `id == QuestId::kCount` marks an empty
+    // slot. `quest_completed_` is a session-only "ever finished" gate for QI3's non-repeatable
+    // re-offer rule — not persisted (RFC-020's own Non-goals defer quest-log persistence to RFC-016),
+    // so it resets on restart along with everything else this actor holds only in memory.
+    QuestInstance quests_[kMaxActiveQuests]{};
+    std::bitset<kQuestCount> quest_completed_{};
+    // RFC-020 §7: the `village_standing` reward's forward-compatible stand-in — no `VillageActor`-
+    // equivalent exists yet to read this (see quest.hpp's header note).
+    std::uint32_t village_standing_earned_ = 0;
     // Per-ability cooldown, keyed by AbilityId (not by slot, so the timer belongs to the move and
     // survives a future loadout-picker unchanged — with the fixed F1a loadout each slot maps to a
     // distinct ability, so this reads identically to per-slot). RFC-001 Section 8 stores cooldowns

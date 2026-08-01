@@ -39,6 +39,11 @@ static const char* const kSchoolUpper[kSkillCount] = {"MELEE", "RANGED", "MAGIC"
 static const char* const kAbilityName[kAbilityCount] = {
     "Whirl Cleave", "Crush Blow", "Fan Volley", "Smoke Bomb", "Elemental Nova", "Rain Call"};
 
+// RFC-020: quest display strings, indexed by `QuestId` — a UI concern kept out of quest.hpp, the
+// same split `kAbilityName` already draws against `abilities.hpp`.
+static const char* const kQuestName[kQuestCount] = {"Farm Plot", "Clear the Glade"};
+static const char* const kQuestDesc[kQuestCount] = {"Build a farm plot", "Clear 3 slimes"};
+
 // A shade dimmer, for the inactive chips: the same colour, pulled toward the background so the
 // active school is the only one at full strength.
 [[nodiscard]] Color dim(Color c, float k) {
@@ -695,6 +700,56 @@ void apply_theme() {
     GuiSetStyle(DEFAULT, TEXT_COLOR_PRESSED, hex(0xfff3d0ff));
 }
 
+// RFC-020: the Journal's Quests tab — Active (with a free, always-available Abandon) and Nearby &
+// known (with Accept), read straight off `PlayerView` (no `ask`, see snapshot.hpp's own comment on
+// why the quest log rides the hot per-tick bus). Community quests do not appear here — v1 authored
+// content is solo-only (quest.hpp's header note).
+void draw_journal_quests(ShellState& st, const PlayerView& player, int x, int y) {
+    DrawText("Active", x, y, 20, Color{230, 206, 140, 255});
+    y += 28;
+    bool any_active = false;
+    for (int i = 0; i < kMaxActiveQuests; ++i) {
+        const QuestId id = player.quest_active_id[i];
+        if (id == QuestId::kCount) continue;
+        any_active = true;
+        const int qi = static_cast<int>(id);
+        const std::uint16_t req = quest_def_of(id).objectives[0].count_required;
+        const char* line =
+            TextFormat("%s  (%u/%u)", kQuestName[qi], player.quest_active_progress[i], req);
+        DrawText(line, x + 8, y + 6, 17, Color{206, 210, 216, 255});
+        const Rectangle abandon_r{static_cast<float>(x + 480), static_cast<float>(y), 120.0f, 26.0f};
+        if (GuiButton(abandon_r, "Abandon")) st.pending_quest_abandon = id;
+        y += 32;
+    }
+    if (!any_active) {
+        DrawText("Nothing accepted yet.", x + 8, y, 16, Color{150, 158, 168, 255});
+        y += 26;
+    }
+    y += 18;
+
+    DrawText("Nearby & known", x, y, 20, Color{230, 206, 140, 255});
+    y += 28;
+    bool any_offer = false;
+    for (int i = 0; i < kQuestCount; ++i) {
+        if (player.quest_offerable[i] == 0) continue;
+        any_offer = true;
+        const char* line = TextFormat("%s  -  %s", kQuestName[i], kQuestDesc[i]);
+        DrawText(line, x + 8, y + 6, 17, Color{206, 210, 216, 255});
+        const Rectangle accept_r{static_cast<float>(x + 480), static_cast<float>(y), 120.0f, 26.0f};
+        if (GuiButton(accept_r, "Accept")) st.pending_quest_accept = static_cast<QuestId>(i);
+        y += 32;
+    }
+    if (!any_offer) {
+        DrawText("Nothing on offer right now.", x + 8, y, 16, Color{150, 158, 168, 255});
+        y += 26;
+    }
+    y += 18;
+
+    int completed = 0;
+    for (int i = 0; i < kQuestCount; ++i) completed += player.quest_completed[i];
+    DrawText(TextFormat("Completed: %d", completed), x, y, 16, Color{176, 190, 176, 255});
+}
+
 Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player, bool build_mode,
             int selected_slot) {
     apply_theme();
@@ -846,6 +901,21 @@ Action draw(ShellState& st, const WorldStatus& status, const PlayerView& player,
                                Color{110, 96, 70, 255});
             DrawText("Journal", x, y, 32, Color{240, 226, 190, 255});
             y += 48;
+
+            // RFC-020: a second tab alongside the pre-existing Guide content — Guide/Encyclopedia's
+            // own further split is GAME.md §12's, not this RFC's scope (Non-goals).
+            const int tab_click = segment_pair(x, y, "Guide", "Quests", st.journal_tab == 1);
+            if (tab_click >= 0) st.journal_tab = tab_click;
+            y += 54;
+
+            if (st.journal_tab == 1) {
+                draw_journal_quests(st, player, x, y);
+                const Rectangle back{static_cast<float>(x),
+                                     static_cast<float>(GetScreenHeight() - 108), 160.0f,
+                                     static_cast<float>(kBtnH)};
+                if (GuiButton(back, "Back")) st.screen = Screen::kPlaying;
+                return Action::kNone;
+            }
 
             DrawText("Controls", x, y, 20, Color{230, 206, 140, 255});
             y += 28;

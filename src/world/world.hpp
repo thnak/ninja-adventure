@@ -757,6 +757,15 @@ public:
         player_ref_by_key(player).tell(SetLoadout{slot, ability});
     }
 
+    // RFC-020 Q1->Q2/Q5: thin passthroughs, the same shape as `set_loadout` above — `PlayerActor` is
+    // the sole re-validator (QI3/QI4/unlock for accept; abandon always succeeds).
+    void accept_quest(std::uint64_t player, QuestId id) {
+        player_ref_by_key(player).tell(AcceptQuest{id});
+    }
+    void abandon_quest(std::uint64_t player, QuestId id) {
+        player_ref_by_key(player).tell(AbandonQuest{id});
+    }
+
     // RFC-021 §5.2/§4.3: read a player's discovery state — the per-village visited/usable bitsets
     // (`DiscoveryView`) and a single fog-cell query, both exposed for tests/tools/a future Map
     // screen rather than the per-tick `PlayerView` bus (§5.4's own explicit cadence separation).

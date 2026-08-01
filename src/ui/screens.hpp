@@ -17,6 +17,7 @@
 #include <cstdint>
 
 #include "render/raylib_bridge.hpp"
+#include "world/quest.hpp"
 #include "world/snapshot.hpp"
 
 namespace mmo::ui {
@@ -135,6 +136,14 @@ struct ShellState {
     // music_on already use. `AbilityId::kCount` doubles as the wire's own "Reset to Auto" sentinel.
     int pending_loadout_slot = -1;
     AbilityId pending_loadout_ability = AbilityId::kCount;
+
+    // RFC-020: the Journal's Quests tab hands Accept/Abandon clicks back the same way — `client_main`
+    // watches for a non-`kCount` value after `draw`, calls `World::accept_quest`/`abandon_quest`,
+    // and clears it.
+    QuestId pending_quest_accept = QuestId::kCount;
+    QuestId pending_quest_abandon = QuestId::kCount;
+    // Which Journal tab is showing: 0 = Guide (the pre-existing controls/tips content), 1 = Quests.
+    int journal_tab = 0;
 };
 
 // Handles the keys that belong to the shell rather than to gameplay: Esc pauses/backs out, J opens

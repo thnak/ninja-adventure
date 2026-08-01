@@ -26,6 +26,7 @@
 #include "world/battlefield.hpp"
 #include "world/combat_entity.hpp"
 #include "world/map_system.hpp"
+#include "world/quest.hpp"
 #include "world/telegraph.hpp"
 #include "world/tiles.hpp"
 
@@ -79,6 +80,18 @@ struct PlayerView {
     // is how it draws the deluxe attack frames + katana swoosh for ANY player (local or remote),
     // keyed off published state rather than off this client's own input. 0 means "never swung".
     std::uint64_t last_swing_tick = 0;
+
+    // RFC-020: the quest log, published every tick alongside skills/items so the Journal's Quests tab
+    // draws without an `ask` — the same reasoning `ability[]`/`ability_cd[]` above already follow for
+    // the HUD. Small enough (under 100 bytes total) to ride the hot per-tick bus, unlike RFC-021's
+    // `DiscoveryView` bitsets, which is why THAT stays off it (see `GetDiscovery`, protocol.hpp).
+    // `quest_active_id[i] == QuestId::kCount` marks an empty slot; v1 authored content ships
+    // single-objective quests only (quest.hpp), so objective 0's progress is enough to render
+    // "count_current/count_required" without walking `QuestDef::objectives` client-side.
+    QuestId quest_active_id[kMaxActiveQuests] = {};
+    std::uint16_t quest_active_progress[kMaxActiveQuests] = {};
+    std::uint8_t quest_offerable[kQuestCount] = {};  // 0/1, indexed by QuestId
+    std::uint8_t quest_completed[kQuestCount] = {};  // 0/1, indexed by QuestId (non-repeatable gate)
 
     [[nodiscard]] bool live() const noexcept { return account != 0; }
 };

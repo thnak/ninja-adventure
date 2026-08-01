@@ -3627,6 +3627,152 @@ int main(int argc, char** argv) {
                "ring scaling, deterministic per-contributor rolls, and the challenge-realm gate's "
                "no-exceptions rule (§3/§4.1/§5/§6/§8/§9/§10.2) all check out\n\n");
 
+    // --- RFC-020: mission & quest system. Pure-function coverage first (quest.hpp needs no actor),
+    // then a standalone `PlayerActor` exercising the real handlers (`AcceptQuest`/`GameplayFact`/
+    // `AbandonQuest`) directly — the same "no router, no bus, call handle() straight" pattern the
+    // RFC-016 block above already uses for a standalone `ChunkActor`, since every login slot is
+    // already spent by this point in the file (see the RFC-018 block's own note). `bus == nullptr`
+    // makes every `publish()` call inside these handlers a safe no-op. -------------------------------
+    {
+        using namespace mmo;
+
+        // Pure functions: fact matching, progress clamping, completion, and the live unlock guard.
+        {
+            QuestInstance qi{};
+            qi.id = QuestId::kFarmPlot;
+            const GameplayFact wrong_kind{FactKind::kKill, 1,
+                                          static_cast<std::uint16_t>(BuildKind::kPlot), 1, 0, 0};
+            chk.expect(!quest_apply_fact(qi, wrong_kind),
+                       "a fact of the wrong FactKind never matches a build objective");
+            const GameplayFact wrong_target{FactKind::kBuild,
+                                            1, static_cast<std::uint16_t>(BuildKind::kHearth), 1, 0, 0};
+            chk.expect(!quest_apply_fact(qi, wrong_target),
+                       "a fact whose subject_id does not match the objective's target is ignored");
+            const GameplayFact right{FactKind::kBuild, 1, static_cast<std::uint16_t>(BuildKind::kPlot),
+                                     1, 0, 0};
+            chk.expect(quest_apply_fact(qi, right) && qi.count_current[0] == 1,
+                       "a matching fact increments count_current");
+            chk.expect(quest_instance_complete(qi), "count_current reaching count_required completes it");
+
+            QuestInstance clear{};
+            clear.id = QuestId::kClearSlimes;
+            const GameplayFact kill{FactKind::kKill, 1, static_cast<std::uint16_t>(CreatureKind::kSlime),
+                                    1, static_cast<std::uint8_t>(Skill::kRanged), 0};
+            (void)quest_apply_fact(clear, kill);
+            (void)quest_apply_fact(clear, kill);
+            chk.expect(!quest_instance_complete(clear) && clear.count_current[0] == 2,
+                       "a 3-count objective is not complete at 2, and progress is not clamped early");
+            (void)quest_apply_fact(clear, kill);
+            (void)quest_apply_fact(clear, kill);  // a 4th fact past count_required must not overshoot
+            chk.expect(quest_instance_complete(clear) && clear.count_current[0] == 3,
+                       "progress clamps at count_required rather than overshooting past it");
+            chk.expect(clear.dominant_branch == static_cast<std::uint8_t>(Skill::kRanged),
+                       "a qualifying kKill fact's cause_branch becomes the instance's dominant_branch, "
+                       "feeding a by_cause reward");
+
+            chk.expect(quest_offerable(QuestId::kFarmPlot, 0, false, false),
+                       "a tier-0-unlock quest is offerable to a player who has visited no village");
+            chk.expect(!quest_offerable(QuestId::kFarmPlot, 0, true, false),
+                       "an already-active quest never re-offers (QI3)");
+            chk.expect(!quest_offerable(QuestId::kFarmPlot, 0, false, true),
+                       "a completed, non-repeatable quest never re-offers");
+            chk.expect(quest_offerable(QuestId::kClearSlimes, 0, false, true),
+                       "a completed, REPEATABLE quest re-offers immediately — no cooldown (QI1/QV10)");
+        }
+
+        // The real handlers, on a standalone actor.
+        {
+            PlayerActor pa;
+            pa.handle(BindAccount{1, 100, 100, 0, 0, 0});
+            chk.expect(pa.view().account == 1, "the standalone actor is bound and ready");
+
+            pa.handle(AcceptQuest{QuestId::kFarmPlot});
+            PlayerView v = pa.view();
+            chk.expect(v.quest_active_id[0] == QuestId::kFarmPlot && v.quest_active_progress[0] == 0,
+                       "Q1->Q2: AcceptQuest creates a QuestInstance visible in the next view");
+            chk.expect(v.quest_offerable[static_cast<int>(QuestId::kFarmPlot)] == 0,
+                       "an active quest drops off the offerable list (QI3)");
+
+            pa.handle(AcceptQuest{QuestId::kFarmPlot});
+            int active_farm_plots = 0;
+            for (int i = 0; i < kMaxActiveQuests; ++i) {
+                if (pa.view().quest_active_id[i] == QuestId::kFarmPlot) ++active_farm_plots;
+            }
+            chk.expect(active_farm_plots == 1,
+                       "re-accepting an already-active quest is refused, not a second instance (QI3)");
+
+            const std::int32_t seed_before = pa.view().items[static_cast<int>(ItemKind::kSeed)];
+            const std::uint32_t craft_xp_before = pa.view().skill_xp[static_cast<int>(Skill::kCraft)];
+            pa.handle(GameplayFact{FactKind::kBuild, 1, static_cast<std::uint16_t>(BuildKind::kPlot), 1,
+                                   0, 5});
+            v = pa.view();
+            bool farm_plot_still_active = false;
+            for (int i = 0; i < kMaxActiveQuests; ++i) {
+                if (v.quest_active_id[i] == QuestId::kFarmPlot) farm_plot_still_active = true;
+            }
+            chk.expect(!farm_plot_still_active,
+                       "Q4: the single kBuild fact completes the 1-count objective and the instance "
+                       "is gone from the log — auto_complete pays instantly, no giver turn-in needed");
+            chk.expect(v.items[static_cast<int>(ItemKind::kSeed)] == seed_before + 5,
+                       "§7 kItemTable reward: 5 Seed granted on completion");
+            chk.expect(v.skill_xp[static_cast<int>(Skill::kCraft)] > craft_xp_before,
+                       "§7 kXp reward: fixed-branch (Craft) XP granted on completion");
+            chk.expect(v.quest_completed[static_cast<int>(QuestId::kFarmPlot)] == 1,
+                       "a non-repeatable completion sets the completed gate");
+
+            pa.handle(AcceptQuest{QuestId::kFarmPlot});
+            bool refused_after_completion = true;
+            for (int i = 0; i < kMaxActiveQuests; ++i) {
+                if (pa.view().quest_active_id[i] == QuestId::kFarmPlot) refused_after_completion = false;
+            }
+            chk.expect(refused_after_completion,
+                       "a completed, non-repeatable quest refuses re-acceptance");
+
+            // kClearSlimes: repeatable, by_cause XP, and village_standing's forward-compatible stand-in.
+            pa.handle(AcceptQuest{QuestId::kClearSlimes});
+            const std::uint32_t melee_xp_before = pa.view().skill_xp[static_cast<int>(Skill::kMelee)];
+            for (int i = 0; i < 3; ++i) {
+                pa.handle(GameplayFact{FactKind::kKill, 1,
+                                       static_cast<std::uint16_t>(CreatureKind::kSlime), 1,
+                                       static_cast<std::uint8_t>(Skill::kMelee),
+                                       static_cast<std::uint32_t>(10 + i)});
+            }
+            v = pa.view();
+            chk.expect(v.skill_xp[static_cast<int>(Skill::kMelee)] > melee_xp_before,
+                       "§7 by_cause: the dominant_branch (Melee, from the qualifying kKill facts) "
+                       "resolves the reward's branch, not a fixed one");
+            chk.expect(v.quest_completed[static_cast<int>(QuestId::kClearSlimes)] == 1,
+                       "kClearSlimes completes on the 3rd matching kill fact");
+
+            // Repeatable: immediately re-offerable and re-acceptable.
+            chk.expect(v.quest_offerable[static_cast<int>(QuestId::kClearSlimes)] == 1,
+                       "a repeatable quest is offerable again the instant it completes — no cooldown");
+            pa.handle(AcceptQuest{QuestId::kClearSlimes});
+            bool clear_active_again = false;
+            for (int i = 0; i < kMaxActiveQuests; ++i) {
+                if (pa.view().quest_active_id[i] == QuestId::kClearSlimes) clear_active_again = true;
+            }
+            chk.expect(clear_active_again, "a repeatable quest can be accepted again after completion");
+
+            // Q5: Abandon is free, silent, and immediate.
+            pa.handle(AbandonQuest{QuestId::kClearSlimes});
+            v = pa.view();
+            bool clear_active_after_abandon = false;
+            for (int i = 0; i < kMaxActiveQuests; ++i) {
+                if (v.quest_active_id[i] == QuestId::kClearSlimes) clear_active_after_abandon = true;
+            }
+            chk.expect(!clear_active_after_abandon,
+                       "Q5: AbandonQuest removes the instance with no penalty");
+            chk.expect(v.quest_offerable[static_cast<int>(QuestId::kClearSlimes)] == 1,
+                       "an abandoned repeatable quest is immediately offerable again — QI2's "
+                       "'externally identical to a fresh offer' rule");
+        }
+    }
+    std::printf("RFC-020 mission & quest system: the build-up state machine (Q1-Q5), fact matching "
+               "and progress clamping, live kBuild/kKill GameplayFact wiring off the RFC-019 §5.8 "
+               "kill-credit ledger and the Build-screen placement verb, QI1-QI4, and the xp/"
+               "item_table/village_standing reward hooks all check out\n\n");
+
     std::printf("\n%s\n", chk.failures == 0 ? "OK" : "FAIL");
     return chk.failures == 0 ? 0 : 1;
 }

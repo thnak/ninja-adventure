@@ -19,6 +19,7 @@
 #include "world/combat_entity.hpp"
 #include "world/loot.hpp"
 #include "world/map_system.hpp"
+#include "world/quest.hpp"
 #include "world/tiles.hpp"
 
 namespace mmo {
@@ -261,6 +262,25 @@ struct GrantItems {
 struct GrantEquipment {
     EquipSlot slot = EquipSlot::kWeapon;
     EquippedItem item{};
+};
+
+// RFC-020 §Multiplayer: a fact hand-off, same trust boundary and shape as GrantItems — the
+// untrusted-OK chunk actor where a `kBuild`/`kKill` fact happened tells it to the trusted
+// `PlayerActor` that owns the matching `QuestInstance`. `GameplayFact` itself is quest.hpp's own
+// struct, used directly as the wire message (it is already POD-shaped, matching every other message
+// here) rather than wrapped a second time.
+
+// Accept an offered quest (Q1->Q2). A pure tell, not an ask — the same "server decides silently,
+// client reads the result back off the next PlayerView" shape `SetLoadout`/`UseWaypoint` already use
+// for their own eligibility checks, rather than a new round-trip just for this one verb.
+struct AcceptQuest {
+    QuestId id = QuestId::kCount;
+};
+
+// Abandon an active quest (Q5) — always succeeds, no guard beyond "player asked to" (Tone Guardrail
+// §4: free, silent, immediate).
+struct AbandonQuest {
+    QuestId id = QuestId::kCount;
 };
 
 // Spending is an ASK, not a tell: the caller needs to know whether the player could afford it

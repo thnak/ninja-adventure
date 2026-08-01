@@ -224,6 +224,10 @@ int main(int argc, char** argv) {
         if (shot_screen != nullptr) {
             if (std::strcmp(shot_screen, "menu") == 0) shell.screen = ui::Screen::kMainMenu;
             else if (std::strcmp(shot_screen, "journal") == 0) shell.screen = ui::Screen::kJournal;
+            else if (std::strcmp(shot_screen, "quests") == 0) {
+                shell.screen = ui::Screen::kJournal;
+                shell.journal_tab = 1;  // RFC-020: land straight on the Quests tab for screenshots
+            }
             else if (std::strcmp(shot_screen, "character") == 0) shell.screen = ui::Screen::kCharacter;
             else if (std::strcmp(shot_screen, "paused") == 0) shell.screen = ui::Screen::kPaused;
             else if (std::strcmp(shot_screen, "options") == 0) shell.screen = ui::Screen::kOptions;
@@ -915,6 +919,16 @@ int main(int argc, char** argv) {
             world.set_loadout(me, static_cast<std::uint8_t>(shell.pending_loadout_slot),
                               shell.pending_loadout_ability);
             shell.pending_loadout_slot = -1;
+        }
+
+        // RFC-020: the Journal's Quests tab hands Accept/Abandon clicks back the same way.
+        if (shell.pending_quest_accept != QuestId::kCount && slot >= 0) {
+            world.accept_quest(me, shell.pending_quest_accept);
+            shell.pending_quest_accept = QuestId::kCount;
+        }
+        if (shell.pending_quest_abandon != QuestId::kCount && slot >= 0) {
+            world.abandon_quest(me, shell.pending_quest_abandon);
+            shell.pending_quest_abandon = QuestId::kCount;
         }
 
         if (shell.debug_overlay) {
