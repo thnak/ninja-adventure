@@ -14,6 +14,7 @@
 // Run  :  taskset -c 0-3 build/mmo_client
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +24,7 @@
 
 #include "render/raylib_bridge.hpp"
 #include "ui/audio.hpp"
+#include "ui/combat_audio.hpp"
 #include "ui/screens.hpp"
 #include "world/world.hpp"
 
@@ -548,6 +550,23 @@ int main(int argc, char** argv) {
     std::uint32_t last_xp[kSkillCount] = {};  // rides the same snapshot to drift the "+N" XP motes
     bool have_skills = false;
 
+    // RFC-012 §2.1 dedup state, mirroring `effect_tick`'s own "remember the last value seen" shape:
+    // `windup_seen` is per ordinary-creature id, so a commit (0->nonzero) or imminent (->3) cue
+    // fires exactly once per transition and a re-published unchanged view never re-fires it — 255
+    // ("never seen") is an impossible real wind-up value (max is the boss's 14), matching the
+    // `~0ull` sentinel idiom `effect_tick` already uses. `telegraph_seen` is per boss `Telegraph.id`
+    // (RFC-006 §2, the only producer today): which of its four one-shot moments have already
+    // sounded, read straight off the replicated `tier`/`left`/`flags` rather than re-deriving them
+    // from `windup`.
+    struct TelegraphAudioState {
+        bool commit = false;
+        bool imminent = false;
+        bool imminent_repeat = false;  // §2.3: the boss band's extra ping at windup==1
+        bool fizzle = false;
+    };
+    std::unordered_map<std::uint32_t, std::uint8_t> windup_seen;
+    std::unordered_map<std::uint32_t, TelegraphAudioState> telegraph_seen;
+
     while (bridge.begin_frame()) {
         const float dt = std::min(bridge.frame_time(), 0.25f);
         const PlayerView player = view();
@@ -596,7 +615,7 @@ int main(int argc, char** argv) {
         // --- input becomes messages ---------------------------------------------------------------
         // The shell gets first refusal. When a menu is open it returns true and the world sees no
         // input at all — otherwise walking around behind the pause menu would still work.
-        audio.update();
+        audio.update(dt * 1000.0f);
         const bool shell_took_input = ui::handle_shell_keys(shell);
         const InputFrame in =
             shell_took_input ? InputFrame{} : bridge.poll_input(player, shell.binds);
@@ -705,6 +724,11 @@ int main(int argc, char** argv) {
         // plain `!=` is immune to the (never-reached) wrap of a uint64 tick. Only the player's own
         // chunk neighbourhood is scanned — every effect a player causes lands within a chunk or two.
         if (slot >= 0) {
+            // RFC-012 §4.3: candidates accumulate across the whole neighbourhood this tick, then
+            // get culled/ranked/budgeted ONCE, not per chunk — a threat two chunks away must still
+            // be able to outrank an impact cue in the player's own chunk for one of the 8 voices.
+            std::vector<ui::WorldCueEvent> candidates;
+
             const int pcx = static_cast<int>(player.x) / kChunkTiles;
             const int pcy = static_cast<int>(player.y) / kChunkTiles;
             for (int cy = std::max(0, pcy - 2); cy <= std::min(kMapChunks - 1, pcy + 2); ++cy) {
@@ -716,13 +740,105 @@ int main(int argc, char** argv) {
                     std::uint64_t& seen = effect_tick.try_emplace(chunk_key(cc), ~0ull).first->second;
                     if (v->tick == seen) continue;  // this simulation frame is already sounded
                     seen = v->tick;
+
+                    // §3: impact cues, off the same newborn-Effect read as before, now table-driven
+                    // and added as candidates instead of played unconditionally.
                     for (const Effect& e : v->effects) {
                         if (e.age != 1) continue;  // only on the tick it was born
-                        // A combo detonation is its own cue; every other flash is a blow landing —
-                        // the kHit sound (hit.wav) that until now was loaded and never played.
-                        audio.play(e.kind == EffectKind::kBlast ? ui::Sfx::kCombo : ui::Sfx::kHit);
+                        ui::Sfx sfx{};
+                        if (!ui::impact_cue_of(e.kind, sfx)) continue;  // kSmoke: no cue, §3
+                        const float dist = std::hypot(e.x - player.x, e.y - player.y);
+                        if (!ui::world_cue_in_range(dist)) continue;
+                        candidates.push_back({sfx, ui::CuePriority::kP2, e.x, e.y, 1.0f, 1.0f});
+                    }
+
+                    // §2: telegraph lifecycle cues. Ordinary creatures only publish `windup`; the
+                    // boss additionally pushes a real RFC-006 `Telegraph` record (`v->telegraphs`),
+                    // which carries the moments this RFC needs (commit = newly seen id, imminent =
+                    // `left<=3`, the boss-only repeat at `left==1`, fizzle = `kTelegraphFizzling`)
+                    // more reliably than re-deriving them from `windup` deltas — no inference from
+                    // absence, matching RFC-015 §3.3's own discipline. The boss's own `Creature`
+                    // (`windup_x`/`windup_y`, the frozen commit-time target spot) supplies the P0
+                    // self-threat point for its telegraph the same way it does for ordinary ones.
+                    float boss_target_x = 0.0f, boss_target_y = 0.0f;
+                    bool have_boss_target = false;
+                    for (const Creature& c : v->creatures) {
+                        if (c.kind == CreatureKind::kBoss) {
+                            if (c.windup > 0) {
+                                boss_target_x = c.windup_x;
+                                boss_target_y = c.windup_y;
+                                have_boss_target = true;
+                            }
+                            continue;  // the boss's own commit/imminent/fizzle come from `telegraphs`
+                        }
+                        std::uint8_t& prev = windup_seen.try_emplace(c.id, std::uint8_t{255}).first->second;
+                        const std::uint8_t last = prev;
+                        prev = c.windup;
+                        if (c.windup == 0 && last == 0) continue;
+
+                        const float dist = std::hypot(c.windup_x - player.x, c.windup_y - player.y);
+                        const bool in_range = c.windup > 0 && ui::world_cue_in_range(dist);
+                        const bool self_threat = dist <= ui::kSelfThreatRadius;
+                        const auto band = ui::windup_band_of(stats_of(c.kind).windup);
+                        const float pitch = ui::band_pitch(band);
+                        const float bgain = ui::band_gain(band);
+
+                        if (in_range && c.windup > 0 && last == 0) {
+                            // Commit: 0 -> nonzero, ordinary creatures are always P2 (§4.4).
+                            candidates.push_back({ui::Sfx::kTelegraphCommit, ui::CuePriority::kP2,
+                                                   c.windup_x, c.windup_y, pitch, bgain});
+                        }
+                        if (in_range && c.windup == 3 && last != 3) {
+                            // Imminent: the last-3-tick boundary, fired once per transition (§2.1).
+                            candidates.push_back({ui::Sfx::kTelegraphImminent,
+                                                   self_threat ? ui::CuePriority::kP0 : ui::CuePriority::kP2,
+                                                   c.windup_x, c.windup_y, pitch, bgain});
+                        }
+                    }
+                    for (const Telegraph& t : v->telegraphs) {
+                        TelegraphAudioState& st =
+                            telegraph_seen.try_emplace(t.id, TelegraphAudioState{}).first->second;
+                        const float tx = have_boss_target ? boss_target_x : t.x;
+                        const float ty = have_boss_target ? boss_target_y : t.y;
+                        const float dist = std::hypot(t.x - player.x, t.y - player.y);
+                        if (!ui::world_cue_in_range(dist)) continue;
+                        const bool self_threat =
+                            std::hypot(tx - player.x, ty - player.y) <= ui::kSelfThreatRadius;
+                        // §4.4's P0 row is specific to "Telegraph imminent" — commit is always P1
+                        // for the boss (informational: something started), whichever way it's aimed.
+                        const ui::CuePriority aimed_prio =
+                            self_threat ? ui::CuePriority::kP0 : ui::CuePriority::kP1;
+
+                        if (!st.commit) {
+                            st.commit = true;
+                            candidates.push_back(
+                                {ui::Sfx::kBossTelegraphCommit, ui::CuePriority::kP1, t.x, t.y, 1.0f, 1.0f});
+                        }
+                        if (t.left <= 3 && !st.imminent) {
+                            st.imminent = true;
+                            candidates.push_back(
+                                {ui::Sfx::kBossTelegraphImminent, aimed_prio, t.x, t.y, 1.0f, 1.0f});
+                        }
+                        if (t.left == 1 && !st.imminent_repeat) {  // §2.3: boss band's extra ping
+                            st.imminent_repeat = true;
+                            candidates.push_back(
+                                {ui::Sfx::kBossTelegraphImminent, aimed_prio, t.x, t.y, 1.0f, 1.0f});
+                        }
+                        if ((t.flags & kTelegraphFizzling) != 0 && !st.fizzle) {
+                            st.fizzle = true;
+                            candidates.push_back(
+                                {ui::Sfx::kInterrupt, ui::CuePriority::kP3, t.x, t.y, 1.0f, 1.0f});
+                        }
                     }
                 }
+            }
+
+            ui::select_world_cues(candidates, player.x, player.y, ui::kAudioCueBudget);
+            for (const ui::WorldCueEvent& ev : candidates) {
+                const float dist = std::hypot(ev.x - player.x, ev.y - player.y);
+                const float gain = ev.band_gain * ui::world_cue_falloff(dist);
+                const float pan = ui::world_cue_pan(ev.x, player.x);
+                audio.play_world_cue(ev.sfx, static_cast<std::uint8_t>(ev.priority), gain, ev.pitch, pan);
             }
 
             // A skill going up a level is worth a fanfare AND the centred banner; XP that rises
