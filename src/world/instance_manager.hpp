@@ -83,6 +83,11 @@ public:
         const MapId id = next_map_id();
         descriptor.id = id;
         descriptor.category = MapCategory::kInstanced;
+        // RFC-018 §13: the one small field this RFC named as a real, unassumed gap — closed here,
+        // at the one place a fresh instance's descriptor is actually built, from the same `portal`
+        // this call already receives. No new lookup, no new field on `PortalDef`.
+        descriptor.origin_kind = portal.kind;
+        descriptor.origin_realm_type = portal.realm_type;
 
         InstanceSession is;
         is.session.map_id = id;

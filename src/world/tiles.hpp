@@ -263,7 +263,32 @@ enum class BuildKind : std::uint8_t {
 
 // Buildings upgrade in place. Level is 1-based; kMaxLevel is the cap.
 inline constexpr std::uint8_t kMaxLevel = 3;
-enum class ItemKind : std::uint8_t { kWood = 0, kStone = 1, kSeed = 2, kProduce = 3, kCount = 4 };
+// RFC-018 §1: extended additively — the original four ordinals are untouched, so every existing
+// `items_[kItemKinds]`/`PlayerProgression.items` fixed-size-array consumer grows for free with no
+// schema change. Ore is one ordinal per material tier (§3).
+//
+// DIVERGENCE FROM THE RFC TEXT, forced by an engine constraint the RFC's own authors could not
+// have known about: §1/§5 specify 24 gem ordinals (6 channels x 4 grades, grade baked into the
+// ordinal). `RestoreProgression`/`PlayerView` (protocol.hpp/snapshot.hpp) both already carry
+// `items[kItemKinds]` as a FIXED C array inside a `quark` actor message, and every message in this
+// engine is hard-capped at `quark::detail::MessagePool::kMaxPayload = 192` bytes (a real,
+// compiler-enforced ceiling — confirmed by a build failure at the RFC's literal 24-ordinal count,
+// which alone would have added 96 bytes on top of ore/Essence to messages already most of the way
+// to that cap). Six channel-only gem ordinals (no grade suffix) fit; the 4-grade axis (Minor/
+// Lesser/Greater/Major, §5) is deferred — every socketed gem this pass ships applies one flat,
+// Lesser-equivalent rider per channel (`loot.hpp::gem_rider_of`). Open Question 6 already left
+// "which grade appears where" as future authoring work, not a rule this RFC pins, so this is a
+// scope reduction on an axis the RFC itself had not committed content to yet — not a broken
+// promise. Re-introducing grade later means either widening this array (once these two messages
+// stop being fixed C arrays — e.g. a QUARK_SERIALIZE-described message, RFC-016's own path for
+// `PlayerProgression`) or a second byte alongside `kind` carrying grade out-of-band.
+enum class ItemKind : std::uint8_t {
+    kWood = 0, kStone = 1, kSeed = 2, kProduce = 3,
+    kOreCopper = 4, kOreIron = 5, kOreSteel = 6, kOreMythril = 7,
+    kGemCold = 8, kGemHeat = 9, kGemShock = 10, kGemEarth = 11, kGemStagger = 12, kGemWet = 13,
+    kEssence = 14,
+    kCount = 15,
+};
 
 inline constexpr int kItemKinds = static_cast<int>(ItemKind::kCount);
 

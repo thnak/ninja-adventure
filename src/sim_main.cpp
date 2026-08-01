@@ -22,6 +22,7 @@
 #include "world/combat_ids.hpp"
 #include "world/combat_pack.hpp"
 #include "world/gate_sidecar.hpp"
+#include "world/loot.hpp"
 #include "world/map_system.hpp"
 #include "world/replication.hpp"
 #include "world/reward.hpp"
@@ -2355,10 +2356,19 @@ int main(int argc, char** argv) {
             chk.expect(saw_whiff, "the whiffed boss swing still slashed the spot it aimed at");
 
             // (c) The kill. Many strikes, refilled between so the boss's own blows do not drop `me`;
-            // credit lands in Melee (the killing verb), and the reward is 400 XP + 10 produce.
+            // credit lands in Melee (the killing verb), and the reward is 400 XP + RFC-018 §10.2's
+            // real boss loot table: a guaranteed ore row (regardless of realm) plus Essence/rare
+            // equipment rows that stay dormant here — this dojo room is a PERSISTENT interior (an
+            // ordinary door, never a kRealmGate portal), so `realm_type_` is `kRest` — matching
+            // loot.hpp's own header note on why the RFC's "dojo bosses are challenge-realm content"
+            // assumption does not hold for THIS codebase's one shipped boss.
             const PlayerView pre_kill = world.player_view(slot);
             const std::uint32_t xp_before = pre_kill.skill_xp[static_cast<int>(Skill::kMelee)];
-            const std::int32_t produce_before = pre_kill.items[static_cast<int>(ItemKind::kProduce)];
+            std::int32_t ore_before = 0;
+            for (int k = static_cast<int>(ItemKind::kOreCopper); k <= static_cast<int>(ItemKind::kOreMythril); ++k) {
+                ore_before += pre_kill.items[k];
+            }
+            const std::int32_t essence_before = pre_kill.items[static_cast<int>(ItemKind::kEssence)];
             const std::uint32_t kills_before = world.status().player_kills.load(std::memory_order_relaxed);
             bool killed = false;
             for (int i = 0; i < 300 && !killed; ++i) {
@@ -2375,14 +2385,24 @@ int main(int argc, char** argv) {
             const std::uint32_t kills_after = world.status().player_kills.load(std::memory_order_relaxed);
             Creature gone{};
             const bool boss_absent = !boss_of_room(gone);
-            std::printf("  kill: boss dead=%s; player_kills %u -> %u; melee xp %u -> %u; produce %d -> %d\n",
+            std::int32_t ore_after = 0;
+            for (int k = static_cast<int>(ItemKind::kOreCopper); k <= static_cast<int>(ItemKind::kOreMythril); ++k) {
+                ore_after += post_kill.items[k];
+            }
+            const std::int32_t essence_after = post_kill.items[static_cast<int>(ItemKind::kEssence)];
+            std::printf("  kill: boss dead=%s; player_kills %u -> %u; melee xp %u -> %u; ore %d -> %d; "
+                       "essence %d -> %d\n",
                         boss_absent ? "yes" : "no", kills_before, kills_after, xp_before,
-                        post_kill.skill_xp[static_cast<int>(Skill::kMelee)], produce_before,
-                        post_kill.items[static_cast<int>(ItemKind::kProduce)]);
+                        post_kill.skill_xp[static_cast<int>(Skill::kMelee)], ore_before, ore_after,
+                        essence_before, essence_after);
             chk.expect(killed && boss_absent, "the player's strikes killed the boss");
             chk.expect(kills_after > kills_before, "the boss kill was counted");
-            chk.expect(post_kill.items[static_cast<int>(ItemKind::kProduce)] == produce_before + 10,
-                       "the boss kill paid the 10-produce reward placeholder");
+            chk.expect(ore_after >= ore_before + 3,
+                       "the boss's guaranteed ore row (qty 3-5, RFC-018 §10.2) paid out regardless "
+                       "of realm — replacing the old flat 10-produce placeholder");
+            chk.expect(essence_after == essence_before,
+                       "Essence stayed dormant — this dojo room is a persistent interior, not a "
+                       "challenge realm (§6's no-exceptions rule)");
             // XP at the Melee cap does not move, so accept either an XP gain OR an already-capped level.
             chk.expect(post_kill.skill_xp[static_cast<int>(Skill::kMelee)] > xp_before ||
                            post_kill.skill_level[static_cast<int>(Skill::kMelee)] >= kMaxSkillLevel,
@@ -3464,6 +3484,148 @@ int main(int argc, char** argv) {
 
     std::error_code p16_cleanup_ec;
     std::filesystem::remove_all(p16_scratch_root, p16_cleanup_ec);  // best-effort scratch cleanup
+
+    // --- RFC-018: loot, Essence & reward tables — as pure functions, same convention RFC-002/003/
+    // 005/006/007/010 already use for their own header-only logic (no actor/router needed to test
+    // it, and by this point in the file every login slot is already spent — see the RFC-019 block's
+    // own note on the fixed 8-slot ceiling). --------------------------------------------------------
+    {
+        using namespace mmo;
+
+        // §3: the material-tier table — the numbers RFC-021 §3.6 handed off, verbatim.
+        chk.expect(tier_damage_pm(MaterialTier::kCopper) == 1000 &&
+                       tier_damage_pm(MaterialTier::kIron) == 1150 &&
+                       tier_damage_pm(MaterialTier::kSteel) == 1350 &&
+                       tier_damage_pm(MaterialTier::kMythril) == 1600,
+                   "§3's tier_damage_pm ladder matches the RFC's table exactly");
+        chk.expect(tier_below(MaterialTier::kMythril) == MaterialTier::kSteel &&
+                       tier_below(MaterialTier::kCopper) == MaterialTier::kCopper,
+                   "tier_below never drops a broken Copper item below its own baseline");
+        chk.expect(ore_kind_of(MaterialTier::kIron) == ItemKind::kOreIron &&
+                       ore_kind_of(MaterialTier::kMythril) == ItemKind::kOreMythril,
+                   "ore_kind_of resolves the right ItemKind per tier");
+
+        // §4.1: durability interpolation — full, empty, half, and the "no item" baseline.
+        EquippedItem fresh_iron{};
+        fresh_iron.item_id = 1;
+        fresh_iron.tier = MaterialTier::kIron;
+        fresh_iron.max_durability = tier_max_durability(MaterialTier::kIron);
+        fresh_iron.durability = fresh_iron.max_durability;
+        chk.expect(effective_tier_damage_pm(fresh_iron) == tier_damage_pm(MaterialTier::kIron),
+                   "a fresh (full-durability) item plays at its own tier's numbers exactly");
+
+        EquippedItem broken_iron = fresh_iron;
+        broken_iron.durability = 0;
+        chk.expect(effective_tier_damage_pm(broken_iron) == tier_damage_pm(MaterialTier::kCopper),
+                   "a fully-worn item floors at the tier BELOW its own — never a brick, never below "
+                   "Copper's own baseline (§4.1)");
+
+        EquippedItem half_iron = fresh_iron;
+        half_iron.durability = static_cast<std::int16_t>(fresh_iron.max_durability / 2);
+        const std::uint16_t half_dmg = effective_tier_damage_pm(half_iron);
+        chk.expect(half_dmg > tier_damage_pm(MaterialTier::kCopper) &&
+                       half_dmg < tier_damage_pm(MaterialTier::kIron),
+                   "a half-worn item interpolates strictly between the tier below and its own tier");
+
+        EquippedItem bare{};  // item_id == 0: bare hand / bare skin
+        chk.expect(effective_tier_damage_pm(bare) == 1000 && effective_tier_dr_bonus(bare) == 0 &&
+                       effective_tier_toughness_bonus(bare) == 0,
+                   "an empty slot (item_id == 0) is always the neutral ×1.0/+0/+0 baseline, "
+                   "regardless of its default tier field");
+
+        // §5: socket gems — the mechanical link to RFC-002's status ladder. Grade is deferred (see
+        // tiles.hpp::ItemKind's own header note on the 192-byte message-pool ceiling); every gem
+        // below is a single flat rider.
+        const GemRider cold = gem_rider_of(ItemKind::kGemCold);
+        chk.expect(cold.channel == Channel::kCold && cold.amount > 0 && !cold.coating,
+                   "a Cold gem resolves to a real Channel::kCold build-up rider");
+        const GemRider wet = gem_rider_of(ItemKind::kGemWet);
+        chk.expect(wet.coating && wet.amount > 0 && wet.amount <= 255,
+                   "a Wet gem resolves to a coating rider whose amount fits CoatingPacket::ticks's "
+                   "uint8_t (would silently truncate/overflow otherwise)");
+        const GemRider empty_socket = gem_rider_of(ItemKind::kWood);
+        chk.expect(empty_socket.channel == Channel::kNone && !empty_socket.coating &&
+                       empty_socket.amount == 0,
+                   "kWood (the empty-socket sentinel) resolves to no rider at all");
+
+        // §9: ring scaling, cited from RFC-021 §2.1/§3.6.
+        chk.expect(ring_loot_scale(Ring::kMeadow).chance_mult_pm == 1000 &&
+                       ring_loot_scale(Ring::kMeadow).ore_tier == MaterialTier::kCopper,
+                   "Meadow (ring 0) scales loot at the neutral ×1.0 baseline, Copper ore");
+        chk.expect(ring_loot_scale(Ring::kWasteland).chance_mult_pm == 1800 &&
+                       ring_loot_scale(Ring::kWasteland).qty_bonus == 2 &&
+                       ring_loot_scale(Ring::kWasteland).ore_tier == MaterialTier::kMythril,
+                   "Wasteland (ring 4) scales loot to ×1.8/+2 qty/Mythril ore, matching §9's table");
+
+        // §8: the deterministic roll seed — same inputs, same seed; a different recipient (the term
+        // that makes a boss kill's per-contributor rolls genuinely independent, §10.2) changes it.
+        const std::uint64_t seed_a = roll_seed_of(kWorldSeed, 4242, 100, 7);
+        const std::uint64_t seed_a2 = roll_seed_of(kWorldSeed, 4242, 100, 7);
+        const std::uint64_t seed_b = roll_seed_of(kWorldSeed, 4242, 100, 9);
+        chk.expect(seed_a == seed_a2, "roll_seed_of is a pure function of its inputs — identical "
+                                      "inputs reproduce the identical seed (§8's replay claim)");
+        chk.expect(seed_a != seed_b, "a different contributor_account_id changes the seed, which is "
+                                     "what makes two contributors' rolls on the same kill independent");
+
+        // §7-§9: roll_loot determinism, and the realm gate's "no exceptions" rule (§6/§12) — Essence
+        // and the boss equipment row must NEVER fire outside a challenge realm, across many seeds;
+        // inside one, they eventually do (the guaranteed ore row always does, everywhere).
+        const LootTable& slime = loot_table_of(CreatureKind::kSlime);
+        const RewardBundle first = roll_loot(slime, 1234567, Ring::kWasteland, true);
+        const RewardBundle second = roll_loot(slime, 1234567, Ring::kWasteland, true);
+        chk.expect(first.items.size() == second.items.size() && first.essence == second.essence,
+                   "roll_loot is deterministic — the same seed reproduces the same reward bundle");
+
+        bool essence_seen_gated = false;
+        bool essence_seen_open = false;
+        bool equipment_seen_open = false;
+        const LootTable& boss = loot_table_of(CreatureKind::kBoss);
+        // 4000 trials at the equipment row's authored 8‰ chance leaves P(zero hits) = 0.992^4000 ≈
+        // 4e-15 — 300 trials (≈9% false-failure rate) is what this test originally used and was
+        // flaky enough to prove it.
+        for (std::uint64_t s = 0; s < 4000; ++s) {
+            const RewardBundle gated = roll_loot(slime, s * 0x9E3779B97F4A7C15ull, Ring::kWasteland,
+                                                 /*realm_challenge*/ false);
+            if (gated.essence > 0) essence_seen_gated = true;
+            const RewardBundle open = roll_loot(slime, s * 0x9E3779B97F4A7C15ull, Ring::kWasteland,
+                                                /*realm_challenge*/ true);
+            if (open.essence > 0) essence_seen_open = true;
+            const RewardBundle boss_open =
+                roll_loot(boss, s * 0xBF58476D1CE4E5B9ull, Ring::kWasteland, /*realm_challenge*/ true);
+            if (boss_open.equipment.has_value()) equipment_seen_open = true;
+            const RewardBundle boss_gated = roll_loot(boss, s * 0xBF58476D1CE4E5B9ull, Ring::kWasteland,
+                                                      /*realm_challenge*/ false);
+            chk.expect(!boss_gated.equipment.has_value(),
+                       "the boss equipment row never fires outside a challenge realm — no exceptions");
+            chk.expect(!boss_gated.items.empty(),
+                       "the boss's guaranteed ore row fires regardless of realm (§10.2)");
+        }
+        chk.expect(!essence_seen_gated,
+                   "Essence never drops outside a challenge realm, across 4000 distinct seeds (§6 "
+                   "rule 1 — no exceptions)");
+        chk.expect(essence_seen_open,
+                   "Essence DOES drop inside a challenge realm — the gate isn't just always-closed");
+        chk.expect(equipment_seen_open,
+                   "the boss's rare equipment row fires at least once across 4000 challenge-realm "
+                   "rolls at its authored 8‰ chance");
+
+        // §10.2: the occupied-slot rule, as the pure function PlayerActor::handle(GrantEquipment)
+        // actually calls.
+        EquippedItem copper_sword{};
+        copper_sword.item_id = 1;
+        copper_sword.tier = MaterialTier::kCopper;
+        EquippedItem mythril_drop{};
+        mythril_drop.tier = MaterialTier::kMythril;
+        EquippedItem another_copper_drop{};
+        another_copper_drop.tier = MaterialTier::kCopper;
+        chk.expect(equipment_upgrades(copper_sword, mythril_drop),
+                   "a strictly higher tier auto-equips (§10.2)");
+        chk.expect(!equipment_upgrades(copper_sword, another_copper_drop),
+                   "an equal tier does not replace the worn item — it converts to an ore refund");
+    }
+    std::printf("RFC-018 loot, Essence & reward tables: tier/durability math, socket-gem riders, "
+               "ring scaling, deterministic per-contributor rolls, and the challenge-realm gate's "
+               "no-exceptions rule (§3/§4.1/§5/§6/§8/§9/§10.2) all check out\n\n");
 
     std::printf("\n%s\n", chk.failures == 0 ? "OK" : "FAIL");
     return chk.failures == 0 ? 0 : 1;

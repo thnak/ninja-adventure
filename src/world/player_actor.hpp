@@ -55,7 +55,7 @@ using Trusted = HasFlag<"trusted">;
 struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priority<0>,
                                   quark::Placement<quark::HashById, Require<Trusted>>> {
     using protocol =
-        Protocol<Tick, MoveIntent, Teleport, GrantItems, HurtPlayer, GrantVitals, GrantXp,
+        Protocol<Tick, MoveIntent, Teleport, GrantItems, GrantEquipment, HurtPlayer, GrantVitals, GrantXp,
                  RespecSkill, GrantEssence, SetRespawn, BindAccount, Unbind, Rebind,
                  SetMounted, SetInstanceReturn, RestoreProgression, Ask<SpendItems, bool>,
                  Ask<GetPlayer, PlayerView>, Ask<PlanAttack, AttackPlan>,
@@ -215,9 +215,43 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
         publish();
     }
 
+    // RFC-018 §10.2's occupied-slot rule, resolved HERE rather than chunk-side as the RFC's own
+    // sketch does — a deliberate divergence. `PlayerActor` is already the sole reader/writer of
+    // `equipped_[]` (this RFC's own Multiplayer section), and an untrusted-OK chunk has no
+    // synchronous view of a remote player's current gear to compare tiers against without a
+    // blocking `Ask()` this RFC does not need to invent: the actor that already holds the state is
+    // also the one deciding with it. Strictly higher tier auto-equips (never a prompt, per the Tone
+    // Guardrail's "never stall the player on a choice"); otherwise the drop converts to a
+    // guaranteed ore stack so it is never silently discarded.
+    void handle(const GrantEquipment& g) noexcept {
+        const int s = static_cast<int>(g.slot);
+        if (s < 0 || s >= static_cast<int>(EquipSlot::kCount)) return;
+        if (equipment_upgrades(equipped_[s], g.item)) {
+            equipped_[s] = g.item;
+        } else {
+            const int k = static_cast<int>(ore_kind_of(g.item.tier));
+            if (k >= 0 && k < kItemKinds) items_[k] += 3;  // (tunable, §10.2)
+        }
+        publish();
+    }
+
     void handle(const HurtPlayer& h) noexcept {
         if (account_ == 0 || dead_ticks_ > 0 || h.amount <= 0) return;
-        hp_ = static_cast<std::int16_t>(std::max(0, hp_ - h.amount));
+        // RFC-018 §3/§4.1: worn armor mitigates, and wears by exactly 1 durability per hit received
+        // — real, per this RFC's own §4.1 rule (weapon durability is the documented simplification;
+        // see loot.hpp's header note). The numbers are intentionally small (a Mythril breastplate
+        // is a 16‰/2-point contribution, not a wall) — the same modest, multiplicative-source shape
+        // `combat_math.hpp::resolve_damage` already gives a creature's own `dr[2]`/`toughness`.
+        EquippedItem& armor = equipped_[static_cast<int>(EquipSlot::kArmor)];
+        std::int32_t adj = h.amount;
+        if (armor.item_id != 0) {
+            const std::uint16_t dr_pm = effective_tier_dr_bonus(armor);
+            const std::uint8_t tough = effective_tier_toughness_bonus(armor);
+            adj = (adj * (1000 - std::min<std::uint16_t>(dr_pm, 1000))) / 1000;
+            adj = std::max<std::int32_t>(1, adj - tough);  // never fully nullify a hit
+            if (armor.durability > 0) --armor.durability;
+        }
+        hp_ = static_cast<std::int16_t>(std::max(0, hp_ - static_cast<std::int16_t>(adj)));
         last_hurt_ms_ = world_ms_;
         if (hp_ == 0) {
             // RFC-001 Section 5 item 1 — death is the highest-priority interrupt and the simplest:
@@ -531,6 +565,24 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
                 p.reach = kSpellRadius;
                 p.element = m.query.element;
                 break;
+        }
+        // RFC-018 §3/§4.1/§5: a weapon's own tier scales the damage this ask already decided, and
+        // wears by 1 durability per swing ATTEMPT (the documented simplification from "per landed
+        // hit" — see loot.hpp's header note: landed-hit confirmation happens chunk-side, on a
+        // different actor). Socket-gem riders are resolved here too, for melee only, and echoed on
+        // `AttackPlan` for `World::swing()` to copy onto the `MeleeSwing` the chunk actually applies
+        // them from.
+        if (p.ok && (m.query.kind == AttackKind::kLight || m.query.kind == AttackKind::kHeavy ||
+                     m.query.kind == AttackKind::kShoot)) {
+            EquippedItem& weapon = equipped_[static_cast<int>(EquipSlot::kWeapon)];
+            p.damage = static_cast<std::int16_t>(
+                (static_cast<std::int32_t>(p.damage) * effective_tier_damage_pm(weapon)) / 1000);
+            if (weapon.item_id != 0 && weapon.durability > 0) --weapon.durability;
+            if (m.query.kind == AttackKind::kLight || m.query.kind == AttackKind::kHeavy) {
+                const std::array<GemRider, 2> gems = resolve_weapon_gems(weapon);
+                p.gems[0] = gems[0];
+                p.gems[1] = gems[1];
+            }
         }
         // Record the tick of a granted swing so the renderer can play the attack animation for this
         // player — including a remote one — off published state alone. Only melee reads as a body
@@ -909,6 +961,16 @@ private:
     std::int64_t world_ms_ = 0;
     std::uint64_t tick_ = 0;
     std::int32_t items_[kItemKinds] = {};
+    // RFC-018 §4: default `EquippedItem{}` is `item_id=0` in both slots — bare hand / bare skin,
+    // the neutral baseline `effective_tier_*` already reads as inert (loot.hpp). Transient this
+    // pass — NOT written to `PlayerProgression`/restored by `RestoreProgression`: RFC-016's
+    // `QUARK_SERIALIZE` is already at its 16-tagged-field ceiling (`persistence.hpp`'s own header
+    // note), so a durable home for this needs either a packed slot the way `return_map`/`return_xy`
+    // already share one, or a new folded-array field — RFC-016's call, matching this RFC's own
+    // stated division of labor ("this RFC specifies the runtime shape; RFC-016 the encoding"). A
+    // fresh login/respawn starts bare-handed until that lands; nothing regresses, since no equipped
+    // state existed at all before this RFC.
+    EquippedItem equipped_[static_cast<int>(EquipSlot::kCount)] = {};
     std::uint8_t level_[kSkillCount] = {};
     std::uint32_t xp_[kSkillCount] = {};
     // RFC-019 §5.7: Essence units spent against each branch's Tier IV gate (0..kEssenceGateTotal).

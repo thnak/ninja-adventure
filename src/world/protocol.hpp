@@ -17,6 +17,7 @@
 #include "world/abilities.hpp"
 #include "world/ability_pipeline.hpp"
 #include "world/combat_entity.hpp"
+#include "world/loot.hpp"
 #include "world/map_system.hpp"
 #include "world/tiles.hpp"
 
@@ -143,6 +144,12 @@ struct MeleeSwing {
     std::int16_t damage = 0;
     bool heavy = false;
     std::uint64_t player = 0;
+    // RFC-018 §5: the socketed weapon's gem rider(s), resolved trusted-side (PlayerActor) from
+    // `equipped_[kWeapon].sockets[]` and echoed through here so the (untrusted-OK) chunk can apply
+    // them to whatever the swing actually hits — kChannel::kNone/`coating=false` at rest means "no
+    // gem in this slot," the same zero-default-as-sentinel convention `SocketGem::kind = kWood`
+    // already uses.
+    GemRider gems[2]{};
 };
 
 // A spell landing on a point. Sets a status; the damage is secondary — the point of a school is the
@@ -245,6 +252,17 @@ struct GrantItems {
     std::int32_t count = 0;
 };
 
+// RFC-018 §10.2 — the one new message this RFC adds. Same trust boundary as GrantItems/GrantXp: an
+// untrusted-OK chunk emits it (a boss's rare equipment row hit), the trusted PlayerActor is the
+// sole reader/writer of `equipped_[]` and is where the occupied-slot auto-upgrade-or-refund
+// decision (§10.2) is actually made — see `handle(const GrantEquipment&)`'s own comment for why
+// that decision lives there rather than chunk-side, a deliberate divergence from the RFC's own
+// sketch.
+struct GrantEquipment {
+    EquipSlot slot = EquipSlot::kWeapon;
+    EquippedItem item{};
+};
+
 // Spending is an ASK, not a tell: the caller needs to know whether the player could afford it
 // before the world commits to placing a building. The player actor is the single writer of the
 // inventory, so the check-and-debit is atomic by virtue of being one sequential handler.
@@ -331,6 +349,10 @@ struct AttackPlan {
     // the client's view can be a step stale across a doorway — so the world fans the verb to THIS
     // map's chunks rather than assuming the overworld. Interiors get combat because of this field.
     std::uint16_t map = 0;
+    // RFC-018 §5 — echoed straight through to `MeleeSwing` by `World::swing()`; see that struct's
+    // own comment. Populated only for kLight/kHeavy (a melee swing); kShoot/kCast leave both at
+    // rest, matching this RFC's own scoped divergence (loot.hpp header note).
+    GemRider gems[2]{};
 };
 
 // "May I use the ability in this slot, and how does it land?" — the ability layer's counterpart of

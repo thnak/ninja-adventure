@@ -64,6 +64,18 @@ inline constexpr MapId kPersistentBandEnd = 16;  // [0,16) persistent, [16,65536
 
 enum class MapCategory : std::uint8_t { kPersistent, kInstanced };
 
+// Moved above `MapDescriptor` (RFC-022 §2's own portal-system section originally declared these
+// further down) so RFC-018 §13's `origin_kind`/`origin_realm_type` fields below can name them —
+// same values/meaning, not re-derived.
+enum class PortalKind : std::uint8_t {
+    kInteriorDoor,
+    kRealmGate,
+    kMineMouth,
+    kMissionPortal,
+    kReturnPortal,
+};
+enum class RealmType : std::uint8_t { kRest, kChallenge };
+
 // §5.2. See header note: distinct from render/raylib_bridge.cpp's own TU-local Weather.
 enum class Weather : std::uint8_t { kLeaves, kRain, kSnow, kNone };
 
@@ -89,6 +101,15 @@ struct MapDescriptor {
     WeatherMode weather_mode = WeatherMode::kAmbient;
     Weather weather_fixed = Weather::kNone;  // meaningful only when weather_mode == kFixed
     bool allow_free_build = true;
+    // RFC-018 §13's requested addition: appended, never inserted, so the two aggregate-init
+    // factories below (and every other positional `MapDescriptor{...}` call site) stay correct
+    // with these left at their defaults. Meaningful only when category == kInstanced; a persistent
+    // map (the overworld, an interior room) is never a realm gate's destination, so it is correctly
+    // read as kInteriorDoor/kRest — never a challenge realm — everywhere else. Populated once, at
+    // `InstanceManager::allocate_new()` time, from the triggering `PortalDef` (RFC-018 §13/§6.6:
+    // the data an Essence/gem/boss-equipment realm gate needs, with no cross-actor lookup).
+    PortalKind origin_kind = PortalKind::kInteriorDoor;
+    RealmType origin_realm_type = RealmType::kRest;
 };
 
 [[nodiscard]] inline constexpr int edge_tiles(const MapDescriptor& d) noexcept {
@@ -135,14 +156,6 @@ struct MapDescriptor {
 using PortalId = std::uint32_t;
 using GroupId = std::uint16_t;
 
-enum class PortalKind : std::uint8_t {
-    kInteriorDoor,
-    kRealmGate,
-    kMineMouth,
-    kMissionPortal,
-    kReturnPortal,
-};
-enum class RealmType : std::uint8_t { kRest, kChallenge };
 enum class RealmFlavor : std::uint8_t {
     kNone,
     kDungeon,

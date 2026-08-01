@@ -152,6 +152,9 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
     // pocket, an island): the settlement nearest to this chunk, resolved once at bring-up.
     float home_x = 0.0f;
     float home_y = 0.0f;
+    // RFC-018 §6.6: kRest for every persistent-band chunk (the default); set once, at
+    // handle(PrimeInstanceChunk), for an instanced chunk allocated behind a kRealmGate portal.
+    RealmType realm_type_ = RealmType::kRest;
 
     // How often a creature may strike, in ticks. One second is slow enough to read on screen and to
     // step out of, which is the whole difficulty budget at this scale — the numbers that scale with
@@ -249,9 +252,17 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         flow = nullptr;
         home_x = 0.0f;
         home_y = 0.0f;
+        realm_type_ = p.descriptor.origin_realm_type;  // RFC-018 §6.6: this chunk's own realm gate
         generate_terrain(p.seed);
         publish();
     }
+
+    // RFC-018 §6/§6.6: Essence, socket gems, and a boss's rare equipment row all read this — a
+    // persistent-band chunk (the overworld, an interior room, `World::build_chunks()`'s eager path,
+    // which never sends `PrimeInstanceChunk` and so never touches `realm_type_`) stays at its
+    // `RealmType::kRest` default, so none of those three ever fire outside an actual instanced
+    // `kRealmGate` destination — no exceptions, matching GAME.md §1's own framing.
+    [[nodiscard]] bool realm_allows_essence() const noexcept { return realm_type_ == RealmType::kChallenge; }
 
     // Soft state with a lease. An upsert, never a delete — see PlayerBeacon in protocol.hpp for why
     // the absence of a "player left" message is the point rather than an omission.
@@ -329,6 +340,17 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
                            BuildupPacket{Channel::kStagger, derived_stagger_power(s.damage, s.heavy, false),
                                          0, s.player},
                            mult_pm_of(c.material, c.tier, Channel::kStagger), tick_);
+                // RFC-018 §5: a socketed weapon's gem rider(s), already resolved trusted-side
+                // (PlayerActor) and echoed on this message — applied to every creature the swing
+                // actually connects with, exactly like the derived-Stagger rider just above.
+                for (const GemRider& g : s.gems) {
+                    if (g.coating) {
+                        if (g.amount > 0) status_coat(c.status, CoatingPacket{Coating::kWet, static_cast<std::uint8_t>(g.amount)});
+                    } else if (g.channel != Channel::kNone) {
+                        status_gain(c.status, c.gauges, BuildupPacket{g.channel, g.amount, 0, s.player},
+                                   mult_pm_of(c.material, c.tier, g.channel), tick_);
+                    }
+                }
             }
         }
         // RFC-004 §7: the same arc also hits Active, destroyable entities in reach — friendly fire
@@ -2536,26 +2558,46 @@ private:
         ledger[static_cast<std::size_t>(slot)] = Contribution{player, skill, static_cast<std::uint32_t>(tick_)};
     }
 
-    // The BOSS drops the design reward, flat and not ring-scaled: 400 XP into whichever skill struck
-    // (or, for a DoT kill, `Skill::kMagic` — see step_status) the killing blow ("you level what you
-    // use") plus 10 produce. This is a PLACEHOLDER — P4 owns real loot tables, and inventing a boss
-    // loot table now would be inventing it twice — but it credits the right skill and pays out
-    // through the same GrantXp/GrantItems the rest of the game uses. step_bosses notices the body is
-    // gone next tick and starts the respawn timer. Shared by `strike()` and `step_status()`'s DoT
-    // path so a kill is credited identically regardless of what finished the creature off.
+    // RFC-018 §7-§10: resolves `loot_table_of(c.kind)` against a per-(creature,tick,recipient)
+    // deterministic seed and applies the result through the same trusted hand-off every other
+    // reward already uses (`grant()`). Called once per recipient — a single call for an ordinary
+    // monster kill's sole `player`, once PER QUALIFYING CONTRIBUTOR for a boss kill (§10.2) — so
+    // the seed's `recipient` term is what makes concurrent rolls on the same kill genuinely
+    // independent (§8's own determinism claim).
+    void grant_loot(const Creature& c, std::uint64_t recipient, Ring ring, bool realm_challenge) noexcept {
+        if (recipient == 0) return;
+        const LootTable& table = loot_table_of(c.kind);
+        const std::uint64_t seed = roll_seed_of(world_seed_, c.id, tick_, recipient);
+        const RewardBundle b = roll_loot(table, seed, ring, realm_challenge);
+        for (const auto& row : b.items) grant(recipient, GrantItems{row.kind, row.count});
+        if (b.essence > 0) grant(recipient, GrantItems{ItemKind::kEssence, b.essence});
+        if (b.equipment) grant(recipient, GrantEquipment{table.equipment_slot, *b.equipment});
+    }
+
+    // The BOSS pays 400 XP into whichever skill struck (or, for a DoT kill, `Skill::kMagic` — see
+    // step_status) the killing blow ("you level what you use"); an ordinary Monster kill pays XP
+    // scaled by the killing creature's own ring — killing a wasteland slime is genuinely harder
+    // than killing a meadow one, because it IS a harder slime (`make_creature`). step_bosses
+    // notices the body is gone next tick and starts the respawn timer. Shared by `strike()` and
+    // `step_status()`'s DoT path so a kill is credited identically regardless of what finished the
+    // creature off.
     //
-    // RFC-019 §5.8: kill XP is no longer single-recipient. Every ledger entry still inside the
-    // assist window is a qualifying contributor and gets the FULL kill-XP amount into their own
-    // branch — not a divided share (GAME.md §11: abundance, not a split pool). This replaces the
-    // boss's flat-400 grant exactly the same way it replaces the general path's, per §5.8's own
-    // ruling that bosses are precisely the 2-4-player content this section protects. Item grants
-    // stay single-recipient — credited to `player`, the caller's own killing-blow/DoT-owner
-    // argument — per §5.8's explicit carve-out ("until RFC-018 specifies otherwise").
+    // RFC-019 §5.8: kill XP is not single-recipient. Every ledger entry still inside the assist
+    // window is a qualifying contributor and gets the FULL kill-XP amount into their own branch —
+    // not a divided share (GAME.md §11: abundance, not a split pool).
+    //
+    // RFC-018 §10.1/§10.2: item/Essence/equipment loot follows a DIFFERENT distribution rule than
+    // XP, by the RFC's own design — an ordinary Monster kill's loot is single-recipient (`player`,
+    // the caller's own killing-blow/DoT-owner argument), while a BOSS kill's loot rolls
+    // INDEPENDENTLY for every qualifying ledger contributor, same as its XP (§10.2's "abundance"
+    // argument extended to the item column). `Faction::kWild` is unchanged — wildlife is food, not
+    // this RFC's table.
     void credit_kill(const Creature& c, std::uint64_t player, Skill skill) noexcept {
         if (router == nullptr) return;
         const CreatureStats st = stats_of(c.kind);
-        const auto ring = static_cast<std::uint32_t>(
-            ring_of(world_seed_, static_cast<int>(c.x), static_cast<int>(c.y)));
+        const Ring ring_enum = ring_of(world_seed_, static_cast<int>(c.x), static_cast<int>(c.y));
+        const auto ring = static_cast<std::uint32_t>(ring_enum);
+        const bool realm_challenge = realm_allows_essence();
         bool any_contributor = false;
         const auto it = ledgers_.find(c.id);
         if (it != ledgers_.end()) {
@@ -2565,10 +2607,8 @@ private:
                 any_contributor = true;
                 if (c.kind == CreatureKind::kBoss) {
                     router->get<PlayerActor>(e.player).tell(GrantXp{e.skill, 400});
+                    grant_loot(c, e.player, ring_enum, realm_challenge);
                 } else {
-                    // XP follows the ring, not just the species: killing a wasteland slime is
-                    // genuinely harder than killing a meadow one, because it IS a harder slime
-                    // (`make_creature`).
                     router->get<PlayerActor>(e.player).tell(
                         GrantXp{e.skill, static_cast<std::uint32_t>(st.xp) * (1u + ring)});
                 }
@@ -2583,13 +2623,13 @@ private:
                 GrantXp{skill, (c.kind == CreatureKind::kBoss)
                                    ? 400u
                                    : static_cast<std::uint32_t>(st.xp) * (1u + ring)});
+            if (c.kind == CreatureKind::kBoss) grant_loot(c, player, ring_enum, realm_challenge);
         }
         if (player != 0) {
-            if (c.kind == CreatureKind::kBoss) {
-                grant(player, GrantItems{ItemKind::kProduce, 10});
+            if (st.faction == Faction::kMonster && c.kind != CreatureKind::kBoss) {
+                grant_loot(c, player, ring_enum, realm_challenge);
             } else if (st.faction == Faction::kWild) {
-                // Wildlife is food. Monsters drop nothing yet — loot tables are P4, and inventing a
-                // placeholder one now would be inventing it twice.
+                // Wildlife is food, unchanged by this RFC.
                 grant(player, GrantItems{ItemKind::kProduce, 1});
             }
         }
@@ -2806,6 +2846,11 @@ private:
     }
 
     void grant(std::uint64_t player, const GrantItems& g) noexcept {
+        if (router == nullptr || player == 0) return;
+        router->get<PlayerActor>(player).tell(g);
+    }
+
+    void grant(std::uint64_t player, const GrantEquipment& g) noexcept {
         if (router == nullptr || player == 0) return;
         router->get<PlayerActor>(player).tell(g);
     }

@@ -464,6 +464,8 @@ public:
         s.damage = p.damage;
         s.heavy = heavy;
         s.player = player;
+        s.gems[0] = p.gems[0];
+        s.gems[1] = p.gems[1];
         fan_to_neighbours(p.map, p.x, p.y, s);
         return true;
     }
