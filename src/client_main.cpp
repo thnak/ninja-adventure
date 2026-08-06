@@ -130,6 +130,7 @@ int main(int argc, char** argv) {
     const char* dojo_mode = nullptr;    // --dojo [idle|windup|attack]: enter a dojo boss room (F3)
     int look_at_tx = -1;                // --at TX TY: park the camera on an arbitrary tile
     int look_at_ty = -1;
+    int look_at_map = -1;               // --at-map N: use map N (default kOverworld) with --at
     const char* connect_addr = nullptr;  // --connect HOST:PORT: prefill the login screen's join mode
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--shot") == 0 && i + 2 < argc) {
@@ -168,6 +169,8 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--at") == 0 && i + 2 < argc) {
             look_at_tx = std::atoi(argv[i + 1]);
             look_at_ty = std::atoi(argv[i + 2]);
+        } else if (std::strcmp(argv[i], "--at-map") == 0 && i + 1 < argc) {
+            look_at_map = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--connect") == 0 && i + 1 < argc) {
             connect_addr = argv[i + 1];  // HOST:PORT of a friend's leader
         }
@@ -300,7 +303,9 @@ int main(int argc, char** argv) {
         // An arbitrary tile, the same relative-teleport style as --village/--hold. This is what shoots
         // a forest camp: mmo_worldmap prints camp coordinates, and --at drops the camera on one.
         if (look_at_tx >= 0 && look_at_ty >= 0) {
-            world.teleport_player(me, kOverworld, static_cast<float>(look_at_tx) + 0.5f,
+            const std::uint16_t at_map =
+                look_at_map >= 0 ? static_cast<std::uint16_t>(look_at_map) : kOverworld;
+            world.teleport_player(me, at_map, static_cast<float>(look_at_tx) + 0.5f,
                                   static_cast<float>(look_at_ty) + 0.5f);
             world.sync_world();
             player = view();

@@ -38,11 +38,20 @@ inline constexpr int kChunksPerMap = kMapChunks * kMapChunks;  // 1024 chunk act
 // dwellings, so every house on the map gets its own and there is room for ten times as many. The
 // alternative — a map per building — would be 443 maps of a million tiles each to hold what is
 // really 443 rectangles of 70.
-inline constexpr int kMapCount = 2;
+inline constexpr int kMapCount = 3;
 inline constexpr int kChunkCount = kMapCount * kChunksPerMap;
 
 inline constexpr std::uint16_t kOverworld = 0;
 inline constexpr std::uint16_t kInterior = 1;
+// The first hand-authored/generated persistent map (see world/authored_map.hpp). Small on purpose
+// — `kDojoAnnexChunkEdge` below is 2 (64x64 tiles, matching authored_map.hpp's own
+// kAuthoredMapMaxSide), not kMapChunks (32) like kOverworld/kInterior use: build_chunks() spins up
+// a REAL ChunkActor per (map,cx,cy) up to a map's own chunk edge (world.hpp), so a full-size
+// third map here would have doubled the overworld+interior actor count a second time over — the
+// exact cost ROADMAP.md's own kMapCount 1->2 note measured (+50% mmo_sim runtime) for zero benefit
+// on a room this small.
+inline constexpr std::uint16_t kDojoAnnex = 2;
+inline constexpr int kDojoAnnexChunkEdge = 2;
 
 // How many players can be logged in at once. This is a SESSION-SLOT count, not an account limit:
 // the account table is unbounded, and a slot is what an account is bound to when it logs in.
@@ -885,9 +894,24 @@ inline constexpr int kRoomDoorY = kRoomY0 + kRoomH;
 
 // The land itself, before anyone built on it. Pure noise, no neighbour lookups, no global state —
 // which is what lets world GENERATION call it while it is still deciding where the villages go.
+// world/authored_map.hpp owns kDojoAnnex's actual tile data, but it #includes THIS header (for
+// Terrain/CreatureKind), so terrain_base() cannot call into it directly without a cycle. A
+// function-pointer hook, set once by world bring-up (mirroring `publish_overlay`/`publish_doors`'s
+// own "written once before the engine starts, const after" shape), closes the gap the same way.
+namespace detail {
+inline Terrain (*g_authored_tile)(std::uint16_t, int, int) noexcept = nullptr;
+}
+inline void publish_authored_tile_fn(Terrain (*fn)(std::uint16_t, int, int) noexcept) noexcept {
+    detail::g_authored_tile = fn;
+}
+
 [[nodiscard]] inline Terrain terrain_base(std::uint64_t world_seed, std::uint16_t map, int gx,
                                           int gy) noexcept {
     if (map == kInterior) return interior_tile(gx, gy);
+    if (map == kDojoAnnex) {
+        return detail::g_authored_tile != nullptr ? detail::g_authored_tile(map, gx, gy)
+                                                   : Terrain::kBuilding;
+    }
     const std::uint64_t base = world_seed ^ (static_cast<std::uint64_t>(map) << 48);
     const auto x = static_cast<float>(gx);
     const auto y = static_cast<float>(gy);

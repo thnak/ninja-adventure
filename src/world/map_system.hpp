@@ -131,6 +131,23 @@ struct MapDescriptor {
                          Ring::kMeadow,    WeatherMode::kFixed,      Weather::kNone,
                          /*allow_free_build*/ false};
 }
+// The first hand-authored/generated persistent map (world/authored_map.hpp). `chunk_edge` is
+// `kDojoAnnexChunkEdge` (2), not `kMapChunks` (32) like the two maps above — see that constant's
+// own comment in tiles.hpp for why a small map must not claim the full chunk grid.
+[[nodiscard]] inline constexpr MapDescriptor dojo_annex_descriptor() noexcept {
+    return MapDescriptor{kDojoAnnex,       MapCategory::kPersistent,
+                         static_cast<std::uint8_t>(kDojoAnnexChunkEdge), Ring::kMeadow,
+                         WeatherMode::kFixed, Weather::kNone,
+                         /*allow_free_build*/ false};
+}
+
+// world.hpp's build_chunks() calls this per map index so a small persistent map (kDojoAnnex) only
+// gets the chunk actors it actually needs, instead of build_chunks() unconditionally spinning up
+// kMapChunks x kMapChunks (1024) actors per map the way it always has for kOverworld/kInterior.
+[[nodiscard]] inline constexpr int map_chunk_edge(int map) noexcept {
+    if (map == static_cast<int>(kDojoAnnex)) return kDojoAnnexChunkEdge;
+    return kMapChunks;
+}
 
 // --- §4: the village-always-fits invariant --------------------------------------------------------
 // `full_width`/`full_height` use gates_of()'s ACTUAL `+3` approach-tile margin (village.hpp:182-189),

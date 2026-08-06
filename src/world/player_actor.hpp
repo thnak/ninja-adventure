@@ -37,6 +37,7 @@
 #include "quark/core/capabilities.hpp"
 #include "quark/core/placement_policies.hpp"
 
+#include "world/authored_map.hpp"
 #include "world/protocol.hpp"
 #include "world/snapshot.hpp"
 #include "world/tiles.hpp"
@@ -920,14 +921,25 @@ private:
         if (here == last_tile_) return;
         last_tile_ = here;
         const Portal p = portal_at(map, tx, ty);
-        if (!p.valid) return;
-        map = p.map;
-        x_ = static_cast<float>(p.tx) + 0.5f;
-        y_ = static_cast<float>(p.ty) + 0.5f;
-        last_tile_ = tile_key(p.tx, p.ty);
-        // Facing is set deliberately rather than left alone: you walk INTO a door going up and out
-        // of one going down, so the sprite would otherwise arrive with its back to the room.
-        facing_ = (p.map == kInterior) ? Facing::kUp : Facing::kDown;
+        if (p.valid) {
+            map = p.map;
+            x_ = static_cast<float>(p.tx) + 0.5f;
+            y_ = static_cast<float>(p.ty) + 0.5f;
+            last_tile_ = tile_key(p.tx, p.ty);
+            // Facing is set deliberately rather than left alone: you walk INTO a door going up and
+            // out of one going down, so the sprite would otherwise arrive with its back to the room.
+            facing_ = (p.map == kInterior) ? Facing::kUp : Facing::kDown;
+            return;
+        }
+        // Authored maps' own small portal list — see authored_map.hpp's AuthoredPortal comment for
+        // why this stays a separate check rather than folding into the Door array above.
+        const AuthoredPortalHit ap = authored_portal_at(map, tx, ty);
+        if (!ap.valid) return;
+        map = ap.map;
+        x_ = static_cast<float>(ap.tx) + 0.5f;
+        y_ = static_cast<float>(ap.ty) + 0.5f;
+        last_tile_ = tile_key(ap.tx, ap.ty);
+        facing_ = Facing::kUp;
     }
 
     [[nodiscard]] std::uint16_t total_levels() const noexcept {

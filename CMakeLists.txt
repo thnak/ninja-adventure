@@ -93,6 +93,13 @@ if(MMO_BUILD_CLIENT)
   # because terrain is a pure function. See src/worldmap_main.cpp.
   add_executable(mmo_worldmap src/worldmap_main.cpp)
   target_link_libraries(mmo_worldmap PRIVATE mmo_world raylib Threads::Threads)
+
+  # Visual editor for AuthoredMap files (world/authored_map.hpp) — paint or procedurally generate
+  # (world/dungeon_gen.hpp) small maps by hand. Same "second raylib executable, no actor engine"
+  # shape as mmo_worldmap above, with its own window/UI loop. See src/tools/map_editor_main.cpp.
+  add_executable(map_editor src/tools/map_editor_main.cpp)
+  target_include_directories(map_editor PRIVATE "${raygui_SOURCE_DIR}/src")
+  target_link_libraries(map_editor PRIVATE mmo_world raylib Threads::Threads)
 endif()
 
 # ---- Diagnostic probe ------------------------------------------------------

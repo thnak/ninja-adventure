@@ -19,8 +19,10 @@
 #include <sstream>
 #include <string>
 
+#include "world/authored_map.hpp"
 #include "world/combat_ids.hpp"
 #include "world/combat_pack.hpp"
+#include "world/dungeon_gen.hpp"
 #include "world/gate_sidecar.hpp"
 #include "world/loot.hpp"
 #include "world/map_system.hpp"
@@ -3950,6 +3952,73 @@ int main(int argc, char** argv) {
                "road-graph-anchored kMerchantWander role are not built — see npc.hpp's header note: "
                "this codebase's RFC-007 covers only the Dojo Master boss, not the guard archetype "
                "roster §6 assumes exists\n\n");
+
+    // --- Authored maps: format round-trip, portal lookup, and generator determinism -------------
+    {
+        AuthoredMap m;
+        m.width = 4;
+        m.height = 3;
+        m.terrain = {Terrain::kGrass, Terrain::kGrass, Terrain::kPath,     Terrain::kBuilding,
+                    Terrain::kStone, Terrain::kStone, Terrain::kBuilding, Terrain::kBuilding,
+                    Terrain::kGrass, Terrain::kGrass, Terrain::kGrass,    Terrain::kBuilding};
+        m.structures.push_back(AuthoredStructure{1, 1, StructureKind::kHouseTan});
+        m.decor.push_back(AuthoredDecor{0, 0, Slot::kTerrainGrass2});
+        m.spawns.push_back(AuthoredSpawn{2, 0, CreatureKind::kSlime});
+        m.portals.push_back(AuthoredPortal{3, 2, kInterior, 5, 5});
+
+        // Its own scratch directory, not p16_scratch_root — that one is already cleaned up by this
+        // point in main() (see the removal a few hundred lines up).
+        const std::string scratch_root = "mmo_sim_authored_map_scratch";
+        std::error_code mkdir_ec;
+        std::filesystem::create_directories(scratch_root, mkdir_ec);
+        const std::string path = scratch_root + "/authored_roundtrip.amap";
+        chk.expect(save_authored_map(path.c_str(), m), "an authored map saves to disk");
+        AuthoredMap loaded;
+        chk.expect(load_authored_map(path.c_str(), loaded), "...and loads back");
+        chk.expect(loaded.width == m.width && loaded.height == m.height && loaded.terrain == m.terrain,
+                   "...with the terrain grid intact");
+        chk.expect(loaded.structures.size() == 1 && loaded.structures[0].kind == StructureKind::kHouseTan &&
+                       loaded.decor.size() == 1 && loaded.decor[0].slot == Slot::kTerrainGrass2 &&
+                       loaded.spawns.size() == 1 && loaded.spawns[0].kind == CreatureKind::kSlime &&
+                       loaded.portals.size() == 1 && loaded.portals[0].to_map == kInterior,
+                   "...and every structure/decor/spawn/portal list intact");
+        chk.expect(!load_authored_map((path + ".missing").c_str(), loaded),
+                   "loading a nonexistent file fails cleanly rather than reading garbage");
+
+        // The publish/lookup registry step_through_doors() actually reads at runtime.
+        publish_authored_map(9999, m);
+        chk.expect(authored_tile(9999, 0, 0) == Terrain::kGrass && authored_tile(9999, 2, 0) == Terrain::kPath,
+                   "authored_tile() reads back the published grid");
+        chk.expect(authored_tile(9999, 99, 99) == Terrain::kBuilding,
+                   "...and out-of-bounds reads as solid wall, not a crash");
+        chk.expect(authored_tile(12345, 0, 0) == Terrain::kBuilding,
+                   "an unpublished map id reads as solid wall (nothing authored there yet)");
+        const AuthoredPortalHit hit = authored_portal_at(9999, 3, 2);
+        chk.expect(hit.valid && hit.map == kInterior && hit.tx == 5 && hit.ty == 5,
+                   "authored_portal_at() resolves a portal tile to its destination");
+        chk.expect(!authored_portal_at(9999, 0, 0).valid,
+                   "...and a non-portal tile resolves to nothing");
+
+        // Generator determinism (Phase 2's own verification bar): the same config produces a
+        // byte-identical map every time, matching this codebase's cross-platform-determinism style.
+        GenConfig cfg;
+        cfg.width = 40;
+        cfg.height = 40;
+        cfg.seed = 0xABCDEFull;
+        const AuthoredMap gen_a = generate_dungeon(cfg);
+        const AuthoredMap gen_b = generate_dungeon(cfg);
+        chk.expect(gen_a.terrain == gen_b.terrain && gen_a.decor.size() == gen_b.decor.size() &&
+                       gen_a.portals.size() == gen_b.portals.size(),
+                   "generate_dungeon() is deterministic: same seed in, byte-identical map out");
+        chk.expect(!gen_a.portals.empty(), "generate_dungeon() places at least the requested portal(s)");
+
+        std::error_code rm_ec;
+        std::filesystem::remove_all(scratch_root, rm_ec);  // best-effort scratch cleanup
+    }
+    std::printf("authored maps: AuthoredMap save/load round-trips its terrain grid and every "
+               "structure/decor/spawn/portal list, authored_tile()/authored_portal_at() resolve "
+               "published content and read as solid/absent otherwise, and generate_dungeon() is "
+               "deterministic\n\n");
 
     std::printf("\n%s\n", chk.failures == 0 ? "OK" : "FAIL");
     return chk.failures == 0 ? 0 : 1;

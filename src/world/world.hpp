@@ -35,6 +35,7 @@
 #include "quark/core/spawn.hpp"
 
 #include "world/account.hpp"
+#include "world/authored_map.hpp"
 #include "world/chunk_actor.hpp"
 #include "world/flow_field.hpp"
 #include "world/instance_manager.hpp"
@@ -81,6 +82,26 @@ public:
         // noise. Doing it later would give the chunks a cache of the land as it was before anyone
         // built on it, and nothing would ever correct them.
         layout_ = &world_layout(kWorldSeed);
+
+        // Same "before anything reads a tile" ordering as the overlay above: build_chunks() (a few
+        // lines down) calls generate_terrain(), which calls terrain_of()/terrain_base() for every
+        // chunk including kDojoAnnex's — so the authored-map hook has to be wired and the file
+        // loaded before that, or the room would cache as all-wall for its whole lifetime. Missing
+        // file is not an error here: authored_tile() already returns Terrain::kBuilding (solid,
+        // inert) when nothing was published for a map id, which is exactly right before anyone has
+        // used map_editor to author anything yet.
+        publish_authored_tile_fn(&authored_tile);
+        // Same relative-path search the atlas texture loader uses (raylib_bridge.cpp) — the client
+        // and mmo_sim both get launched from either the repo root or build/, and this is the one
+        // load site that has to work from both without the caller passing a path in.
+        AuthoredMap dojo_annex;
+        for (const char* p : {"assets/maps/dojo_annex.amap", "../assets/maps/dojo_annex.amap",
+                              "../../assets/maps/dojo_annex.amap"}) {
+            if (load_authored_map(p, dojo_annex)) {
+                publish_authored_map(kDojoAnnex, std::move(dojo_annex));
+                break;
+            }
+        }
 
         pool_ = std::make_unique<quark::detail::MessagePool>(1u << 16);
 
@@ -915,8 +936,18 @@ private:
         chunk_acts_.reserve(kChunkCount);
 
         for (int map = 0; map < kMapCount; ++map) {
+            // How much of this map's kMapChunks x kMapChunks grid is real. kOverworld/kInterior
+            // both use the full 32x32 grid (unchanged); a small authored map (kDojoAnnex) uses far
+            // fewer — see map_chunk_edge()'s own comment. The loop below still walks the FULL grid
+            // so `chunk_index()`'s dense `map*kChunksPerMap + cy*kMapChunks + cx` addressing stays
+            // valid everywhere (chunks_/chunk_acts_ must stay index-aligned with it) — chunks
+            // outside the edge get a real-but-inert ChunkActor (cheap: one allocation, never
+            // ticked) instead of terrain generation + engine registration (the actual per-tick
+            // cost `build_chunks()` used to pay 1024x per map regardless of how small it was).
+            const int edge = map_chunk_edge(map);
             for (int cy = 0; cy < kMapChunks; ++cy) {
                 for (int cx = 0; cx < kMapChunks; ++cx) {
+                    const bool in_edge = cx < edge && cy < edge;
                     const ChunkCoord coord{static_cast<std::uint16_t>(map),
                                            static_cast<std::uint16_t>(cx),
                                            static_cast<std::uint16_t>(cy)};
@@ -925,34 +956,47 @@ private:
                     ch->router = router_.get();
                     ch->bus = &bus_;
                     ch->status = &status_;
-                    // Null indoors, and said rather than left to `ready()` to catch: the flow field
-                    // routes monsters to the nearest VILLAGE, and there is no village to walk to
-                    // from inside somebody's front room. Only `flow_[kOverworld]` is ever built.
-                    ch->flow = (map == kOverworld) ? &flow_[kOverworld] : nullptr;
-                    // Fallback heading for a creature the flow field cannot route (an island, a
-                    // pocket walled in by cliffs): the village nearest this chunk's own centre.
-                    const int mid_x = cx * kChunkTiles + kChunkTiles / 2;
-                    const int mid_y = cy * kChunkTiles + kChunkTiles / 2;
-                    if (const Village* v = layout_->nearest_village(mid_x, mid_y)) {
-                        ch->home_x = static_cast<float>(v->tx) + 0.5f;
-                        ch->home_y = static_cast<float>(v->ty) + 0.5f;
-                    }
-                    ch->generate_terrain(kWorldSeed);
-                    // Villages and roads are already in the terrain the line above cached — they
-                    // are part of the world, not entities placed on top of it. Nothing is seeded
-                    // here except wildlife: a new world starts with no player buildings anywhere.
-                    //
-                    // And no wildlife indoors. `seed_wildlife` places animals on walkable ground,
-                    // and every room on the interior map is walkable ground — so without this every
-                    // house on the overworld would have had a boar in it.
-                    if (map == kOverworld) ch->seed_wildlife(kWorldSeed);
-                    ch->publish_now();
 
                     auto act = std::make_unique<quark::Activation>(
                         ch.get(), ChunkActor::dispatch_table(), pool_->sink());
-                    quark::register_actor<ChunkActor>(*engine_, chunk_key(coord), *act);
 
-                    chunk_coords_.push_back(coord);
+                    if (in_edge) {
+                        // Null indoors, and said rather than left to `ready()` to catch: the flow
+                        // field routes monsters to the nearest VILLAGE, and there is no village to
+                        // walk to from inside somebody's front room. Only `flow_[kOverworld]` is
+                        // ever built.
+                        ch->flow = (map == kOverworld) ? &flow_[kOverworld] : nullptr;
+                        // Fallback heading for a creature the flow field cannot route (an island, a
+                        // pocket walled in by cliffs): the village nearest this chunk's own centre.
+                        const int mid_x = cx * kChunkTiles + kChunkTiles / 2;
+                        const int mid_y = cy * kChunkTiles + kChunkTiles / 2;
+                        if (const Village* v = layout_->nearest_village(mid_x, mid_y)) {
+                            ch->home_x = static_cast<float>(v->tx) + 0.5f;
+                            ch->home_y = static_cast<float>(v->ty) + 0.5f;
+                        }
+                        ch->generate_terrain(kWorldSeed);
+                        // Villages and roads are already in the terrain the line above cached —
+                        // they are part of the world, not entities placed on top of it. Nothing is
+                        // seeded here except wildlife: a new world starts with no player buildings
+                        // anywhere.
+                        //
+                        // And no wildlife indoors. `seed_wildlife` places animals on walkable
+                        // ground, and every room on the interior map is walkable ground — so
+                        // without this every house on the overworld would have had a boar in it.
+                        if (map == kOverworld) ch->seed_wildlife(kWorldSeed);
+                        ch->publish_now();
+                        quark::register_actor<ChunkActor>(*engine_, chunk_key(coord), *act);
+                        // Only a REGISTERED chunk belongs in chunk_coords_ — it is both the
+                        // director's own per-tick fan-out list (chunk_coords_ is assigned straight
+                        // into it below) and every sync barrier's (sync_world(), compact_overlay(),
+                        // recover_overlay()) iteration list, several of which `block_on` an `ask` per
+                        // entry. An out-of-edge coord has no registered actor to answer that ask, so
+                        // including it here would hang the very first barrier called after bring-up
+                        // — chunks_/chunk_acts_ (below) still get an entry for every coordinate, since
+                        // THEIR indexing is the chunk_index() formula, not position in this list.
+                        chunk_coords_.push_back(coord);
+                    }
+
                     chunks_.push_back(std::move(ch));
                     chunk_acts_.push_back(std::move(act));
                 }
