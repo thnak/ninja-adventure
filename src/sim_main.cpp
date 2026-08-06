@@ -2801,6 +2801,20 @@ int main(int argc, char** argv) {
             chk.expect(dead_instanced_no_return.map == kOverworld &&
                            dead_instanced_no_return.x == 7.5f && dead_instanced_no_return.y == 8.5f,
                        "...and falls back to the bound hearth when no return point was ever set (§7)");
+
+            // Regression: dying on a persistent-band map OTHER than kOverworld (the dojo's shared
+            // kInterior) must also come back to kOverworld — respawn_tx_/respawn_ty_ are only ever
+            // meaningful there, so leaving `map` untouched strands the player inside kInterior's
+            // tile grid at overworld-shaped coordinates.
+            PlayerProgression dead_interior{};
+            dead_interior.hp = 0;
+            dead_interior.map = kInterior;
+            dead_interior.respawn_tx = 40;
+            dead_interior.respawn_ty = 50;
+            apply_recovery_defaults(dead_interior);
+            chk.expect(dead_interior.map == kOverworld && dead_interior.x == 40.5f &&
+                           dead_interior.y == 50.5f,
+                       "a death on kInterior (dojo) also returns to kOverworld, not left stranded");
         }
 
         // PlayerProgressionStore: a real FileStore round trip — write, close, then read back

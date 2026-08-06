@@ -1053,6 +1053,11 @@ private:
             }
             pending_eject_ = false;
         } else {
+            // respawn_tx_/respawn_ty_ are only ever bound against kOverworld (BindAccount/
+            // SetRespawn never carry a map field), so a death on any other persistent-band map
+            // (e.g. kInterior's dojo) must also come back to kOverworld — otherwise the player
+            // reappears at overworld coordinates inside the wrong map's tile grid, stranded.
+            map = kOverworld;
             x_ = static_cast<float>(respawn_tx_) + 0.5f;
             y_ = static_cast<float>(respawn_ty_) + 0.5f;
         }

@@ -231,6 +231,10 @@ inline void apply_recovery_defaults(PlayerProgression& p) noexcept {
             p.y = static_cast<float>(p.respawn_ty) + 0.5f;
         }
     } else {
+        // p.respawn_tx/respawn_ty are only ever bound against kOverworld, so a death on any other
+        // persistent-band map (e.g. kInterior's dojo) must also come back to kOverworld — see the
+        // matching fix in PlayerActor::respawn() this mirrors.
+        p.map = kOverworld;
         p.x = static_cast<float>(p.respawn_tx) + 0.5f;
         p.y = static_cast<float>(p.respawn_ty) + 0.5f;
     }
