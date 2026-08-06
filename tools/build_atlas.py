@@ -709,6 +709,38 @@ ANIM_MANIFEST = [
     ("Horse",      "Animal/Horse/SpriteSheetBrownSide.png",      2, 1),
 ]
 
+# --- NPC skin roster (RFC-023 §2) ---------------------------------------------------
+# Every `Actor/Character/<Name>/SeparateAnim/` folder other than `NinjaGreen` (reserved
+# for the player rig, RFC-023 §1.1) ships the same 8-pose set: Attack, Dead, Idle, Item,
+# Jump, Special1, Special2, Walk. AUTO-DISCOVERED rather than hand-listed — 82 folders as
+# of this pack, and re-running this script picks up any the pack ever adds or removes,
+# the same "one-line table edit" philosophy MANIFEST/BIG_MANIFEST already state. The
+# eligibility test (Walk.png AND Idle.png present under SeparateAnim/) is what excludes
+# `Child` and `OldWoman` (both ship only an unsplit SpriteSheet.png, no SeparateAnim/
+# split — RFC-023 §2's Open Question 2 already flags this for Child; OldWoman turns out
+# to have the identical gap, not caught by the RFC's own audit) and the four elemental
+# ninja variants (NinjaFire/Leaf/Thunder/Water have no Idle.png) — no separate carve-out
+# needed, the same test that was already going to run excludes all three cases.
+SKIN_POSES = ["Attack", "Dead", "Idle", "Item", "Jump", "Special1", "Special2", "Walk"]
+SKIN_ROOT = NINJA / "Character"
+
+
+def discover_skins() -> list[str]:
+    names = []
+    for d in sorted(SKIN_ROOT.iterdir()):
+        if not d.is_dir() or d.name == "NinjaGreen":
+            continue
+        sa = d / "SeparateAnim"
+        # All 8 poses, not just Walk/Idle — MaskFrog, for one, has Walk+Idle but no Dead.png, and
+        # this run packs the whole set (not a Walk/Idle-only v1), so a partial folder must be
+        # excluded here rather than fail the packing pass below.
+        if all((sa / f"{pose}.png").exists() for pose in SKIN_POSES):
+            names.append(d.name)
+    return names
+
+
+SKIN_NAMES = discover_skins()
+
 # --- Deluxe player rig (32px animated) ---------------------------------------
 # The plain `Player` walk sheet above is the 16px rig every actor started on. The player alone gets
 # the pack's DELUXE rig: `Actor/CharacterAnimated/NinjaGreen`, whose frames are 32x32 (a 16px body
@@ -1964,6 +1996,52 @@ def main() -> int:
         bosses.append((name, PAD, anim_y + PAD, fw, fh, frames, foot))
         anim_y += fh + 2 * PAD
 
+    # --- NPC skin poses, shelf-packed by pose so uniform-height rows waste minimal space --------
+    # 82 skins x 8 poses = 656 sheets (RFC-023 §2/§5's NPC skin roster, SKIN_NAMES above). The
+    # stacking scheme every earlier pass uses — one full-width row per manifest entry — is fine for
+    # a few dozen hand-picked entries but would burn ~15,000px of mostly-empty height here, since
+    # most of these sheets are 72px or 18px wide against an ~850px-wide canvas. Packed by pose
+    # instead: each pose's sheets share one cell size, so they shelf-pack left-to-right at that
+    # height, wrapping only when a row actually fills — bounded by the fixed pixel AREA these
+    # sheets need, not by 656 independent full-width rows.
+    skins = []
+    shelf_w = atlas.width
+    for pose in SKIN_POSES:
+        row_x, row_h = 0, 0
+        for name in SKIN_NAMES:
+            path = SKIN_ROOT / name / "SeparateAnim" / f"{pose}.png"
+            if not path.exists():
+                print(f"missing pose sheet: {path}", file=sys.stderr)
+                return 1
+            sheet = Image.open(path).convert("RGBA")
+            if sheet.width % TILE or sheet.height % TILE:
+                print(f"Skin{name}{pose}: {path.name} is {sheet.width}x{sheet.height}, "
+                      f"not a multiple of {TILE}px", file=sys.stderr)
+                return 1
+            scols, srows = sheet.width // TILE, sheet.height // TILE
+            block_w, block_h = scols * cell_px, srows * cell_px
+            if row_x > 0 and row_x + block_w > shelf_w:
+                anim_y += row_h
+                row_x, row_h = 0, 0
+            new_w = max(atlas.width, row_x + block_w)
+            new_h = anim_y + row_h + block_h
+            if new_w > atlas.width or new_h > atlas.height:
+                grown = Image.new("RGBA", (max(new_w, atlas.width), max(new_h, atlas.height)),
+                                  (0, 0, 0, 0))
+                grown.paste(atlas, (0, 0))
+                atlas = grown
+            for r in range(srows):
+                for c in range(scols):
+                    frame = sheet.crop((c * TILE, r * TILE, c * TILE + TILE, r * TILE + TILE))
+                    cellimg = Image.new("RGBA", (cell_px, cell_px), (0, 0, 0, 0))
+                    extrude(cellimg, frame)
+                    atlas.paste(cellimg, (row_x + c * cell_px, anim_y + r * cell_px))
+            skins.append((f"Skin{name}{pose}", row_x + PAD, anim_y + PAD, scols, srows))
+            row_x += block_w
+            row_h = max(row_h, block_h)
+        anim_y += row_h
+    anims.extend(skins)
+
     # --- motile frame-strips, appended LAST so no earlier slot moves ------------------------------
     # The author kit's animated overlays (authored Anim:/Spin: nodes + the chimney smoke attached to
     # every dwelling). Packed after everything else, so the whole atlas above this point is byte-for-
@@ -2026,7 +2104,7 @@ def main() -> int:
         "    std::uint8_t rows;  // frames",
         "};",
         "",
-        "enum class Anim : std::uint8_t {",
+        "enum class Anim : std::uint16_t {",
     ]
     lines += [f"    k{name}," for name, _, _, _, _ in anims]
     lines += [
@@ -2051,6 +2129,51 @@ def main() -> int:
         "    const int r = (frame % s.rows + s.rows) % s.rows;",
         "    return AtlasRect{static_cast<std::int16_t>(s.x + c * (kAtlasTile + 2)),",
         "                     static_cast<std::int16_t>(s.y + r * (kAtlasTile + 2))};",
+        "}",
+        "",
+        "// --- NPC skins (RFC-023 §2/§5) ---------------------------------------------------------",
+        "// One Skin per eligible Actor/Character/* folder (SKIN_NAMES in build_atlas.py), one Anim",
+        "// per pose per skin, already packed into the table above. `Idle`/`Attack`/`Jump` are 4",
+        "// facings x 1 frame (draw via anim_frame(dir, 0) directly, never through anim() — see its",
+        "// rows==1 special case); `Dead`/`Item`/`Special1`/`Special2` are a single frame, no facing;",
+        "// `Walk` alone is the real 4x4 facing x frame sheet.",
+        "enum class NpcPose : std::uint8_t {",
+    ]
+    lines += [f"    k{pose}," for pose in SKIN_POSES]
+    lines += [
+        "    kCount,",
+        "};",
+        "",
+        "enum class Skin : std::uint8_t {",
+    ]
+    lines += [f"    k{name}," for name in SKIN_NAMES]
+    lines += [
+        "    kCount,",
+        "};",
+        "",
+        "struct SkinAnims {",
+        "    Anim pose[static_cast<int>(NpcPose::kCount)];",
+        "};",
+        "",
+        "inline constexpr SkinAnims kSkinAnims[static_cast<int>(Skin::kCount)] = {",
+    ]
+    lines += [
+        "    {{" + ", ".join(f"Anim::kSkin{name}{pose}" for pose in SKIN_POSES) + f"}}}},  // k{name}"
+        for name in SKIN_NAMES
+    ]
+    lines += [
+        "};",
+        "",
+        "// Folder name behind each Skin, for data tables (world/npc.hpp's role->pool tables) that",
+        "// reference skins by the same name this script discovered them under.",
+        "inline constexpr const char* kSkinNames[static_cast<int>(Skin::kCount)] = {",
+    ]
+    lines += [f'    "{name}",' for name in SKIN_NAMES]
+    lines += [
+        "};",
+        "",
+        "[[nodiscard]] inline constexpr Anim skin_anim(Skin s, NpcPose p) noexcept {",
+        "    return kSkinAnims[static_cast<int>(s)].pose[static_cast<int>(p)];",
         "}",
         "",
         "// --- Multi-tile sprites --------------------------------------------------------------",

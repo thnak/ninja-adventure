@@ -161,6 +161,9 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
     // step out of, which is the whole difficulty budget at this scale — the numbers that scale with
     // the ring are HP and damage, never cadence.
     static constexpr std::uint8_t kStrikeCooldown = 10;
+    // Tags `Creature::windup_target` as a `Creature::id` rather than a real player key — see
+    // `commit_windup`'s creature-vs-creature overload and `resolve_windup` for the full rationale.
+    static constexpr std::uint64_t kWindupTargetIsCreature = 1ull << 63;
 
     // ================================ handlers ====================================================
 
@@ -816,15 +819,19 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         c.y = static_cast<float>(door_ty) + 0.5f;
         c.home_tx = static_cast<std::uint16_t>(door_tx);
         c.home_ty = static_cast<std::uint16_t>(door_ty);
-        // A placeholder combat-stat/defender row, not a meaningful species — see npc.hpp's header
-        // note on why CreatureKind gets no new NPC-capable entries. kChicken is the weakest existing
-        // wildlife row, which is why it was picked over any other kind for this purpose.
-        c.kind = CreatureKind::kChicken;
-        c.max_hp = kNpcMaxHp;
+        // Every OTHER role gets a placeholder combat-stat/defender row, not a meaningful species —
+        // see npc.hpp's header note on why civilian roles carry no real CreatureKind. kChicken is the
+        // weakest existing wildlife row, which is why it was picked over any other kind for this
+        // purpose. `kGuard` is the one role that IS a real combat participant (step_guard,
+        // chunk_actor.hpp), so it gets its own real `CreatureKind::kGuard` stats row instead.
+        const bool is_guard = role == NpcRole::kGuard;
+        c.kind = is_guard ? CreatureKind::kGuard : CreatureKind::kChicken;
+        const CreatureStats st = stats_of(c.kind);
+        c.max_hp = is_guard ? st.max_hp : kNpcMaxHp;
         c.hp = c.max_hp;
-        c.damage = 0;
+        c.damage = is_guard ? st.damage : 0;
         c.disposition = Disposition::kNeutral;
-        const DefenderProfile def = defender_of(CreatureKind::kChicken);
+        const DefenderProfile def = defender_of(c.kind);
         c.material = def.material;
         c.tier = def.tier;
         c.toughness = tier_toughness(def.tier);
@@ -921,6 +928,29 @@ private:
             if (d2 > best_d2) continue;
             best_d2 = d2;
             best = &p;
+        }
+        return best;
+    }
+
+    // `nearest_player`'s twin for creature-vs-creature aggro: the nearest OTHER living creature
+    // within `range` that `seeker_faction` is hostile toward (`stance_between`), excluding `self`.
+    // This is what lets a guard notice a raid monster on its own (no separate raid-alert plumbing
+    // needed — see step_creatures' guard branch) and, symmetrically, lets an ordinary hostile monster
+    // consider a nearby guard fair prey when no player is closer.
+    [[nodiscard]] Creature* nearest_hostile_creature(const Creature& self, Faction seeker_faction,
+                                                     float range) noexcept {
+        Creature* best = nullptr;
+        float best_d2 = range * range;
+        for (Creature& other : creatures_) {
+            if (other.id == self.id || other.hp <= 0) continue;
+            if (creature_is_npc(other) && npc_state_of(other) == NpcState::kSheltering) continue;
+            if (stance_between(seeker_faction, faction_of(other)) != Stance::kHostile) continue;
+            const float dx = other.x - self.x;
+            const float dy = other.y - self.y;
+            const float d2 = dx * dx + dy * dy;
+            if (d2 > best_d2) continue;
+            best_d2 = d2;
+            best = &other;
         }
         return best;
     }
@@ -1505,15 +1535,22 @@ private:
             // AI below — no aggro, no flow field, no maul/attack. It still migrates across chunk
             // borders through the ordinary hand-off further down... except it never actually strays
             // that far (wander_radius tops out at 10 tiles, well inside one 32-tile chunk), so in
-            // practice this `continue` is the only place its tick ends.
-            if (creature_is_npc(c)) {
+            // practice this `continue` is the only place its tick ends. A guard is the one Npc role
+            // that does NOT divert here — it runs the generic loop below (real aggro/attack/wander)
+            // with a handful of guard-aware branches, marked `is_guard` at each one.
+            const bool is_guard = creature_is_npc(c) && npc_role_of(c) == NpcRole::kGuard;
+            if (creature_is_npc(c) && !is_guard) {
                 step_npc(c, rng);
                 continue;
             }
             const CreatureStats st = stats_of(c.kind);
 
             if (c.attack_cd > 0) --c.attack_cd;
-            if (c.anger_ticks > 0 && --c.anger_ticks == 0) c.target = 0;
+            // `c.target` is npc.hpp's packed role/state/home_struct for a guard — clearing it here
+            // like an ordinary creature would corrupt that state. Guards don't need it: this decay
+            // only zeroes a bookkeeping field the chase logic below never reads back (see npc.hpp's
+            // header note and provoke()'s matching guard).
+            if (c.anger_ticks > 0 && --c.anger_ticks == 0 && !is_guard) c.target = 0;
             // Stagger's terminal (Knockdown) is the ladder's flat stun — status_step (step_status,
             // called earlier this tick) already owns its countdown; this is only the gate.
             if (c.status.primary == Channel::kStagger && c.status.stage == 3) {
@@ -1542,15 +1579,17 @@ private:
             // is of AGGRESSION, not of movement.
             const bool suppressed = !entities_.empty() && in_suppress_cloud(c.x, c.y);
             if (suppressed) {
-                c.target = 0;
+                if (!is_guard) c.target = 0;  // see the anger-decay note above — never for a guard
                 c.anger_ticks = 0;
             }
 
             // A neutral animal that has not been touched still resents being crowded. Its personal
             // space is deliberately much smaller than a monster's aggro radius: you can walk past a
-            // boar, you just cannot walk over one.
+            // boar, you just cannot walk over one. A guard has no such "personal space" — excluded
+            // here (provoke() also gates on it, defence in depth) so standing near an off-duty guard
+            // never reads as an attack.
             const bool angry = c.anger_ticks > 0;
-            if (!angry && !suppressed && c.disposition == Disposition::kNeutral) {
+            if (!angry && !suppressed && !is_guard && c.disposition == Disposition::kNeutral) {
                 if (const PlayerBeacon* p = nearest_player(c.x, c.y, st.aggro * 0.45f)) {
                     provoke(c, p->player, /*by_attack*/ false);
                 }
@@ -1562,16 +1601,45 @@ private:
                 will_fight ? nearest_player(c.x, c.y, st.aggro * (angry ? 1.8f : 1.0f)) : nullptr;
             const PlayerBeacon* threat =
                 (c.disposition == Disposition::kTimid) ? nearest_player(c.x, c.y, st.aggro) : nullptr;
+            // `nearest_player`'s creature-vs-creature twin: a guard scans for a nearby raid monster
+            // UNCONDITIONALLY (this is how it notices a raid on its own, no separate alert plumbing —
+            // see rally_guards/provoke for the OTHER trigger, a direct or alerted attack), while an
+            // ordinary monster only bothers once it's already `will_fight` (matching how it already
+            // gates its own player-prey search) — a peaceful wild animal never gains a new "attack
+            // guards" behavior, since `stance_between(kWild, kVillager)` is Neutral either way.
+            Creature* creature_prey = (!suppressed && (is_guard || will_fight))
+                                          ? nearest_hostile_creature(c, faction_of(c),
+                                                                     st.aggro * (angry ? 1.8f : 1.0f))
+                                          : nullptr;
 
             float dx = 0.0f;
             float dy = 0.0f;
-            if (prey != nullptr) {
+            const float prey_d2 = (prey != nullptr) ? (prey->x - c.x) * (prey->x - c.x) +
+                                                           (prey->y - c.y) * (prey->y - c.y)
+                                                     : -1.0f;
+            const float cprey_d2 = (creature_prey != nullptr)
+                                       ? (creature_prey->x - c.x) * (creature_prey->x - c.x) +
+                                             (creature_prey->y - c.y) * (creature_prey->y - c.y)
+                                       : -1.0f;
+            // Whichever hostile candidate (player or creature) is nearer wins — the same "closest
+            // wins" rule `nearest_player`/`nearest_hostile_creature` already embody individually,
+            // extended across the two kinds now that a guard (or a monster with no player nearby) may
+            // have both.
+            if (prey != nullptr && (creature_prey == nullptr || prey_d2 <= cprey_d2)) {
                 dx = prey->x - c.x;
                 dy = prey->y - c.y;
-                const float dist = std::sqrt(dx * dx + dy * dy);
+                const float dist = std::sqrt(prey_d2);
                 if (dist <= st.reach && c.attack_cd == 0 && c.damage > 0) {
                     commit_windup(c, *prey);
                     continue;  // it planted its feet — the wind-up begins, the blow lands a beat later
+                }
+            } else if (creature_prey != nullptr) {
+                dx = creature_prey->x - c.x;
+                dy = creature_prey->y - c.y;
+                const float dist = std::sqrt(cprey_d2);
+                if (dist <= st.reach && c.attack_cd == 0 && c.damage > 0) {
+                    commit_windup(c, *creature_prey);
+                    continue;
                 }
             } else if (threat != nullptr) {
                 dx = c.x - threat->x;  // straight away, and fast
@@ -1861,6 +1929,21 @@ private:
         add_effect(c.x, c.y, EffectKind::kSmoke);  // the tell: a puff at its feet as it plants them
     }
 
+    // `commit_windup`'s creature-vs-creature twin (a guard swinging at a raid monster, or an ordinary
+    // monster swinging at a guard — step_creatures wires both directions through this same pair of
+    // overloads). `windup_target` is one shared uint64_t field with two meanings: bit 63 SET marks it
+    // as a `Creature::id` (masked off below) rather than a real player key. Player keys
+    // (`kPlayerKeyBase + slot`, tiles.hpp) are tiny (0x1000..0x1007) and will never set that bit, so
+    // this is an unambiguous, purpose-built tag, not a reuse of an already-meaningful range.
+    void commit_windup(Creature& c, const Creature& prey) noexcept {
+        c.facing = facing_of(prey.x - c.x, prey.y - c.y);
+        c.windup = stats_of(c.kind).windup;
+        c.windup_target = kWindupTargetIsCreature | prey.id;
+        c.windup_x = prey.x;
+        c.windup_y = prey.y;
+        add_effect(c.x, c.y, EffectKind::kSmoke);
+    }
+
     // The committed blow resolves (F2). Look the target up again by key — a swing is aimed at the
     // player it was committed against, not at whoever is now closest. Still within a hair over reach
     // (reach*1.15 — a grace so a real dodge earns the miss but pixel-perfect edging does not) and it
@@ -1872,6 +1955,24 @@ private:
         const std::uint64_t target = c.windup_target;
         c.windup_target = 0;
         const float grace = stats_of(c.kind).reach * 1.15f;
+        // `commit_windup`'s creature-target overload tags `windup_target` with the high bit — a guard
+        // swinging at a raid monster, or a monster swinging at a guard, resolves here instead of
+        // against a PlayerBeacon. Direct HP subtraction, mirroring `maul_wildlife`'s damage shape, but
+        // as a deliberate targeted commit rather than incidental contact.
+        if (target & kWindupTargetIsCreature) {
+            const std::uint32_t id = static_cast<std::uint32_t>(target);
+            if (Creature* defender = creature_by_id(id)) {
+                const float dx = defender->x - c.x;
+                const float dy = defender->y - c.y;
+                if (dx * dx + dy * dy <= grace * grace) {
+                    defender->hp = static_cast<std::int16_t>(defender->hp - c.damage);
+                    add_effect(defender->x, defender->y, EffectKind::kSlash);
+                    return;
+                }
+            }
+            add_effect(c.windup_x, c.windup_y, EffectKind::kSlash);
+            return;
+        }
         if (const PlayerBeacon* p = beacon_of(target)) {
             const float dx = p->x - c.x;
             const float dy = p->y - c.y;
@@ -1884,6 +1985,16 @@ private:
             }
         }
         add_effect(c.windup_x, c.windup_y, EffectKind::kSlash);  // a whiff, where the player was
+    }
+
+    // The living Creature with this id in the same chunk, or null — `resolve_windup`'s creature-target
+    // path re-checks the exact target it committed against, same reasoning `beacon_of` documents for
+    // the player-target path.
+    [[nodiscard]] Creature* creature_by_id(std::uint32_t id) noexcept {
+        for (Creature& other : creatures_) {
+            if (other.id == id && other.hp > 0) return &other;
+        }
+        return nullptr;
     }
 
     // The beacon for one SPECIFIC player, or null. `nearest_player` settles for whoever is closest;
@@ -2969,10 +3080,30 @@ private:
     void provoke(Creature& c, std::uint64_t player, bool by_attack) noexcept {
         if (player == 0) return;
         // RFC-023: an NPC's `target` field is repurposed to pack role/state/home_struct (npc.hpp) —
-        // it is never a real "angry at this player" key. A civilian is always kNeutral and never
-        // fights back regardless, so there is no behavior lost by never provoking one, only a real
-        // bug avoided (writing here would corrupt that packed state).
-        if (creature_is_npc(c)) return;
+        // it is never a real "angry at this player" key, for ANY Npc role, guards included. A guard
+        // is the one role that fights back, but it does so on `anger_ticks` alone (step_creatures'
+        // guard branch re-derives WHO to chase every tick via `nearest_player`, exactly like an
+        // ordinary creature — see npc.hpp's header note on why `.target` was never load-bearing for
+        // that decision) — so anger/grudge escalate exactly like the non-NPC path below, minus the
+        // one `c.target = player` line, which would corrupt the packed state.
+        if (creature_is_npc(c)) {
+            if (npc_role_of(c) != NpcRole::kGuard) {
+                // A civilian never fights back, but it DOES cry for help — pulling nearby off-duty
+                // guards into the fight is the one consequence attacking a civilian has.
+                if (by_attack) rally_guards(c, player);
+                return;
+            }
+            // Unlike a neutral wild animal, a guard has no "personal space" crowding-provoke — the
+            // one call site that passes by_attack=false (step_creatures' neutral-crowding check) is
+            // deliberately excluded from ever reaching a guard, but this is the authoritative gate
+            // regardless: only a real hit provokes a guard.
+            if (!by_attack) return;
+            c.anger_ticks = static_cast<std::uint16_t>(
+                kAngerTicks + kAngerPerGrudge * static_cast<std::uint16_t>(c.grudge));
+            if (c.grudge < kMaxGrudge) ++c.grudge;
+            rally_guards(c, player);
+            return;
+        }
         if (c.disposition == Disposition::kTimid) {
             if (by_attack) c.anger_ticks = kAngerTicks;  // makes it flee for a good while
             return;
@@ -2999,6 +3130,26 @@ private:
             if (dx * dx + dy * dy > kPackRadius * kPackRadius) continue;
             other.target = player;
             other.anger_ticks = kAngerTicks;
+        }
+    }
+
+    // `rally_pack`'s guard twin, and the literal answer to "NPCs should connect to each other to
+    // protect the village": hitting ANY NPC (guard or civilian) pulls nearby off-duty guards into the
+    // fight, same-chunk-only (matching `rally_pack`'s own scope limitation — a guard just across a
+    // chunk boundary is not alerted this pass) within `kGuardAlertRadius` (npc.hpp, wider than
+    // `rally_pack`'s 7-tile pack radius since a village footprint is bigger than a monster cluster).
+    // Never writes `.target` — see `provoke`'s note on why.
+    void rally_guards(const Creature& victim, std::uint64_t player) noexcept {
+        (void)player;  // guards re-derive WHO to chase via nearest_player() every tick; see provoke()
+        for (Creature& other : creatures_) {
+            if (other.id == victim.id || other.hp <= 0) continue;
+            if (!creature_is_npc(other) || npc_role_of(other) != NpcRole::kGuard) continue;
+            if (other.disposition != Disposition::kNeutral) continue;
+            const float dx = other.x - victim.x;
+            const float dy = other.y - victim.y;
+            if (dx * dx + dy * dy > kGuardAlertRadius * kGuardAlertRadius) continue;
+            other.anger_ticks = static_cast<std::uint16_t>(
+                kAngerTicks + kAngerPerGrudge * static_cast<std::uint16_t>(other.grudge));
         }
     }
 

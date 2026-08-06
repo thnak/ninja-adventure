@@ -1305,7 +1305,7 @@ inline constexpr PrefabCell kPrefabCells_ForestCottage_snow[] = {
 inline constexpr PrefabSkin kPrefabSkins_ForestCottage[] = {{kPrefabCells_ForestCottage, 231}, {kPrefabCells_ForestCottage_autumn, 231}, {kPrefabCells_ForestCottage_snow, 227}};
 inline constexpr std::uint32_t kPrefabBlocks_ForestCottage[] = {0x00000000u, 0x0001e000u, 0x0001e000u, 0x0001e000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u};
 inline constexpr PrefabMotile kPrefabMotiles_ForestCottage[] = {
-    {232, 0, 1, 6796, 32, 32, 6, 900, 0},  // chimney
+    {232, 0, 1, 7948, 32, 32, 6, 900, 0},  // chimney
 };
 
 inline constexpr PrefabCell kPrefabCells_FortCourtyard[] = {
@@ -2235,9 +2235,9 @@ inline constexpr PrefabCell kPrefabCells_MarketYard[] = {
 inline constexpr PrefabSkin kPrefabSkins_MarketYard[] = {{kPrefabCells_MarketYard, 108}};
 inline constexpr std::uint32_t kPrefabBlocks_MarketYard[] = {0x00000000u, 0x0000ff3cu, 0x0000ff3cu, 0x0000ff3cu, 0x00000000u, 0x00000000u};
 inline constexpr PrefabMotile kPrefabMotiles_MarketYard[] = {
-    {56, 0, 1, 6796, 32, 32, 6, 900, 0},  // chimney
-    {152, 0, 1, 6796, 32, 32, 6, 900, 0},  // chimney
-    {216, 0, 1, 6796, 32, 32, 6, 900, 0},  // chimney
+    {56, 0, 1, 7948, 32, 32, 6, 900, 0},  // chimney
+    {152, 0, 1, 7948, 32, 32, 6, 900, 0},  // chimney
+    {216, 0, 1, 7948, 32, 32, 6, 900, 0},  // chimney
 };
 
 inline constexpr PrefabCell kPrefabCells_NorthTreelineWell[] = {
@@ -3206,12 +3206,12 @@ inline constexpr PrefabCell kPrefabCells_StreetHouses[] = {
 inline constexpr PrefabSkin kPrefabSkins_StreetHouses[] = {{kPrefabCells_StreetHouses, 209}};
 inline constexpr std::uint32_t kPrefabBlocks_StreetHouses[] = {0x00001ffeu, 0x00001ffeu, 0x00001ffeu, 0x00000000u, 0x0007879eu, 0x0007879eu, 0x0007879eu, 0x00000000u, 0x00000000u};
 inline constexpr PrefabMotile kPrefabMotiles_StreetHouses[] = {
-    {40, -16, 1, 6796, 32, 32, 6, 900, 0},  // chimney
-    {104, -16, 1, 6796, 32, 32, 6, 900, 0},  // chimney
-    {168, -16, 1, 6796, 32, 32, 6, 900, 0},  // chimney
-    {40, 48, 1, 6796, 32, 32, 6, 900, 0},  // chimney
-    {136, 48, 1, 6796, 32, 32, 6, 900, 0},  // chimney
-    {264, 48, 1, 6796, 32, 32, 6, 900, 0},  // chimney
+    {40, -16, 1, 7948, 32, 32, 6, 900, 0},  // chimney
+    {104, -16, 1, 7948, 32, 32, 6, 900, 0},  // chimney
+    {168, -16, 1, 7948, 32, 32, 6, 900, 0},  // chimney
+    {40, 48, 1, 7948, 32, 32, 6, 900, 0},  // chimney
+    {136, 48, 1, 7948, 32, 32, 6, 900, 0},  // chimney
+    {264, 48, 1, 7948, 32, 32, 6, 900, 0},  // chimney
 };
 
 inline constexpr PrefabCell kPrefabCells_TestPlot[] = {
@@ -3222,7 +3222,7 @@ inline constexpr PrefabCell kPrefabCells_TestPlot[] = {
 inline constexpr PrefabSkin kPrefabSkins_TestPlot[] = {{kPrefabCells_TestPlot, 3}};
 inline constexpr std::uint32_t kPrefabBlocks_TestPlot[] = {0x00000000u, 0x00000000u};
 inline constexpr PrefabMotile kPrefabMotiles_TestPlot[] = {
-    {8, -8, 1, 6796, 32, 32, 6, 700, 0},  // smoke
+    {8, -8, 1, 7948, 32, 32, 6, 700, 0},  // smoke
 };
 inline constexpr PrefabPoint kPrefabSpawns_TestPlot[] = {{0, 1}};
 

@@ -284,6 +284,10 @@ inline constexpr int kTreeStride = 3;
         case CreatureKind::kBear: return Anim::kBear;
         case CreatureKind::kHare: return Anim::kRacoon;
         case CreatureKind::kChicken: return Anim::kChicken;
+        // A guard is never drawn through this path either — it is always an Npc, and the
+        // creature_is_npc(m) branch intercepts it earlier, drawing its assigned Skin — but the switch
+        // must be exhaustive.
+        case CreatureKind::kGuard: return Anim::kMobSlime;
         // The boss is never drawn through this path — draw_sprite intercepts kBoss and draws its own
         // pose sheets feet-anchored — but the switch must be exhaustive.
         case CreatureKind::kBoss: return Anim::kMobSkull;
@@ -992,11 +996,24 @@ struct RaylibBridge::Impl {
                 // swell, the way the pack's own damage_fx sells a blow.
                 const float size = kTilePx * (1.0f + 0.18f * fi);
                 if (creature_is_npc(m)) {
-                    const int npc_frame =
-                        (npc_state_of(m) == NpcState::kMoveToWaypoint) ? sp.frame : 0;
-                    const NpcTint nt = npc_tint_of(kWorldSeed, npc_home_struct_of(m));
-                    anim(Anim::kPlayer, static_cast<int>(m.facing), npc_frame, bx, sp.y, size,
-                         Color{nt.r, nt.g, nt.b, 255});
+                    const Skin sk = npc_skin_of(npc_role_of(m), kWorldSeed, npc_home_struct_of(m));
+                    if (npc_state_of(m) == NpcState::kMoveToWaypoint) {
+                        anim(skin_anim(sk, NpcPose::kWalk), static_cast<int>(m.facing), sp.frame, bx,
+                             sp.y, size);
+                    } else {
+                        // Idle is 4 facings x 1 frame, not drawn through `anim()` — its rows==1
+                        // special case reads a one-row sheet's COLUMNS as animation frames (right for
+                        // a two-frame animal bob, backwards for a facing-only pose). Same
+                        // anim_frame()-direct pattern this file already uses for the player's own
+                        // Attack pose (see the kPlayerAttack call below).
+                        const AtlasRect ar =
+                            anim_frame(skin_anim(sk, NpcPose::kIdle), static_cast<int>(m.facing), 0);
+                        const float t = static_cast<float>(kAtlasTile);
+                        DrawTexturePro(
+                            atlas, Rectangle{static_cast<float>(ar.x), static_cast<float>(ar.y), t, t},
+                            Rectangle{bx, sp.y, size, size}, Vector2{size * 0.5f, size * 0.5f}, 0.0f,
+                            WHITE);
+                    }
                 } else {
                     anim(anim_of(m.kind), static_cast<int>(m.facing), sp.frame, bx, sp.y, size,
                          tint_of(m.status));
