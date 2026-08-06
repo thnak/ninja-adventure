@@ -1390,8 +1390,16 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                 // Offsetting the frame by the id keeps a whole wave from stepping in unison, which
                 // reads as one organism rather than a crowd.
                 const auto frame = static_cast<std::uint16_t>((v->tick / 3 + m.id) & 0xFF);
-                im.frame_sprites.push_back(Sprite{m.y * kTilePx + kTilePx * 0.5f, m.x * kTilePx,
-                                                  m.y * kTilePx, &m, 0, frame,
+                // The one walkable tile inside a structure's own footprint is its doorway
+                // (village.hpp's door_tx/door_ty), so a creature standing there computes the exact
+                // same sort key as the structure itself (both keyed off that row). stable_sort then
+                // resolves the tie by gather order, and structures are gathered after creatures — so
+                // without the nudge below, anyone standing in a doorway (every stationary NPC role,
+                // §7) is permanently painted behind their own house and never seen. A sub-pixel push
+                // is enough to break the tie without perturbing any real (non-tied) ordering.
+                constexpr float kDoorwayTieBreak = 0.5f;
+                im.frame_sprites.push_back(Sprite{m.y * kTilePx + kTilePx * 0.5f + kDoorwayTieBreak,
+                                                  m.x * kTilePx, m.y * kTilePx, &m, 0, frame,
                                                   SpriteKind::kCreature});
                 ++drawn_creatures;
                 // Hit feedback (F2): a drop in published HP since last frame flashes the sprite. New
