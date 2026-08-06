@@ -1347,18 +1347,26 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                                                   0.0f, &b, 0, 0, SpriteKind::kBuilding});
             }
             for (const Creature& m : v->creatures) {
+                // The interior map is a lattice of rooms (tiles.hpp's room_index_at) and the floor/
+                // wall gather above already blanks every room but the player's own — "what the camera
+                // should find outside these four walls is nothing at all" (see the Big::kRoom note
+                // below). A creature must honour the same rule, or a dojo boss two rooms over renders
+                // in plain view with nothing around it once the camera is zoomed out far enough to
+                // load that neighbour's chunk.
+                const bool in_room = player.map == kOverworld || im.active_room < 0 ||
+                                     room_index_at(static_cast<int>(m.x), static_cast<int>(m.y)) ==
+                                         im.active_room;
                 // The boss (F3) is a Creature but is drawn feet-anchored from its own pose sheets, so
                 // it goes into the sorted list as its own kind — feet at (m.y+0.5) tiles, centre-x at
                 // m.x — and it feeds the top-of-screen HP bar when it shares the player's room. It
-                // still keeps a hit-flash track like any creature (read in draw_boss).
+                // still keeps a hit-flash track like any creature (read in draw_boss), even while out
+                // of room, so its bookkeeping does not glitch the moment the player steps back in.
                 if (m.kind == CreatureKind::kBoss) {
-                    const float feet = (m.y + 0.5f) * kTilePx;
-                    im.frame_sprites.push_back(
-                        Sprite{feet, m.x * kTilePx, feet, &m, 0, 0, SpriteKind::kBoss});
-                    ++drawn_creatures;
-                    if (player.map != kOverworld && im.active_room >= 0 &&
-                        room_index_at(static_cast<int>(m.x), static_cast<int>(m.y)) ==
-                            im.active_room) {
+                    if (in_room) {
+                        const float feet = (m.y + 0.5f) * kTilePx;
+                        im.frame_sprites.push_back(
+                            Sprite{feet, m.x * kTilePx, feet, &m, 0, 0, SpriteKind::kBoss});
+                        ++drawn_creatures;
                         im.frame_boss = &m;
                     }
                     Impl::CreatureTrack& tb = im.creature_tracks[m.id];
@@ -1369,6 +1377,7 @@ void RaylibBridge::draw(const SnapshotBus& bus, const WorldStatus& status,
                     tb.seen = true;
                     continue;
                 }
+                if (!in_room) continue;
                 // Offsetting the frame by the id keeps a whole wave from stepping in unison, which
                 // reads as one organism rather than a crowd.
                 const auto frame = static_cast<std::uint16_t>((v->tick / 3 + m.id) & 0xFF);
