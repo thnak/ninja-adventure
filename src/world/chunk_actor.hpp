@@ -41,6 +41,7 @@
 #include "world/boss_kit.hpp"
 #include "world/combat_entity.hpp"
 #include "world/flow_field.hpp"
+#include "world/npc.hpp"
 #include "world/persistence.hpp"
 #include "world/physics.hpp"
 #include "world/player_actor.hpp"
@@ -802,6 +803,36 @@ struct ChunkActor : quark::Actor<ChunkActor, quark::Sequential, quark::Priority<
         spawn_boss(bosses_.back());
     }
 
+    // RFC-023: wire a civilian NPC into this chunk, once at bring-up (World::build_npcs, mirroring
+    // add_boss above). `home_struct` is the index of the house Structure this NPC is anchored to;
+    // `door_tx/door_ty` is where it stands (a stationary role stands there forever, a wandering one
+    // strays up to `npc_wander_radius(role)` tiles from it and always returns). Spawned already
+    // Idle, at full HP, disposition kNeutral per RFC-023 §3's normative construction rule (never left
+    // at Creature's own kHostile default), damage 0 (§6: no civilian role is ever combat-capable).
+    void add_npc(NpcRole role, std::uint32_t home_struct, int door_tx, int door_ty) noexcept {
+        Creature c{};
+        c.id = ++next_id_ | (static_cast<std::uint32_t>(chunk_key(coord)) << 12);
+        c.x = static_cast<float>(door_tx) + 0.5f;
+        c.y = static_cast<float>(door_ty) + 0.5f;
+        c.home_tx = static_cast<std::uint16_t>(door_tx);
+        c.home_ty = static_cast<std::uint16_t>(door_ty);
+        // A placeholder combat-stat/defender row, not a meaningful species — see npc.hpp's header
+        // note on why CreatureKind gets no new NPC-capable entries. kChicken is the weakest existing
+        // wildlife row, which is why it was picked over any other kind for this purpose.
+        c.kind = CreatureKind::kChicken;
+        c.max_hp = kNpcMaxHp;
+        c.hp = c.max_hp;
+        c.damage = 0;
+        c.disposition = Disposition::kNeutral;
+        const DefenderProfile def = defender_of(CreatureKind::kChicken);
+        c.material = def.material;
+        c.tier = def.tier;
+        c.toughness = tier_toughness(def.tier);
+        c.facing = Facing::kDown;
+        npc_init(c, role, home_struct);
+        creatures_.push_back(c);
+    }
+
     // RFC-016 §6.4: folds a recovered ChunkOverlaySnapshot into this chunk — called once at
     // bring-up by World::recover_overlay(), AFTER generate_terrain() has already run and BEFORE
     // the world starts ticking, so a recovered tilled tile always overwrites the seed-derived
@@ -1470,6 +1501,15 @@ private:
             // generic loop simply leaves it alone. (step_status still ticks its burn/shock/freeze, and
             // the player-verb handlers still strike it, exactly as for any creature.)
             if (c.kind == CreatureKind::kBoss) continue;
+            // RFC-023: a civilian NPC's brain is step_npc's four-state FSM, not the monster/wildlife
+            // AI below — no aggro, no flow field, no maul/attack. It still migrates across chunk
+            // borders through the ordinary hand-off further down... except it never actually strays
+            // that far (wander_radius tops out at 10 tiles, well inside one 32-tile chunk), so in
+            // practice this `continue` is the only place its tick ends.
+            if (creature_is_npc(c)) {
+                step_npc(c, rng);
+                continue;
+            }
             const CreatureStats st = stats_of(c.kind);
 
             if (c.attack_cd > 0) --c.attack_cd;
@@ -1652,6 +1692,137 @@ private:
         }
     }
 
+    // --- RFC-023: civilian NPCs -----------------------------------------------------------------
+    // Walk one step toward (tx,ty), sliding along an axis when blocked head-on (the same fallback
+    // step_creatures' own movement uses). Returns true once close enough to call it arrived. Slower
+    // than wildlife's pace on purpose — a village should read as unhurried, not skittish.
+    [[nodiscard]] bool step_npc_toward(Creature& c, float tx, float ty) noexcept {
+        const float dx = tx - c.x;
+        const float dy = ty - c.y;
+        const float dist2 = dx * dx + dy * dy;
+        if (dist2 < 0.04f) {  // ~0.2 tile: close enough, and avoids ever dividing by a near-zero len
+            c.x = tx;
+            c.y = ty;
+            return true;
+        }
+        const float len = std::sqrt(dist2);
+        const float ux = dx / len;
+        const float uy = dy / len;
+        constexpr float kNpcSpeed = 1.6f;  // tiles/second
+        const float dt = static_cast<float>(kTickMs) / 1000.0f;
+        const float step_x = ux * kNpcSpeed * dt;
+        const float step_y = uy * kNpcSpeed * dt;
+        float nx = c.x;
+        float ny = c.y;
+        if (passable(c.x + step_x, c.y + step_y)) {
+            nx = c.x + step_x;
+            ny = c.y + step_y;
+        } else if (passable(c.x + step_x, c.y)) {
+            nx = c.x + step_x;
+        } else if (passable(c.x, c.y + step_y)) {
+            ny = c.y + step_y;
+        }
+        c.facing = facing_of(nx - c.x, ny - c.y);
+        c.x = nx;
+        c.y = ny;
+        return false;
+    }
+
+    // Picks a fresh waypoint offset from home, reusing `wander_dx/wander_dy` (Creature's existing
+    // wildlife-wander fields — a relative tile offset either way, exactly what a civilian needs too)
+    // and clamped so it can never fall outside this chunk. NPCs do not migrate (see step_creatures'
+    // note at its call site) — clamping the pick is what makes that true rather than merely usual,
+    // since a house near a chunk border could otherwise place a waypoint one tile over the line.
+    void npc_pick_waypoint(Creature& c, NpcRole role, Rng& rng) noexcept {
+        const int r = static_cast<int>(npc_wander_radius(role));
+        if (r <= 0) {
+            c.wander_dx = 0;
+            c.wander_dy = 0;
+            return;
+        }
+        const int cx0 = coord.cx * kChunkTiles;
+        const int cy0 = coord.cy * kChunkTiles;
+        const int lo_x = cx0 - static_cast<int>(c.home_tx);
+        const int hi_x = cx0 + kChunkTiles - 1 - static_cast<int>(c.home_tx);
+        const int lo_y = cy0 - static_cast<int>(c.home_ty);
+        const int hi_y = cy0 + kChunkTiles - 1 - static_cast<int>(c.home_ty);
+        const int rx = std::clamp(r, 0, std::min(-lo_x, hi_x));
+        const int ry = std::clamp(r, 0, std::min(-lo_y, hi_y));
+        c.wander_dx = static_cast<std::int8_t>(
+            rx <= 0 ? 0 : static_cast<int>(rng.below(static_cast<std::uint32_t>(2 * rx + 1))) - rx);
+        c.wander_dy = static_cast<std::int8_t>(
+            ry <= 0 ? 0 : static_cast<int>(rng.below(static_cast<std::uint32_t>(2 * ry + 1))) - ry);
+    }
+
+    // The civilian FSM (RFC-023 §7). Threat detection is a same-chunk proximity scan, not a beacon
+    // subscription: a raid monster must already be in this NPC's own chunk (having migrated in via
+    // the ordinary creature hand-off) before it can threaten anyone in it, so there is nothing to
+    // replicate cross-chunk that step_creatures' existing migration does not already provide for
+    // free. See npc.hpp's kNpcThreatRadius note on why this substitutes for the RFC's primary
+    // (unshipped) raid-warning trigger rather than merely approximating it.
+    void step_npc(Creature& c, Rng& rng) noexcept {
+        const NpcRole role = npc_role_of(c);
+        bool threatened = false;
+        for (const Creature& other : creatures_) {
+            if (other.id == c.id || other.hp <= 0) continue;
+            if (stats_of(other.kind).faction != Faction::kMonster) continue;
+            const float dx = other.x - c.x;
+            const float dy = other.y - c.y;
+            if (dx * dx + dy * dy <= kNpcThreatRadius * kNpcThreatRadius) {
+                threatened = true;
+                break;
+            }
+        }
+
+        NpcState state = npc_state_of(c);
+        if (threatened && state != NpcState::kSheltering) {
+            npc_set_state(c, NpcState::kSheltering);
+            state = NpcState::kSheltering;
+        }
+
+        if (state == NpcState::kSheltering) {
+            // wander_cd doubles as "ticks since a threat was last actually seen" here — reusing the
+            // same GAME.md §5 cooldown (kAngerTicks, ~20s at 10 Hz) Wild fauna already uses to drop a
+            // grudge, per RFC-023 §7's own citation of that constant for this exact purpose.
+            c.wander_cd = threatened ? kAngerTicks : (c.wander_cd > 0 ? c.wander_cd - 1 : 0);
+            (void)step_npc_toward(c, static_cast<float>(c.home_tx) + 0.5f,
+                                  static_cast<float>(c.home_ty) + 0.5f);
+            if (!threatened && c.wander_cd == 0) npc_set_state(c, NpcState::kIdle);
+            return;
+        }
+
+        if (npc_wander_radius(role) <= 0.0f) return;  // stationary role: stands at its door, always
+
+        switch (state) {
+            case NpcState::kIdle:
+                npc_pick_waypoint(c, role, rng);
+                npc_set_state(c, NpcState::kMoveToWaypoint);
+                break;
+            case NpcState::kMoveToWaypoint: {
+                const float tx = static_cast<float>(c.home_tx) + 0.5f + static_cast<float>(c.wander_dx);
+                const float ty = static_cast<float>(c.home_ty) + 0.5f + static_cast<float>(c.wander_dy);
+                if (step_npc_toward(c, tx, ty)) {
+                    if (npc_has_work_pose(role)) {
+                        c.wander_cd = npc_dwell_ticks(role, rng);
+                        npc_set_state(c, NpcState::kWorkAction);
+                    } else {
+                        npc_set_state(c, NpcState::kIdle);
+                    }
+                }
+                break;
+            }
+            case NpcState::kWorkAction:
+                if (c.wander_cd > 0) {
+                    --c.wander_cd;
+                } else {
+                    npc_set_state(c, NpcState::kIdle);
+                }
+                break;
+            case NpcState::kSheltering:
+                break;  // handled above; unreachable here
+        }
+    }
+
     // Wildlife steering: pick a heading, hold it for a while, and turn for home when it strays too
     // far. Holding the heading is what stops an animal from vibrating in place — a fresh random
     // direction every tick averages to standing still.
@@ -1732,8 +1903,15 @@ private:
     void maul_wildlife(Creature& attacker, const CreatureStats& st) noexcept {
         for (Creature& other : creatures_) {
             if (other.id == attacker.id || other.hp <= 0) continue;
-            const CreatureStats os = stats_of(other.kind);
-            if (stance_between(st.faction, os.faction) != Stance::kHostile) continue;
+            // RFC-023 §7: a Sheltering civilian is untargetable — the same guarantee strike() gives
+            // the player's own verbs, extended here since maul_wildlife hits HP directly and never
+            // goes through strike() at all.
+            if (creature_is_npc(other) && npc_state_of(other) == NpcState::kSheltering) continue;
+            // faction_of(), not stats_of(other.kind).faction directly: an NPC's faction is kVillager
+            // regardless of the placeholder CreatureKind it carries (npc.hpp) — this is the one line
+            // that makes "a raid crossing a forest kills the deer in it" (GAME.md §5) also true of a
+            // village's own people, exactly as RFC-023 §7 says it must be.
+            if (stance_between(st.faction, faction_of(other)) != Stance::kHostile) continue;
             const float dx = other.x - attacker.x;
             const float dy = other.y - attacker.y;
             if (dx * dx + dy * dy > st.reach * st.reach) continue;
@@ -2601,6 +2779,10 @@ private:
     // this RFC's table.
     void credit_kill(const Creature& c, std::uint64_t player, Skill skill) noexcept {
         if (router == nullptr) return;
+        // RFC-023 §Non-goals: "NPC injury/death mechanics" are explicitly not defined by this RFC.
+        // A struck-down civilian grants no XP and no loot — `stats_of(kChicken)` would otherwise
+        // silently pay out wildlife's "food" reward for killing a person, which is wrong on its face.
+        if (creature_is_npc(c)) return;
         const CreatureStats st = stats_of(c.kind);
         const Ring ring_enum = ring_of(world_seed_, static_cast<int>(c.x), static_cast<int>(c.y));
         const auto ring = static_cast<std::uint32_t>(ring_enum);
@@ -2671,6 +2853,11 @@ private:
                 float impulse_dir_x = 0.0f, float impulse_dir_y = 0.0f,
                 std::uint16_t impulse = 0) noexcept {
         if (c.hp <= 0 || damage <= 0) return;
+        // RFC-023 §7/Multiplayer: "a new Creature-level check in strike() that rejects damage while
+        // state == kSheltering" — the normative targetability-suppression hook the RFC's own review
+        // flagged as a hard prerequisite for the Sheltering guarantee to mean anything. A Sheltering
+        // civilian is not a valid target for the player's own verbs either, not just a raid monster's.
+        if (creature_is_npc(c) && npc_state_of(c) == NpcState::kSheltering) return;
         const TerrainPhys tphys = terrain_phys(terrain_at(static_cast<int>(c.x), static_cast<int>(c.y)),
                                                scar_kind_at(static_cast<int>(c.x), static_cast<int>(c.y)));
         // RFC-010 §4.2: a live kMudded/kIced patch overrides the baseline terrain's knockback/damage
@@ -2781,6 +2968,11 @@ private:
     // neutral animal. A timid one never fights back — it just runs harder.
     void provoke(Creature& c, std::uint64_t player, bool by_attack) noexcept {
         if (player == 0) return;
+        // RFC-023: an NPC's `target` field is repurposed to pack role/state/home_struct (npc.hpp) —
+        // it is never a real "angry at this player" key. A civilian is always kNeutral and never
+        // fights back regardless, so there is no behavior lost by never provoking one, only a real
+        // bug avoided (writing here would corrupt that packed state).
+        if (creature_is_npc(c)) return;
         if (c.disposition == Disposition::kTimid) {
             if (by_attack) c.anger_ticks = kAngerTicks;  // makes it flee for a good while
             return;
@@ -2800,6 +2992,7 @@ private:
         constexpr float kPackRadius = 7.0f;
         for (Creature& other : creatures_) {
             if (other.id == hurt.id || other.kind != hurt.kind || other.hp <= 0) continue;
+            if (creature_is_npc(other)) continue;  // see provoke()'s note — never write its `target`
             if (other.disposition != Disposition::kNeutral) continue;
             const float dx = other.x - hurt.x;
             const float dy = other.y - hurt.y;

@@ -3773,6 +3773,170 @@ int main(int argc, char** argv) {
                "kill-credit ledger and the Build-screen placement verb, QI1-QI4, and the xp/"
                "item_table/village_standing reward hooks all check out\n\n");
 
+    // --- RFC-023: village NPCs — the civilian half (roster, FSM, Sheltering targetability) ---------
+    {
+        // Packing round-trip: npc.hpp's whole mechanism is bits stolen from Creature::target (the
+        // 192-byte hard cap leaves no room for real new fields) — if this drifts, everything above it
+        // silently reads garbage, so it is worth proving directly rather than only through the roster
+        // check below.
+        {
+            Creature c{};
+            chk.expect(!creature_is_npc(c), "a plain Creature{} is not an Npc by default");
+            npc_init(c, NpcRole::kFarmer, 42);
+            chk.expect(creature_is_npc(c), "npc_init sets the marker bit");
+            chk.expect(npc_role_of(c) == NpcRole::kFarmer, "npc_init round-trips the role");
+            chk.expect(npc_home_struct_of(c) == 42, "npc_init round-trips home_struct");
+            chk.expect(npc_state_of(c) == NpcState::kIdle, "a freshly init'd Npc starts Idle");
+            chk.expect(faction_of(c) == Faction::kVillager,
+                       "an Npc's faction is kVillager regardless of its placeholder CreatureKind");
+            npc_set_state(c, NpcState::kSheltering);
+            chk.expect(npc_state_of(c) == NpcState::kSheltering, "npc_set_state updates state in place");
+            chk.expect(npc_role_of(c) == NpcRole::kFarmer && npc_home_struct_of(c) == 42,
+                       "changing state does not disturb role/home_struct packed alongside it");
+
+            Creature wolf{};
+            wolf.kind = CreatureKind::kWolf;
+            chk.expect(faction_of(wolf) == Faction::kWild,
+                       "a non-Npc Creature's faction still falls through to stats_of(kind)");
+        }
+
+        // §7's role table: stationary vs. wandering, work pose.
+        {
+            chk.expect(npc_wander_radius(NpcRole::kMerchantShop) == 0.0f &&
+                          npc_wander_radius(NpcRole::kQuestGiver) == 0.0f,
+                      "shop/giver are stationary — fixed at their door tile (§7)");
+            chk.expect(npc_wander_radius(NpcRole::kFarmer) > 0.0f &&
+                          npc_wander_radius(NpcRole::kChild) > 0.0f &&
+                          npc_wander_radius(NpcRole::kWanderer) > 0.0f,
+                      "farmer/child/wanderer roam a radius around home (§7)");
+            chk.expect(npc_has_work_pose(NpcRole::kFarmer) && npc_has_work_pose(NpcRole::kChild),
+                      "farmer/child dwell in a work pose at each waypoint (§7)");
+            chk.expect(!npc_has_work_pose(NpcRole::kWanderer) && !npc_has_work_pose(NpcRole::kMerchantShop),
+                      "wanderer/shop do not (§7)");
+        }
+
+        // §9: skin/tint is a pure function of (seed, home_struct), fixed once, never re-rolled — and
+        // never the undyed index, so a civilian is never mistaken for the player at a glance.
+        {
+            const NpcTint a = npc_tint_of(kWorldSeed, 7);
+            const NpcTint b = npc_tint_of(kWorldSeed, 7);
+            chk.expect(a.r == b.r && a.g == b.g && a.b == b.b,
+                      "npc_tint_of is a pure, deterministic function of (seed, home_struct) — §9");
+            bool any_default = false;
+            for (std::uint32_t hs = 0; hs < 64; ++hs) {
+                const NpcTint t = npc_tint_of(kWorldSeed, hs);
+                if (t.r == 255 && t.g == 255 && t.b == 255) any_default = true;
+            }
+            chk.expect(!any_default, "an NPC never draws the undyed default palette entry");
+        }
+
+        // §8.1: a live roster, off the shared World this whole file already built — confirms
+        // build_npcs() actually ran and placed real Creatures, not just that the formula compiles.
+        {
+            const WorldLayout& layout = world.layout();
+            const Village* v2 = nullptr;
+            for (const Village& v : layout.villages()) {
+                if (v.tier >= 2) {
+                    v2 = &v;
+                    break;
+                }
+            }
+            chk.expect(v2 != nullptr, "the world has at least one tier>=2 village to check a roster against");
+            if (v2 != nullptr) {
+                bool found_shop = false;
+                bool found_giver = false;
+                bool found_any = false;
+                for (std::uint32_t i = v2->first;
+                     i < static_cast<std::uint32_t>(v2->first) + v2->count && i < layout.structures().size();
+                     ++i) {
+                    const Structure& s = layout.structures()[i];
+                    if (!is_dwelling(s.kind)) continue;
+                    const ChunkCoord cc = chunk_of(kOverworld, static_cast<float>(door_tx(s)),
+                                                   static_cast<float>(door_ty(s)));
+                    ChunkViewPtr view = world.bus().load(cc);
+                    if (!view) continue;
+                    for (const Creature& m : view->creatures) {
+                        if (!creature_is_npc(m) || npc_home_struct_of(m) != i) continue;
+                        found_any = true;
+                        if (npc_role_of(m) == NpcRole::kMerchantShop) found_shop = true;
+                        if (npc_role_of(m) == NpcRole::kQuestGiver) found_giver = true;
+                        chk.expect(m.disposition == Disposition::kNeutral,
+                                  "§3: an Npc is constructed kNeutral, never Creature's own kHostile "
+                                  "default");
+                        chk.expect(m.damage == 0, "§6: no civilian role ever deals damage");
+                    }
+                }
+                chk.expect(found_any, "build_npcs() placed real NPCs into a tier>=2 village's chunks");
+                chk.expect(found_shop, "a tier>=2 village gets its §8.1 kMerchantShop slot");
+                chk.expect(found_giver, "a tier>=2 village gets its §8.1 kQuestGiver slot");
+            }
+        }
+
+        // §7/§Multiplayer: proximity-triggered Sheltering (this pass's substitute for the unshipped
+        // raid-warning event, npc.hpp's kNpcThreatRadius note) makes an NPC untargetable to a raid
+        // monster's maul_wildlife contact — the actual "monster reaches the village and has nothing
+        // but empty houses to walk into" gap this RFC was implemented to close. A standalone
+        // ChunkActor, the same pattern RFC-016's persistence test above uses, driven only through its
+        // public message handlers (CreatureEnter, Tick) — no router, no engine.
+        {
+            SnapshotBus local_bus;
+            ChunkActor ch;
+            ch.coord = ChunkCoord{kOverworld, 40, 40};
+            ch.bus = &local_bus;
+            ch.generate_terrain(kWorldSeed);
+
+            const int hx = 40 * kChunkTiles + 10;
+            const int hy = 40 * kChunkTiles + 10;
+            ch.add_npc(NpcRole::kFarmer, /*home_struct*/ 1, hx, hy);
+
+            // Spawned 3 tiles off — inside kNpcThreatRadius (5.0) but outside a slime's own reach
+            // (1.0), so the very first tick can detect the threat before any contact is possible,
+            // with no same-tick ordering race to account for.
+            Creature raider{};
+            raider.id = 555001;
+            raider.kind = CreatureKind::kSlime;
+            raider.hp = 30;
+            raider.max_hp = 30;
+            raider.damage = 4;
+            raider.disposition = Disposition::kHostile;
+            raider.x = static_cast<float>(hx) + 3.0f;
+            raider.y = static_cast<float>(hy) + 0.5f;
+            ch.handle(CreatureEnter{raider});
+
+            for (std::uint64_t t = 1; t <= 8; ++t) {
+                ch.handle(Tick{t, static_cast<std::int64_t>(t) * kTickMs, false});
+            }
+            // handle(Tick) only publishes every kIdlePublish (32) ticks with no player watching —
+            // force one so the view below reflects what just happened rather than nothing at all.
+            ch.publish_now();
+
+            ChunkViewPtr view = local_bus.load(ch.coord);
+            chk.expect(view != nullptr, "the standalone chunk publishes a view after ticking");
+            if (view) {
+                const Creature* npc = nullptr;
+                for (const Creature& m : view->creatures) {
+                    if (creature_is_npc(m)) npc = &m;
+                }
+                chk.expect(npc != nullptr, "the NPC is still alive — it was never reaped");
+                if (npc != nullptr) {
+                    chk.expect(npc_state_of(*npc) == NpcState::kSheltering,
+                              "a hostile monster within kNpcThreatRadius trips Sheltering");
+                    chk.expect(npc->hp == kNpcMaxHp,
+                              "Sheltering makes the NPC untargetable — maul_wildlife's own "
+                              "hostile-contact path (GAME.md §5) never reduced its hp");
+                }
+            }
+        }
+    }
+    std::printf("RFC-023 character & NPC roster system: the civilian half — role/state packed into "
+               "Creature::target with no struct growth (the 192-byte message-pool cap), the §7 "
+               "four-state FSM, the §8.1 tier-gated roster formula off a village's actual built "
+               "houses, and proximity-triggered Sheltering making a civilian untargetable to a raid "
+               "monster's maul_wildlife contact all check out. Guard rosters (§8.2) and the "
+               "road-graph-anchored kMerchantWander role are not built — see npc.hpp's header note: "
+               "this codebase's RFC-007 covers only the Dojo Master boss, not the guard archetype "
+               "roster §6 assumes exists\n\n");
+
     std::printf("\n%s\n", chk.failures == 0 ? "OK" : "FAIL");
     return chk.failures == 0 ? 0 : 1;
 }

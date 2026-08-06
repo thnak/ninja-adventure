@@ -10,6 +10,7 @@
 #include "render/atlas_slots.hpp"
 #include "render/ui_sprites.hpp"
 #include "world/boss.hpp"
+#include "world/npc.hpp"
 
 namespace mmo {
 namespace {
@@ -990,8 +991,16 @@ struct RaylibBridge::Impl {
                 // so the size pop is what makes the hit unmistakable on any base colour — brighten AND
                 // swell, the way the pack's own damage_fx sells a blow.
                 const float size = kTilePx * (1.0f + 0.18f * fi);
-                anim(anim_of(m.kind), static_cast<int>(m.facing), sp.frame, bx, sp.y, size,
-                     tint_of(m.status));
+                if (creature_is_npc(m)) {
+                    const int npc_frame =
+                        (npc_state_of(m) == NpcState::kMoveToWaypoint) ? sp.frame : 0;
+                    const NpcTint nt = npc_tint_of(kWorldSeed, npc_home_struct_of(m));
+                    anim(Anim::kPlayer, static_cast<int>(m.facing), npc_frame, bx, sp.y, size,
+                         Color{nt.r, nt.g, nt.b, 255});
+                } else {
+                    anim(anim_of(m.kind), static_cast<int>(m.facing), sp.frame, bx, sp.y, size,
+                         tint_of(m.status));
+                }
                 if (m.windup > 0 && flash <= 0.05f) {
                     // A red charge that pulses so it reads as "winding up" and not merely "on fire".
                     // Kept off its trough (0.7..1.0) so the glow is unmistakable at game scale on any

@@ -41,6 +41,7 @@
 #include "world/liveness.hpp"
 #include "world/map_director.hpp"
 #include "world/map_system.hpp"
+#include "world/npc.hpp"
 #include "world/persistence.hpp"
 #include "world/player_actor.hpp"
 #include "world/protocol.hpp"
@@ -112,6 +113,7 @@ public:
         build_players();
         build_chunks();
         build_bosses();
+        build_npcs();
         build_director();
 
         // RFC-014 §3.2: declares the TYPE as lazily-activatable for the instanced band. Cold, once,
@@ -972,6 +974,67 @@ private:
             ChunkActor& ch = *chunks_[static_cast<std::size_t>(chunk_index(cc))];
             ch.add_boss(room);
             ch.publish_now();
+        }
+    }
+
+    // RFC-023 §8.1: one civilian roster per village, sized from the village's own ACTUAL built house
+    // `Structure` list (never the tier's aspirational `plan_of(tier).houses` target — village.hpp's
+    // own comment records that a house "can silently fail to fit," and this roster must never claim
+    // a resident the village has no house for). Guard rosters (§8.2) are not built here — see
+    // npc.hpp's header note: this codebase's RFC-007 covers only the Dojo Master boss, not the guard
+    // archetype roster §6's table assumes exists, so there is no role to assign a guard NPC yet.
+    //
+    // Computed once, here, at the same cold bring-up window build_bosses() already writes into —
+    // NOT re-evaluated on a village tier-up, unlike RFC-023 §8.1's own "recomputation, not a one-shot
+    // freeze" rule. No live tier-up mechanic exists anywhere in this codebase today (`Village::tier`
+    // is written once by worldgen and never touched again by any code path this session found) — the
+    // recompute rule is inert for a value that structurally cannot change, and reproducing it now
+    // would be a hook with nothing that ever fires it. Revisit once a real tier-up mechanic ships.
+    void build_npcs() {
+        const std::vector<Structure>& structures = layout_->structures();
+        for (const Village& v : layout_->villages()) {
+            std::vector<std::uint32_t> houses;
+            houses.reserve(v.count);
+            for (std::uint32_t i = v.first; i < static_cast<std::uint32_t>(v.first) + v.count; ++i) {
+                if (i >= structures.size()) break;
+                const Structure& s = structures[i];
+                // The tier-3+ hall (kHouseRed) is not a resident's house — it is the building the
+                // dojo boss and (per §8.1) the tier-3+ quest-giver anchor to, not an ordinary dwelling
+                // slot this loop should hand out to a farmer/child/wanderer.
+                if (!is_dwelling(s.kind) || s.kind == StructureKind::kHouseRed) continue;
+                houses.push_back(i);
+            }
+            if (houses.empty()) continue;
+
+            const auto spawn_one = [&](NpcRole role, std::uint32_t house_idx) {
+                const Structure& s = structures[house_idx];
+                const int dtx = door_tx(s);
+                const int dty = door_ty(s);
+                const ChunkCoord cc =
+                    chunk_of(kOverworld, static_cast<float>(dtx), static_cast<float>(dty));
+                ChunkActor& ch = *chunks_[static_cast<std::size_t>(chunk_index(cc))];
+                ch.add_npc(role, house_idx, dtx, dty);
+                ch.publish_now();  // same reasoning as build_bosses(): be in the very first view
+            };
+
+            std::size_t idx = 0;
+            if (v.tier >= 2 && idx < houses.size()) {
+                spawn_one(NpcRole::kMerchantShop, houses[idx]);
+                ++idx;
+            }
+            if (v.tier >= 2 && idx < houses.size()) {
+                spawn_one(NpcRole::kQuestGiver, houses[idx]);
+                ++idx;
+            }
+            // §8.1's 40%/30%/30% farmer/child/wanderer split over the remaining houses, deterministic
+            // per house index (a house's own position in the list, not a die roll) rather than random.
+            for (std::size_t k = 0; idx < houses.size(); ++idx, ++k) {
+                const std::size_t bucket = k % 10;
+                const NpcRole role = (bucket < 4)   ? NpcRole::kFarmer
+                                     : (bucket < 7) ? NpcRole::kChild
+                                                    : NpcRole::kWanderer;
+                spawn_one(role, houses[idx]);
+            }
         }
     }
 
