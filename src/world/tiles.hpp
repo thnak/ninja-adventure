@@ -227,6 +227,12 @@ enum class CreatureKind : std::uint8_t {
     kBear = 6,
     kHare = 7,
     kChicken = 8,
+    // RFC-023 §8.2's hand-authored village guard (see world/npc.hpp) — the one NpcRole that is
+    // genuinely combat-capable. A guard is a real CreatureKind (not the faction_override-only
+    // encoding civilian roles use) specifically so step_creatures' ordinary telegraph/commit/resolve
+    // pipeline (stats_of/windup/reach/aggro) applies to it unchanged, the same as any monster or
+    // wildlife kind. Placed BEFORE kBoss so the "kBoss kept last" invariant below still holds.
+    kGuard = 9,
     // The scripted BOSS (F3): a Giant Red Samurai that lives in a dojo interior room. It is ONE
     // creature type like everything else alive — so every player verb (melee/heavy/arrows/spells/
     // abilities, combos, status, stun) damages and affects it through the exact same loops and the
@@ -234,8 +240,8 @@ enum class CreatureKind : std::uint8_t {
     // plain Creature has no room for live in a parallel per-room BossState (see chunk_actor.hpp);
     // step_creatures SKIPS it and a dedicated step_bosses drives it. Kept LAST so every index above
     // is unchanged and nothing that rolls a random kind (raids, wildlife) can ever produce it.
-    kBoss = 9,
-    kCount = 10,
+    kBoss = 10,
+    kCount = 11,
 };
 
 inline constexpr int kCreatureKinds = static_cast<int>(CreatureKind::kCount);
@@ -336,6 +342,16 @@ struct CreatureStats {
         case CreatureKind::kBear:    return {180, 1.9f, 28, F::kWild, D::kNeutral, 4.0f, 1.3f, 78, 16.0f, 8};
         case CreatureKind::kHare:    return {14, 3.4f,  0, F::kWild, D::kTimid,   6.0f, 0.0f,  6, 10.0f, 4};
         case CreatureKind::kChicken: return {10, 2.4f,  0, F::kWild, D::kTimid,   5.0f, 0.0f,  3,  8.0f, 4};
+        // RFC-023 §8.2's guard: a real combat row (faction is inert here — faction_of() always
+        // returns kVillager for an Npc regardless of this row, npc.hpp) tuned between Boar and Bear —
+        // a village defender should outlast a single raider but is not a boss fight. disposition/aggro
+        // are unused (a guard's own hostility is anger_ticks-driven, chunk_actor.hpp's guard branch of
+        // step_creatures, never this static row) but filled in honestly rather than left as a
+        // copy-paste zero. `territory` matches npc_wander_radius(NpcRole::kGuard) (npc.hpp) — nonzero
+        // so the ordinary `wander()` helper patrols it around its post exactly like home-anchored
+        // wildlife, rather than falling through to the flow-field-toward-settlement branch that is
+        // wrong for something already living in the settlement.
+        case CreatureKind::kGuard:   return {110, 2.0f, 16, F::kVillager, D::kNeutral, 6.0f, 1.1f, 0, 5.0f, 5};
         // The dojo BOSS (F3). hp/damage here are the FLAT design numbers; spawn_boss uses them
         // verbatim rather than through make_creature's ring scaling, so a boss is 700 HP wherever its
         // room lands on the interior map. `windup` 10 is the biggest telegraph in the game for a
@@ -367,6 +383,7 @@ struct DefenderProfile {
         case CreatureKind::kBear: return {Material::kFlesh, ScaleTier::kLarge};
         case CreatureKind::kHare: return {Material::kFlesh, ScaleTier::kTiny};
         case CreatureKind::kChicken: return {Material::kFlesh, ScaleTier::kTiny};
+        case CreatureKind::kGuard: return {Material::kFlesh, ScaleTier::kMedium};
         case CreatureKind::kBoss: return {Material::kFlesh, ScaleTier::kGiant};
         case CreatureKind::kCount: break;
     }

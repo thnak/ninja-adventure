@@ -24,25 +24,31 @@
 #pragma once
 
 #include <cstdint>
+#include <iterator>
+#include <utility>
 
+#include "render/atlas_slots.hpp"
 #include "world/tiles.hpp"
 
 namespace mmo {
 
-// RFC-023 §4. `kGuardMilitia/Spear/Bow/Soldier/Captain` are intentionally absent — see §Non-goals in
-// the RFC-023 implementation commit: this codebase's RFC-007 covers only the Dojo Master boss's RL
-// scaffolding (rl_obs.hpp/rl_action.hpp/boss_kit.hpp), not the 13-policy guard archetype roster §6's
-// table assumes already exists. There is nothing to assign a guard role to yet. `kMerchantWander` is
-// also absent: it is the one civilian role anchored to a road segment instead of a `home_struct`
-// (§7's own note), and RFC-023's Open Questions 6/8 flag its `PathfieldActor` reuse as unverified —
-// the four home-anchored roles below carry no such dependency.
+// RFC-023 §4's `kGuardMilitia/Spear/Bow/Soldier/Captain` split is intentionally NOT reproduced here —
+// that table assumes RFC-007's 13-policy RL archetype roster, and a repo-wide search found zero
+// runnable trace of it (no policy file, no checkpoint, no action-mapping table — spec prose only).
+// Rather than wait on ML training infra that does not exist, `kGuard` is ONE hand-authored,
+// combat-capable role (see `step_guard`, chunk_actor.hpp) — real combat stats via a real
+// `CreatureKind::kGuard` row, differentiated only by skin (kGuardSkins below), not by four separate
+// behavior implementations. `kMerchantWander` is also absent: it is the one civilian role anchored to
+// a road segment instead of a `home_struct` (§7's own note), and RFC-023's Open Questions 6/8 flag its
+// `PathfieldActor` reuse as unverified — the home-anchored roles below carry no such dependency.
 enum class NpcRole : std::uint8_t {
     kMerchantShop = 0,
     kQuestGiver = 1,
     kFarmer = 2,
     kChild = 3,
     kWanderer = 4,
-    kCount = 5,
+    kGuard = 5,
+    kCount = 6,
 };
 
 // RFC-023 §7's four-state civilian FSM.
@@ -67,6 +73,11 @@ inline constexpr std::int16_t kNpcMaxHp = 20;
 // `CreatureStats::reach` is 2.6, the boss's) so a civilian is already Sheltering, not merely fleeing,
 // by the time a raider could land a blow.
 inline constexpr float kNpcThreatRadius = 5.0f;
+
+// Tiles: how far a hit on one guard or civilian pulls in nearby off-duty guards (`rally_guards`,
+// chunk_actor.hpp) — bigger than `rally_pack`'s `kPackRadius = 7.0f` monster-pack radius since a
+// village footprint is bigger than a monster cluster, tunable.
+inline constexpr float kGuardAlertRadius = 12.0f;
 
 [[nodiscard]] inline constexpr bool creature_is_npc(const Creature& c) noexcept {
     return (c.target & kNpcMarkerBit) != 0;
@@ -111,6 +122,9 @@ inline constexpr void npc_init(Creature& c, NpcRole role, std::uint32_t home_str
         case NpcRole::kFarmer: return 6.0f;
         case NpcRole::kChild: return 4.0f;
         case NpcRole::kWanderer: return 10.0f;
+        // A guard's "wander" is a short patrol loop around its post — tighter than a civilian
+        // wanderer's, since it needs to stay close enough to notice trouble at its own door.
+        case NpcRole::kGuard: return 5.0f;
         case NpcRole::kCount: break;
     }
     return 0.0f;
@@ -127,32 +141,59 @@ inline constexpr void npc_init(Creature& c, NpcRole role, std::uint32_t home_str
     return static_cast<std::uint16_t>(40 + rng.below(41));                               // 4.0-8.0s (farmer/default)
 }
 
-// RFC-023 §1.2's tint table, reused here as the NPC placeholder skin (see §Divergences: the runtime
-// atlas has no sprite slots for any of the 91 eligible character folders §2/§5 name, so every
-// civilian draws the same NinjaGreen rig the player uses — Idle/Walk only, no combat frames needed —
-// tinted per instance instead of re-skinned).
-struct NpcTint {
-    std::uint8_t r = 255, g = 255, b = 255;
+// RFC-023 §5's skin-pool tables, filtered to names build_atlas.py's auto-discovery (SKIN_NAMES,
+// `render/atlas_slots.hpp`'s generated `Skin` enum) actually packed. Two RFC-named skins are absent
+// from every pool below: `Child` and `OldWoman` both ship only an unsplit SpriteSheet.png with no
+// SeparateAnim/ split, the same asset-pipeline gap RFC-023 §2's Open Question 2 already flags for
+// Child — OldWoman turns out to share it, uncaught by the RFC's own audit.
+inline constexpr Skin kGuardSkins[] = {
+    Skin::kKnight, Skin::kKnightGold, Skin::kSamurai, Skin::kSamuraiBlue, Skin::kSamuraiRed,
+    Skin::kGladiatorBlue, Skin::kRedGladiator, Skin::kFighterRed, Skin::kFighterWhite,
+};
+inline constexpr Skin kMerchantShopSkins[] = {
+    Skin::kVillager, Skin::kVillager2, Skin::kVillager3, Skin::kVillager4, Skin::kVillager5,
+    Skin::kVillager6, Skin::kNoble, Skin::kSultan, Skin::kSultan2, Skin::kWoman,
+};
+inline constexpr Skin kQuestGiverSkins[] = {
+    Skin::kVillager, Skin::kVillager2, Skin::kVillager3, Skin::kVillager4, Skin::kVillager5,
+    Skin::kVillager6, Skin::kOldMan, Skin::kOldMan2, Skin::kOldMan3, Skin::kNoble,
+};
+inline constexpr Skin kFarmerSkins[] = {
+    Skin::kVillager, Skin::kVillager2, Skin::kVillager3, Skin::kVillager4, Skin::kVillager5,
+    Skin::kVillager6, Skin::kWoman, Skin::kBoy, Skin::kOldMan,
+};
+inline constexpr Skin kChildSkins[] = {
+    Skin::kBoy, Skin::kEggBoy, Skin::kEggGirl,
+};
+// `Village6` — an oddly-named folder distinct from `Villager6`, not named by any RFC-023 §5 pool row
+// — is folded in here for ambient variety rather than left completely unused by every pool.
+inline constexpr Skin kWandererSkins[] = {
+    Skin::kHunter, Skin::kMonk, Skin::kMonk2, Skin::kEskimo, Skin::kShaman, Skin::kSultan,
+    Skin::kVillager, Skin::kVillager2, Skin::kVillager3, Skin::kVillager4, Skin::kVillager5,
+    Skin::kVillager6, Skin::kVillage6,
 };
 
-inline constexpr NpcTint kNpcPalette[8] = {
-    {255, 255, 255},  // 0 default (unused for NPCs — kept for index alignment with §1.2's table)
-    {255, 140, 140},  // 1 Crimson
-    {140, 170, 255},  // 2 Azure
-    {255, 210, 120},  // 3 Amber
-    {170, 170, 180},  // 4 Slate
-    {200, 150, 255},  // 5 Violet
-    {235, 235, 245},  // 6 Snow
-    {255, 120, 90},   // 7 Ember
-};
+[[nodiscard]] inline constexpr std::pair<const Skin*, std::size_t> npc_skin_pool(NpcRole role) noexcept {
+    switch (role) {
+        case NpcRole::kMerchantShop: return {kMerchantShopSkins, std::size(kMerchantShopSkins)};
+        case NpcRole::kQuestGiver: return {kQuestGiverSkins, std::size(kQuestGiverSkins)};
+        case NpcRole::kFarmer: return {kFarmerSkins, std::size(kFarmerSkins)};
+        case NpcRole::kChild: return {kChildSkins, std::size(kChildSkins)};
+        case NpcRole::kWanderer: return {kWandererSkins, std::size(kWandererSkins)};
+        case NpcRole::kGuard: return {kGuardSkins, std::size(kGuardSkins)};
+        case NpcRole::kCount: break;
+    }
+    return {kWandererSkins, std::size(kWandererSkins)};
+}
 
-// RFC-023 §5/§9: a pure function of (seed, home_struct) — fixed once at roster bring-up, never
-// re-rolled, never stored (recomputing costs one Rng draw and removes a field that could otherwise
-// drift out of sync with this formula). Index 0 (the undyed default) is skipped for NPCs so a
-// civilian is never mistaken for the player at a glance.
-[[nodiscard]] inline NpcTint npc_tint_of(std::uint64_t seed, std::uint32_t home_struct) noexcept {
+// RFC-023 §5/§9: `kPool[role][hash(seed, home_struct) % len(kPool[role])]` — a pure function of
+// (role, seed, home_struct), fixed once at roster bring-up, never re-rolled, never stored (the same
+// "recompute rather than risk two copies drifting apart" reasoning `npc_tint_of` used, which this
+// replaces now that the atlas carries real per-role character art instead of a tinted placeholder).
+[[nodiscard]] inline Skin npc_skin_of(NpcRole role, std::uint64_t seed, std::uint32_t home_struct) noexcept {
+    const auto [pool, count] = npc_skin_pool(role);
     Rng rng(seed ^ (static_cast<std::uint64_t>(home_struct) * 0x9E37'79B9'7F4A'7C15ull) ^ 0xC0DEull);
-    return kNpcPalette[1 + rng.below(7)];
+    return pool[rng.below(static_cast<std::uint32_t>(count))];
 }
 
 }  // namespace mmo

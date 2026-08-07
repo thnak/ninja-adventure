@@ -376,6 +376,10 @@ inline constexpr LootTable kLootBossSamurai = boss_loot_table();
         case CreatureKind::kBear:
         case CreatureKind::kHare:
         case CreatureKind::kChicken:
+        // A guard never reaches this either — `credit_kill`'s `creature_is_npc(c)` early-return
+        // (RFC-023 §Non-goals: NPC death mechanics are undefined) covers every Npc role, guards
+        // included, before this function is ever called.
+        case CreatureKind::kGuard:
         case CreatureKind::kCount: break;
     }
     return kLootSlime;

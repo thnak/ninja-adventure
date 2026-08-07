@@ -3831,19 +3831,28 @@ int main(int argc, char** argv) {
                       "wanderer/shop do not (§7)");
         }
 
-        // §9: skin/tint is a pure function of (seed, home_struct), fixed once, never re-rolled — and
-        // never the undyed index, so a civilian is never mistaken for the player at a glance.
+        // §5/§9: skin is a pure function of (role, seed, home_struct), fixed once, never re-rolled,
+        // and always drawn from that role's own eligible pool (never a skin belonging to a different
+        // role's pool only).
         {
-            const NpcTint a = npc_tint_of(kWorldSeed, 7);
-            const NpcTint b = npc_tint_of(kWorldSeed, 7);
-            chk.expect(a.r == b.r && a.g == b.g && a.b == b.b,
-                      "npc_tint_of is a pure, deterministic function of (seed, home_struct) — §9");
-            bool any_default = false;
-            for (std::uint32_t hs = 0; hs < 64; ++hs) {
-                const NpcTint t = npc_tint_of(kWorldSeed, hs);
-                if (t.r == 255 && t.g == 255 && t.b == 255) any_default = true;
+            const Skin a = npc_skin_of(NpcRole::kFarmer, kWorldSeed, 7);
+            const Skin b = npc_skin_of(NpcRole::kFarmer, kWorldSeed, 7);
+            chk.expect(a == b,
+                      "npc_skin_of is a pure, deterministic function of (role, seed, home_struct) — §9");
+            for (NpcRole role : {NpcRole::kMerchantShop, NpcRole::kQuestGiver, NpcRole::kFarmer,
+                                 NpcRole::kChild, NpcRole::kWanderer, NpcRole::kGuard}) {
+                const auto [pool, count] = npc_skin_pool(role);
+                bool all_in_pool = true;
+                for (std::uint32_t hs = 0; hs < 64; ++hs) {
+                    const Skin s = npc_skin_of(role, kWorldSeed, hs);
+                    bool found = false;
+                    for (std::size_t i = 0; i < count; ++i) {
+                        if (pool[i] == s) found = true;
+                    }
+                    if (!found) all_in_pool = false;
+                }
+                chk.expect(all_in_pool, "npc_skin_of never returns a skin outside its role's own pool — §5");
             }
-            chk.expect(!any_default, "an NPC never draws the undyed default palette entry");
         }
 
         // §8.1: a live roster, off the shared World this whole file already built — confirms
@@ -3879,7 +3888,13 @@ int main(int argc, char** argv) {
                         chk.expect(m.disposition == Disposition::kNeutral,
                                   "§3: an Npc is constructed kNeutral, never Creature's own kHostile "
                                   "default");
-                        chk.expect(m.damage == 0, "§6: no civilian role ever deals damage");
+                        // §6: no CIVILIAN role ever deals damage — kGuard is the deliberate, hand-
+                        // authored exception (chunk_actor.hpp's guard branch of step_creatures).
+                        if (npc_role_of(m) != NpcRole::kGuard) {
+                            chk.expect(m.damage == 0, "§6: no civilian role ever deals damage");
+                        } else {
+                            chk.expect(m.damage > 0, "a guard is the one role that IS combat-capable");
+                        }
                     }
                 }
                 chk.expect(found_any, "build_npcs() placed real NPCs into a tier>=2 village's chunks");
@@ -3943,15 +3958,75 @@ int main(int argc, char** argv) {
                 }
             }
         }
+
+        // Guard combat (hand-authored, replacing RFC-023 §8.2's deferred RL guard roster): a raider
+        // spawned near a guard is noticed and fought WITHOUT any player ever being involved — the
+        // same standalone-ChunkActor, CreatureEnter/Tick-only harness the Sheltering test above uses,
+        // since `provoke`/`rally_guards` are private and only reachable through the full combat verbs
+        // this harness does not stand up. The player-attacks-a-civilian-alerts-a-guard path is
+        // exercised by the game's real strike() call (every player hit already calls provoke()
+        // unconditionally, chunk_actor.hpp), not re-proven here.
+        {
+            SnapshotBus local_bus;
+            ChunkActor ch;
+            ch.coord = ChunkCoord{kOverworld, 41, 41};
+            ch.bus = &local_bus;
+            ch.generate_terrain(kWorldSeed);
+
+            const int hx = 41 * kChunkTiles + 10;
+            const int hy = 41 * kChunkTiles + 10;
+            ch.add_npc(NpcRole::kGuard, /*home_struct*/ 2, hx, hy);
+
+            // Spawned already WITHIN the guard's 1.1 reach — this test isolates the combat-resolution
+            // path (nearest_hostile_creature -> commit_windup -> resolve_windup's creature branch)
+            // from movement/pathfinding across whatever terrain generate_terrain happened to roll for
+            // this chunk, which the Sheltering test above never needed to depend on either.
+            Creature raider{};
+            raider.id = 555002;
+            raider.kind = CreatureKind::kSlime;
+            raider.hp = 30;
+            raider.max_hp = 30;
+            raider.damage = 4;
+            raider.disposition = Disposition::kHostile;
+            raider.x = static_cast<float>(hx) + 0.7f;
+            raider.y = static_cast<float>(hy) + 0.5f;
+            ch.handle(CreatureEnter{raider});
+
+            // The guard's own windup (5 ticks) plus headroom.
+            for (std::uint64_t t = 1; t <= 15; ++t) {
+                ch.handle(Tick{t, static_cast<std::int64_t>(t) * kTickMs, false});
+            }
+            ch.publish_now();
+
+            ChunkViewPtr view = local_bus.load(ch.coord);
+            chk.expect(view != nullptr, "the standalone guard chunk publishes a view after ticking");
+            if (view) {
+                const Creature* guard = nullptr;
+                const Creature* mob = nullptr;
+                for (const Creature& m : view->creatures) {
+                    if (creature_is_npc(m) && npc_role_of(m) == NpcRole::kGuard) guard = &m;
+                    if (m.kind == CreatureKind::kSlime) mob = &m;
+                }
+                chk.expect(guard != nullptr, "the guard is still alive");
+                chk.expect(mob != nullptr, "the raider is still in the chunk (not yet reaped)");
+                if (guard != nullptr && mob != nullptr) {
+                    chk.expect(mob->hp < 30,
+                              "a guard notices a nearby raider on its own (no player, no alert) and "
+                              "lands a real hit — the village-defense half of this feature");
+                }
+            }
+        }
     }
     std::printf("RFC-023 character & NPC roster system: the civilian half — role/state packed into "
                "Creature::target with no struct growth (the 192-byte message-pool cap), the §7 "
                "four-state FSM, the §8.1 tier-gated roster formula off a village's actual built "
                "houses, and proximity-triggered Sheltering making a civilian untargetable to a raid "
-               "monster's maul_wildlife contact all check out. Guard rosters (§8.2) and the "
-               "road-graph-anchored kMerchantWander role are not built — see npc.hpp's header note: "
-               "this codebase's RFC-007 covers only the Dojo Master boss, not the guard archetype "
-               "roster §6 assumes exists\n\n");
+               "monster's maul_wildlife contact all check out. Guard rosters (§8.2) are now built too, "
+               "hand-authored rather than RFC-007's still-unbuilt RL archetype roster: a real "
+               "CreatureKind::kGuard with combat stats, a guard that notices and fights a nearby raider "
+               "unprompted, and civilians that alert nearby guards instead of fighting themselves. The "
+               "road-graph-anchored kMerchantWander role remains unbuilt — see npc.hpp's header "
+               "note\n\n");
 
     // --- Authored maps: format round-trip, portal lookup, and generator determinism -------------
     {

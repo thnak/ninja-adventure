@@ -24,6 +24,10 @@ client.cfg
 # Measurement scratch from tools/study_examples.py and tools/mock_world.py — contact sheets and
 # derived JSON, all regenerable, none of it source.
 tools/_study/
+
+# Style-model scratch from tools/style_{corpus,wfc,synth}.py — the extracted corpus, the generated
+# scenes and their previews. All regenerable from the pack's own Godot project, none of it source.
+tools/_style/
 tools/__pycache__/
 
 # CTest output when ctest is run from the repo root rather than build/.

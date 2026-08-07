@@ -586,8 +586,10 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
             }
         }
         // Record the tick of a granted swing so the renderer can play the attack animation for this
-        // player — including a remote one — off published state alone. Only melee reads as a body
-        // swing; a shot or a cast has its own effect and leaves the body idle.
+        // player — including a remote one — off published state alone. A ranged shot still leaves the
+        // body idle (the arrow itself is the whole read); melee sets it here, and
+        // handle(Ask<UseAbility,...>) below sets the same field for every ability cast, so a spell
+        // reads as the ninja actually doing something instead of FX appearing on an idle body.
         if (p.ok && (m.query.kind == AttackKind::kLight || m.query.kind == AttackKind::kHeavy)) {
             last_swing_tick_ = tick_;
         }
@@ -670,6 +672,11 @@ struct PlayerActor : quark::Actor<PlayerActor, quark::Sequential, quark::Priorit
             p.ok = true;
             p.phase = AbilityPhase::kIdle;
             p.reason = AbilityReject::kOk;
+            // Every ability cast now reads as a body swing too, not just melee — previously only
+            // AttackKind::kLight/kHeavy set this (see the comment above handle(Ask<PlanAttack,...>)),
+            // so casting a spell left the ninja's sprite sitting in Walk/Idle while the FX did all the
+            // work — the literal "magic spawns from nowhere, the ninja never throws anything" gap.
+            last_swing_tick_ = tick_;
             // The damage the chunk will apply, scaled here so the untrusted side never computes how
             // hard the player hits — exactly as PlanAttack does. Zones carry no direct damage.
             if (def.kind == AbilityKind::kStrike) {

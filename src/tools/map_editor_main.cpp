@@ -126,6 +126,10 @@ void apply_theme() {
         case CreatureKind::kBear: return "Bear";
         case CreatureKind::kHare: return "Hare";
         case CreatureKind::kChicken: return "Chicken";
+        // A map-authored spawn of this kind is a plain stats-only creature, not a real village-roster
+        // guard (npc_init's role/home_struct packing, step_guard's patrol/rally behavior) — this editor
+        // only authors AuthoredSpawn entries, which never set the Npc marker bit.
+        case CreatureKind::kGuard: return "Guard";
         case CreatureKind::kBoss: return "Boss";
         case CreatureKind::kCount: break;
     }

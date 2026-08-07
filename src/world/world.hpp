@@ -1024,9 +1024,11 @@ private:
     // RFC-023 §8.1: one civilian roster per village, sized from the village's own ACTUAL built house
     // `Structure` list (never the tier's aspirational `plan_of(tier).houses` target — village.hpp's
     // own comment records that a house "can silently fail to fit," and this roster must never claim
-    // a resident the village has no house for). Guard rosters (§8.2) are not built here — see
-    // npc.hpp's header note: this codebase's RFC-007 covers only the Dojo Master boss, not the guard
-    // archetype roster §6's table assumes exists, so there is no role to assign a guard NPC yet.
+    // a resident the village has no house for). Guards (§8.2) ARE built here now, hand-authored
+    // (npc.hpp's header note) rather than waiting on RFC-007's unbuilt RL archetype roster — one
+    // `NpcRole::kGuard` count per tier, read directly off §8.2's own table, picked at the low-to-middle
+    // end of each tier's range rather than its open-ended top ("20+" for Citadel has no single number
+    // to reuse verbatim) since this is a hand-authored count, not RFC-007's archetype split table.
     //
     // Computed once, here, at the same cold bring-up window build_bosses() already writes into —
     // NOT re-evaluated on a village tier-up, unlike RFC-023 §8.1's own "recomputation, not a one-shot
@@ -1078,6 +1080,19 @@ private:
                                      : (bucket < 7) ? NpcRole::kChild
                                                     : NpcRole::kWanderer;
                 spawn_one(role, houses[idx]);
+            }
+
+            // §8.2's guard count, read off the tier table; posted at existing house doors (cycling
+            // back through `houses` once civilians have claimed them — a guard shares a patrol post
+            // with a resident rather than needing a dedicated fortification `Structure` to anchor to,
+            // which this pass does not attempt to locate/filter for).
+            const int guard_count = (v.tier >= 4)   ? 16
+                                    : (v.tier == 3) ? 10
+                                    : (v.tier == 2) ? 4
+                                    : (v.tier == 1) ? 2
+                                                     : 0;
+            for (int g = 0; g < guard_count; ++g) {
+                spawn_one(NpcRole::kGuard, houses[static_cast<std::size_t>(g) % houses.size()]);
             }
         }
     }
