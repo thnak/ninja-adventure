@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_csd7n"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/slash.wav" id="2_2d01k"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_00id3"]
+[ext_resource type="Script" path="res://system/skill/step_shove.gd" id="4_d6vs8"]
+
+[sub_resource type="Resource" id="Resource_h24lx"]
+script = ExtResource("4_d6vs8")
+
+[resource]
+script = ExtResource("1_csd7n")
+id = &"shove_rock"
+display_name = "Đẩy đá"
+kind = 3
+cooldown = 6.0
+lock_sec = 0.7
+sound = ExtResource("2_2d01k")
+steps = Array[ExtResource("3_00id3")]([SubResource("Resource_h24lx")])

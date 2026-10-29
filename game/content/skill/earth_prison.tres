@@ -1,0 +1,37 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_46gr4"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/cast.wav" id="2_hgd31"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_qaoql"]
+[ext_resource type="Script" path="res://system/damage/resource_damage.gd" id="4_6v37f"]
+[ext_resource type="Script" path="res://system/skill/step_strike.gd" id="5_ejadp"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/rockspike.png" id="6_qd6as"]
+
+[sub_resource type="Resource" id="Resource_bws4l"]
+script = ExtResource("4_6v37f")
+status = 1
+status_sec = 3.0
+
+[sub_resource type="Resource" id="Resource_s2coy"]
+script = ExtResource("5_ejadp")
+texture = ExtResource("6_qd6as")
+hframes = 10
+fps = 9.0
+forward = 44.0
+radius = 24.0
+damage = SubResource("Resource_bws4l")
+fx_scale = 1.2
+rotate_with_dir = false
+hit_to = 2
+
+[resource]
+script = ExtResource("1_46gr4")
+id = &"earth_prison"
+display_name = "Địa lao"
+kind = 2
+cost = 25.0
+cooldown = 2.0
+lock_sec = 0.4
+anim = 6
+sound = ExtResource("2_hgd31")
+steps = Array[ExtResource("3_qaoql")]([SubResource("Resource_s2coy")])

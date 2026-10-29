@@ -7,6 +7,7 @@ enum State{IDLE}
 
 
 signal teleported
+signal died(cause)
 
 @export_category("physics")
 @export var speed = 100.0
@@ -32,22 +33,71 @@ var actor:ActorSprite
 var move_vector := Vector2.ZERO:
 	set(v):
 		move_vector = v
-		if move_vector.length():
+		if move_vector.length() and action_left <= 0.0:
 			sprite.direction = move_vector.normalized()
 var state:State
 var just_teleport := false
+## Đang làm động tác (đánh, ném, niệm): đứng yên và không đổi hướng cho tới khi hết giờ.
+var action_left := 0.0
+var action_anim := SpriteCharacter.Anim.ATTACK
+## Trạng thái khống chế đang chịu: loại -> giây còn lại.
+var status_left := {}
+var dead := false
+## Lá chắn: chặn mọi đòn thường (trạng thái, đẩy lùi). Không chặn được đòn chí mạng hay bị đè.
+var guard := false
+
+const STATUS_TINT := {
+	ResourceDamage.Status.ROOT: Color(0.85, 0.65, 0.45),
+	ResourceDamage.Status.SLOW: Color(0.6, 0.8, 1.0),
+	ResourceDamage.Status.STUN: Color(1.0, 1.0, 0.45),
+	ResourceDamage.Status.FREEZE: Color(0.55, 0.9, 1.4),
+}
+const SLOW_FACTOR := 0.4
+const DUST := preload("res://content/skill/fx/smoke.png")
+const LAND_SLIDE_SEC := 0.35
+const LAND_SLIDE_DECEL := 150.0
+## Bị hất tung: thời gian bay còn lại, tổng, độ cao và thời gian trượt sau khi rơi.
+var air_left := 0.0
+var air_total := 0.0
+var air_height := 0.0
+var slide_left := 0.0
 
 @onready var sprite: SpriteCharacter = $Sprite
+@onready var hitbox: Hitbox = $Hitbox
+
+
+func _ready() -> void:
+	# Hitbox dựng sẵn trong character.tscn có đội riêng; đồng bộ để đòn của chính mình không trúng mình.
+	if team:
+		hitbox.team = team
+	hitbox.damage_received.connect(on_hit)
 
 
 func _physics_process(delta: float) -> void:
 	if Engine.is_editor_hint():
 		return
+	if dead:
+		sprite.anim = SpriteCharacter.Anim.DEAD
+		return
+	tick_status(delta)
 	match state:
 		State.IDLE:
-			if move_vector.length():
+			if air_left > 0.0:
+				tick_air(delta)
+			elif slide_left > 0.0:
+				slide_left -= delta
+				sprite.anim = SpriteCharacter.Anim.IDLE
+				velocity = velocity.move_toward(Vector2.ZERO,LAND_SLIDE_DECEL*delta)
+			elif is_immobile():
+				sprite.anim = SpriteCharacter.Anim.IDLE
+				velocity = velocity.move_toward(Vector2.ZERO,deceleration*delta*4.0)
+			elif action_left > 0.0:
+				action_left -= delta
+				sprite.anim = action_anim
+				velocity = velocity.move_toward(Vector2.ZERO,deceleration*delta)
+			elif move_vector.length():
 				sprite.anim = SpriteCharacter.Anim.MOVING
-				velocity = velocity.move_toward(move_vector*speed,acceleration*delta)
+				velocity = velocity.move_toward(move_vector*speed*(SLOW_FACTOR if has_status(ResourceDamage.Status.SLOW) else 1.0),acceleration*delta)
 			else:
 				sprite.anim = SpriteCharacter.Anim.IDLE
 				velocity = velocity.move_toward(Vector2.ZERO,deceleration*delta)
@@ -57,6 +107,109 @@ func _physics_process(delta: float) -> void:
 			var block := get_slide_collision(i).get_collider() as PushBlock
 			if block and move_vector.normalized().dot(-get_slide_collision(i).get_normal()) > 0.7:
 				block.nudge(-get_slide_collision(i).get_normal(), delta)
+
+
+## Chết ngay (bị đè, đòn chí mạng): không đi qua bất kỳ cơ chế đỡ đòn nào.
+func die(cause:StringName = &""):
+	if dead:
+		return
+	dead = true
+	velocity = Vector2.ZERO
+	action_left = 0.0
+	air_left = 0.0
+	collision_layer = 0
+	hitbox.disable()
+	sprite.position.y = 0.0
+	sprite.anim = SpriteCharacter.Anim.DEAD
+	if cause == &"crushed":
+		sprite.scale = Vector2(1.25, 0.3)
+		sprite.offset = Vector2(0, 2)
+	died.emit(cause)
+
+
+func has_status(kind:ResourceDamage.Status) -> bool:
+	return status_left.get(kind, 0.0) > 0.0
+
+
+## Không đi được: trói, choáng, đóng băng.
+func is_immobile() -> bool:
+	return has_status(ResourceDamage.Status.ROOT) or !can_act()
+
+
+## Choáng và đóng băng không ra chiêu được; trói thì vẫn ra chiêu.
+func can_act() -> bool:
+	return !dead and air_left <= 0.0 and !has_status(ResourceDamage.Status.STUN) and !has_status(ResourceDamage.Status.FREEZE)
+
+
+func apply_status(kind:ResourceDamage.Status,seconds:float):
+	if kind == ResourceDamage.Status.NONE or seconds <= 0.0:
+		return
+	status_left[kind] = maxf(status_left.get(kind, 0.0), seconds)
+	update_status_tint()
+
+
+func tick_status(delta:float):
+	if status_left.is_empty():
+		return
+	for kind in status_left.keys():
+		status_left[kind] -= delta
+		if status_left[kind] <= 0.0:
+			status_left.erase(kind)
+	update_status_tint()
+
+
+func update_status_tint():
+	var tint := Color.WHITE
+	for kind in status_left:
+		tint *= STATUS_TINT[kind]
+	sprite.self_modulate = tint
+
+
+func on_hit(damage:ResourceDamage,at_pos):
+	if damage.lethal:
+		die(&"lethal")
+		return
+	if guard:
+		return
+	apply_status(damage.status, damage.status_sec)
+	if damage.launch_sec > 0.0:
+		launch(at_pos, damage.push_force, damage.launch_sec, damage.launch_height)
+	elif damage.push_force:
+		push(at_pos, damage.push_force)
+
+
+## Hất lên không: bay theo hướng từ tâm đòn ra, không đi hay ra chiêu được cho tới khi rơi xuống.
+func launch(from:Vector2,force:int,seconds:float,height:float):
+	var away := from.direction_to(global_position)
+	if away == Vector2.ZERO:
+		away = Vector2.DOWN
+	velocity = away*force*0.5
+	air_total = seconds
+	air_left = seconds
+	air_height = height
+	slide_left = 0.0
+	action_left = 0.0
+
+
+func tick_air(delta:float):
+	air_left -= delta
+	var t := 1.0 - clampf(air_left/air_total,0.0,1.0)
+	sprite.position.y = -air_height*4.0*t*(1.0-t)
+	sprite.anim = SpriteCharacter.Anim.JUMP
+	if air_left <= 0.0:
+		air_left = 0.0
+		sprite.position.y = 0.0
+		slide_left = LAND_SLIDE_SEC
+		OneShotFx.spawn(get_parent(), global_position, DUST, 6, 14.0, 0.7)
+
+
+func push(from:Vector2,force:int):
+	velocity += from.direction_to(global_position)*force*2.0
+
+
+func act(anim:SpriteCharacter.Anim,seconds:float):
+	action_anim = anim
+	action_left = seconds
 
 
 func teleport(target_teleporter:Teleporter,offset_position:Vector2):

@@ -1,0 +1,62 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_upoqy"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/cast.wav" id="2_yfcjt"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_od808"]
+[ext_resource type="Script" path="res://system/damage/resource_damage.gd" id="4_rl0bj"]
+[ext_resource type="Script" path="res://system/skill/step_strike.gd" id="5_mdqh0"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/explosion.png" id="6_vuboy"]
+[ext_resource type="Script" path="res://system/skill/step_projectile.gd" id="7_ubulx"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/Fireball.png" id="8_1bgrt"]
+
+[sub_resource type="Resource" id="Resource_ku1qv"]
+script = ExtResource("4_rl0bj")
+amount = 2
+push_force = 40
+
+[sub_resource type="Resource" id="Resource_owal6"]
+script = ExtResource("4_rl0bj")
+amount = 3
+push_force = 130
+launch_sec = 0.5
+launch_height = 10.0
+
+[sub_resource type="Resource" id="Resource_xf3yc"]
+script = ExtResource("5_mdqh0")
+texture = ExtResource("6_vuboy")
+hframes = 9
+fps = 16.0
+start_frame = 2
+forward = 0.0
+radius = 22.0
+damage = SubResource("Resource_owal6")
+rotate_with_dir = false
+hit_from = 3
+hit_to = 5
+shockwave = true
+debris = true
+ignites = true
+
+[sub_resource type="Resource" id="Resource_0cehx"]
+script = ExtResource("7_ubulx")
+texture = ExtResource("8_1bgrt")
+hframes = 4
+speed = 150.0
+travel = 190.0
+damage = SubResource("Resource_ku1qv")
+hit_radius = 5.0
+trail = Color(1, 0.55, 0.15, 0.7)
+embers = Color(1, 0.75, 0.25, 1)
+impact = SubResource("Resource_xf3yc")
+
+[resource]
+script = ExtResource("1_upoqy")
+id = &"fireball"
+display_name = "Hỏa cầu"
+kind = 2
+cost = 20.0
+cooldown = 0.6
+lock_sec = 0.35
+anim = 6
+sound = ExtResource("2_yfcjt")
+steps = Array[ExtResource("3_od808")]([SubResource("Resource_0cehx")])

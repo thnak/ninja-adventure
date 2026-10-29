@@ -1,0 +1,38 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_qkfqj"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/cast.wav" id="2_pdm7q"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_d2re7"]
+[ext_resource type="Script" path="res://system/damage/resource_damage.gd" id="4_5ow76"]
+[ext_resource type="Script" path="res://system/skill/step_strike.gd" id="5_03qnc"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/thunder.png" id="6_erkte"]
+
+[sub_resource type="Resource" id="Resource_mri0c"]
+script = ExtResource("4_5ow76")
+amount = 3
+push_force = 80
+
+[sub_resource type="Resource" id="Resource_dq7pg"]
+script = ExtResource("5_03qnc")
+texture = ExtResource("6_erkte")
+hframes = 8
+fps = 12.0
+forward = 56.0
+damage = SubResource("Resource_mri0c")
+fx_scale = 1.6
+rotate_with_dir = false
+hit_from = 2
+hit_to = 5
+delay = 0.15
+
+[resource]
+script = ExtResource("1_qkfqj")
+id = &"thunder"
+display_name = "Sấm sét"
+kind = 2
+cost = 30.0
+cooldown = 1.4
+lock_sec = 0.45
+anim = 6
+sound = ExtResource("2_pdm7q")
+steps = Array[ExtResource("3_d2re7")]([SubResource("Resource_dq7pg")])

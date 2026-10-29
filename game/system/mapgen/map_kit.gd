@@ -523,6 +523,14 @@ func add_push_crate(crate_name:String, tx:int, ty:int) -> void:
 	reserve(tx, ty, 1, 1)
 
 
+## Đá môi trường (tảng đá đen/xám boss có thể đẩy): `kind` như "black_wide", "gray_tall" (res://content/rock/rock_<kind>.tscn).
+## Chiếm `w` x `h` ô để các lớp khác không đè lên.
+func add_rock(rock_name:String, kind:String, tx:int, ty:int, w := 2, h := 1) -> void:
+	# Nút đá nằm ở giữa khối ô nó chiếm (tâm của hộp va chạm đáy).
+	add_scene(load("res://content/rock/rock_%s.tscn" % kind), rock_name, center(tx, ty) + Vector2((w - 1) * 8.0, (h - 1) * 8.0))
+	reserve(tx, ty, w, h)
+
+
 func add_scene(scene:PackedScene, node_name:String, point:Vector2) -> Node2D:
 	var node := scene.instantiate() as Node2D
 	node.name = node_name

@@ -1,0 +1,38 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_f3yba"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/cast.wav" id="2_kel45"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_04e73"]
+[ext_resource type="Script" path="res://system/damage/resource_damage.gd" id="4_we340"]
+[ext_resource type="Script" path="res://system/skill/step_strike.gd" id="5_424lp"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/water_pillar.png" id="6_o8shu"]
+
+[sub_resource type="Resource" id="Resource_x7hju"]
+script = ExtResource("4_we340")
+status = 3
+status_sec = 2.0
+
+[sub_resource type="Resource" id="Resource_sinlb"]
+script = ExtResource("5_424lp")
+texture = ExtResource("6_o8shu")
+hframes = 9
+fps = 12.0
+forward = 40.0
+radius = 16.0
+damage = SubResource("Resource_x7hju")
+rotate_with_dir = false
+hit_from = 1
+hit_to = 2
+extinguishes = true
+
+[resource]
+script = ExtResource("1_f3yba")
+id = &"water_pillar"
+display_name = "Thủy trụ"
+kind = 2
+cost = 25.0
+cooldown = 2.0
+lock_sec = 0.4
+anim = 6
+sound = ExtResource("2_kel45")
+steps = Array[ExtResource("3_04e73")]([SubResource("Resource_sinlb")])

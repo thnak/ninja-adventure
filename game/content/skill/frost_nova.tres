@@ -1,0 +1,39 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_2xmd2"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/cast.wav" id="2_vq2eq"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_fn5v5"]
+[ext_resource type="Script" path="res://system/damage/resource_damage.gd" id="4_wq27u"]
+[ext_resource type="Script" path="res://system/skill/step_strike.gd" id="5_uts1a"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/ice_burst.png" id="6_xe1da"]
+
+[sub_resource type="Resource" id="Resource_j3fkl"]
+script = ExtResource("4_wq27u")
+status = 4
+status_sec = 3.0
+
+[sub_resource type="Resource" id="Resource_dkwia"]
+script = ExtResource("5_uts1a")
+texture = ExtResource("6_xe1da")
+hframes = 9
+fps = 12.0
+forward = 40.0
+radius = 28.0
+damage = SubResource("Resource_j3fkl")
+fx_scale = 1.2
+rotate_with_dir = false
+hit_from = 1
+hit_to = 3
+extinguishes = true
+
+[resource]
+script = ExtResource("1_2xmd2")
+id = &"frost_nova"
+display_name = "Đóng băng"
+kind = 2
+cost = 25.0
+cooldown = 2.0
+lock_sec = 0.4
+anim = 6
+sound = ExtResource("2_vq2eq")
+steps = Array[ExtResource("3_fn5v5")]([SubResource("Resource_dkwia")])

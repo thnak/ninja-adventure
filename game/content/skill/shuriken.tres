@@ -1,0 +1,32 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_wu8s8"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/throw.wav" id="2_8uuro"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_emgc1"]
+[ext_resource type="Script" path="res://system/damage/resource_damage.gd" id="4_nypte"]
+[ext_resource type="Script" path="res://system/skill/step_projectile.gd" id="5_1kavp"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/Shuriken.png" id="6_dtn1x"]
+
+[sub_resource type="Resource" id="Resource_2hcjj"]
+script = ExtResource("4_nypte")
+push_force = 40
+
+[sub_resource type="Resource" id="Resource_ppx1y"]
+script = ExtResource("5_1kavp")
+texture = ExtResource("6_dtn1x")
+hframes = 2
+speed = 230.0
+travel = 180.0
+damage = SubResource("Resource_2hcjj")
+spin_deg = 720.0
+trail = Color(0.8, 0.85, 0.95, 0.4)
+
+[resource]
+script = ExtResource("1_wu8s8")
+id = &"shuriken"
+display_name = "Phi tiêu"
+kind = 1
+cooldown = 0.35
+lock_sec = 0.2
+sound = ExtResource("2_8uuro")
+steps = Array[ExtResource("3_emgc1")]([SubResource("Resource_ppx1y")])

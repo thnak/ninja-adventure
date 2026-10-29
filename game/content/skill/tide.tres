@@ -1,0 +1,38 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_dmaoi"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/cast.wav" id="2_d8vpb"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_skbeq"]
+[ext_resource type="Script" path="res://system/damage/resource_damage.gd" id="4_q1wwm"]
+[ext_resource type="Script" path="res://system/skill/step_strike.gd" id="5_5bhgd"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/tide.png" id="6_jwc7l"]
+
+[sub_resource type="Resource" id="Resource_ks3mk"]
+script = ExtResource("4_q1wwm")
+push_force = 50
+status = 2
+status_sec = 4.0
+
+[sub_resource type="Resource" id="Resource_tedp5"]
+script = ExtResource("5_5bhgd")
+texture = ExtResource("6_jwc7l")
+hframes = 10
+forward = 40.0
+radius = 30.0
+damage = SubResource("Resource_ks3mk")
+rotate_with_dir = false
+hit_from = 1
+hit_to = 3
+extinguishes = true
+
+[resource]
+script = ExtResource("1_dmaoi")
+id = &"tide"
+display_name = "Thủy triều"
+kind = 2
+cost = 20.0
+cooldown = 1.5
+lock_sec = 0.35
+anim = 6
+sound = ExtResource("2_d8vpb")
+steps = Array[ExtResource("3_skbeq")]([SubResource("Resource_tedp5")])

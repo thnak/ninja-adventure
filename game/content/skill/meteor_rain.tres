@@ -1,0 +1,54 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_gk7p7"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/cast.wav" id="2_l7qd4"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_kgw3m"]
+[ext_resource type="Script" path="res://system/damage/resource_damage.gd" id="4_tbooy"]
+[ext_resource type="Script" path="res://system/skill/step_strike.gd" id="5_jei1e"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/explosion.png" id="6_nw8vf"]
+[ext_resource type="Script" path="res://system/skill/step_scatter.gd" id="7_hm7xj"]
+
+[sub_resource type="Resource" id="Resource_fudcm"]
+script = ExtResource("4_tbooy")
+amount = 4
+push_force = 170
+launch_sec = 0.6
+launch_height = 16.0
+
+[sub_resource type="Resource" id="Resource_mfdyd"]
+script = ExtResource("5_jei1e")
+texture = ExtResource("6_nw8vf")
+hframes = 9
+start_frame = 2
+forward = 0.0
+radius = 26.0
+damage = SubResource("Resource_fudcm")
+fx_scale = 1.5
+rotate_with_dir = false
+hit_from = 3
+hit_to = 5
+windup = 0.9
+shockwave = true
+smoke = true
+debris = true
+ignites = true
+
+[sub_resource type="Resource" id="Resource_qxod7"]
+script = ExtResource("7_hm7xj")
+inner = SubResource("Resource_mfdyd")
+count = 10
+radius = 85.0
+span = 2.5
+center_forward = 40.0
+
+[resource]
+script = ExtResource("1_gk7p7")
+id = &"meteor_rain"
+display_name = "Mưa thiên thạch"
+kind = 3
+cost = 80.0
+cooldown = 20.0
+lock_sec = 0.8
+anim = 6
+sound = ExtResource("2_l7qd4")
+steps = Array[ExtResource("3_kgw3m")]([SubResource("Resource_qxod7")])

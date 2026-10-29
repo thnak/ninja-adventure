@@ -1,0 +1,69 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_kk5ti"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/slash.wav" id="2_nrnw4"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_f1q6v"]
+[ext_resource type="Script" path="res://system/damage/resource_damage.gd" id="4_h7br6"]
+[ext_resource type="Script" path="res://system/skill/step_strike.gd" id="5_7i25y"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/spin.png" id="6_6qk8w"]
+
+[sub_resource type="Resource" id="Resource_1u6km"]
+script = ExtResource("4_h7br6")
+amount = 3
+push_force = 150
+
+[sub_resource type="Resource" id="Resource_r43lv"]
+script = ExtResource("5_7i25y")
+texture = ExtResource("6_6qk8w")
+forward = 0.0
+radius = 36.0
+damage = SubResource("Resource_1u6km")
+fx_scale = 2.0
+rotate_with_dir = false
+hit_from = 1
+hit_to = 2
+
+[sub_resource type="Resource" id="Resource_kewuk"]
+script = ExtResource("4_h7br6")
+amount = 3
+push_force = 150
+
+[sub_resource type="Resource" id="Resource_sdsio"]
+script = ExtResource("5_7i25y")
+texture = ExtResource("6_6qk8w")
+forward = 0.0
+radius = 36.0
+damage = SubResource("Resource_kewuk")
+fx_scale = 2.0
+rotate_with_dir = false
+hit_from = 1
+hit_to = 2
+delay = 0.3
+
+[sub_resource type="Resource" id="Resource_wu1vd"]
+script = ExtResource("4_h7br6")
+amount = 3
+push_force = 150
+
+[sub_resource type="Resource" id="Resource_h1m73"]
+script = ExtResource("5_7i25y")
+texture = ExtResource("6_6qk8w")
+forward = 0.0
+radius = 36.0
+damage = SubResource("Resource_wu1vd")
+fx_scale = 2.0
+rotate_with_dir = false
+hit_from = 1
+hit_to = 2
+delay = 0.6
+
+[resource]
+script = ExtResource("1_kk5ti")
+id = &"blade_storm"
+display_name = "Bão kiếm"
+kind = 3
+cost = 60.0
+cooldown = 12.0
+lock_sec = 1.0
+sound = ExtResource("2_nrnw4")
+steps = Array[ExtResource("3_f1q6v")]([SubResource("Resource_r43lv"), SubResource("Resource_sdsio"), SubResource("Resource_h1m73")])

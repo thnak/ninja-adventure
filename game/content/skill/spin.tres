@@ -1,0 +1,32 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_sjwmu"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/slash.wav" id="2_kjc1i"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_3jdxw"]
+[ext_resource type="Script" path="res://system/damage/resource_damage.gd" id="4_qrx63"]
+[ext_resource type="Script" path="res://system/skill/step_strike.gd" id="5_hbuh5"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/spin.png" id="6_7eawd"]
+
+[sub_resource type="Resource" id="Resource_as35a"]
+script = ExtResource("4_qrx63")
+amount = 2
+push_force = 100
+
+[sub_resource type="Resource" id="Resource_iysi7"]
+script = ExtResource("5_hbuh5")
+texture = ExtResource("6_7eawd")
+forward = 0.0
+radius = 24.0
+damage = SubResource("Resource_as35a")
+rotate_with_dir = false
+hit_from = 1
+hit_to = 2
+
+[resource]
+script = ExtResource("1_sjwmu")
+id = &"spin"
+display_name = "Xoáy"
+cooldown = 1.2
+lock_sec = 0.3
+sound = ExtResource("2_kjc1i")
+steps = Array[ExtResource("3_3jdxw")]([SubResource("Resource_iysi7")])

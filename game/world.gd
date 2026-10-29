@@ -38,6 +38,12 @@ func _ready():
 	player = PLAYER_SCENE.instantiate()
 	player.add_child(PlayerAssignor.new())
 	player.add_child(Interactor.new())
+	var caster := SkillCaster.new()
+	player.add_child(caster)
+	var skill_bar := SkillBar.new()
+	player_ui.add_child(skill_bar)
+	skill_bar.position = Vector2(3, 22)
+	skill_bar.bind(caster)
 	add_child(Dialog.new())
 	add_child(MapScreen.new())
 	if !(use_save and load_saved()):
@@ -108,6 +114,7 @@ func load_area(scene_id:StringName,spawn_id:StringName,at_position := Vector2.IN
 		map.queue_free()
 	map = packed.instantiate()
 	add_child(map)
+	FireField.of(map)
 	map.environment_area.environment_changed.connect(apply_environment)
 	var spawn := map.find_spawn(spawn_id)
 	if spawn == null and at_position == Vector2.INF:

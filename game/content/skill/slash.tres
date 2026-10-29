@@ -1,0 +1,32 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_qk81p"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/slash.wav" id="2_semqq"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_be7kg"]
+[ext_resource type="Script" path="res://system/damage/resource_damage.gd" id="4_312fo"]
+[ext_resource type="Script" path="res://system/skill/step_strike.gd" id="5_sol6w"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/slash.png" id="6_ctdu7"]
+
+[sub_resource type="Resource" id="Resource_5v5wg"]
+script = ExtResource("4_312fo")
+amount = 2
+push_force = 60
+
+[sub_resource type="Resource" id="Resource_vvcg5"]
+script = ExtResource("5_sol6w")
+texture = ExtResource("6_ctdu7")
+fps = 16.0
+forward = 15.0
+damage = SubResource("Resource_5v5wg")
+fx_scale = 1.5
+hit_from = 1
+hit_to = 2
+
+[resource]
+script = ExtResource("1_qk81p")
+id = &"slash"
+display_name = "Chém"
+cooldown = 0.3
+lock_sec = 0.22
+sound = ExtResource("2_semqq")
+steps = Array[ExtResource("3_be7kg")]([SubResource("Resource_vvcg5")])

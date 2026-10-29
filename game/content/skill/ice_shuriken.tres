@@ -1,0 +1,33 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_e0p6p"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/throw.wav" id="2_3c8hb"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_fynl0"]
+[ext_resource type="Script" path="res://system/damage/resource_damage.gd" id="4_dyici"]
+[ext_resource type="Script" path="res://system/skill/step_projectile.gd" id="5_3jw15"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/IceShuriken.png" id="6_6pwq7"]
+
+[sub_resource type="Resource" id="Resource_gwbyg"]
+script = ExtResource("4_dyici")
+push_force = 40
+status = 2
+status_sec = 2.5
+
+[sub_resource type="Resource" id="Resource_1pa34"]
+script = ExtResource("5_3jw15")
+texture = ExtResource("6_6pwq7")
+hframes = 2
+speed = 230.0
+travel = 180.0
+damage = SubResource("Resource_gwbyg")
+spin_deg = 720.0
+trail = Color(0.6, 0.9, 1, 0.5)
+
+[resource]
+script = ExtResource("1_e0p6p")
+id = &"ice_shuriken"
+display_name = "Phi tiêu băng"
+kind = 1
+lock_sec = 0.2
+sound = ExtResource("2_3c8hb")
+steps = Array[ExtResource("3_fynl0")]([SubResource("Resource_1pa34")])

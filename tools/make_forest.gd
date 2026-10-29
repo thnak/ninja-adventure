@@ -183,6 +183,10 @@ func features() -> void:
 	kit.add_sign("Sign_nook", kit.center(12, -1), "Ai đó từng nghỉ chân ở đây.\nGhi bên dưới: 'Đừng báo cho trưởng làng'.", true)
 	kit.add_chest("Chest_glade", kit.center(21, 9), &"coin", 15)
 	kit.add_push_crate("PushCrate1", 27, 10)
+	# Đá đen môi trường: boss đẩy được (xem StepShove).
+	kit.add_rock("RockWide", "black_wide", 23, 12, 4, 1)
+	kit.add_rock("RockTall", "black_tall", 28, 8, 2, 1)
+	kit.add_rock("RockRound", "black_round_b", 26, 7, 2, 1)
 
 	# Người trong rừng.
 	kit.add_npc("Girl", "child", kit.center(-1, 2), "Cô bé", "Tớ đuổi theo con bướm mà lạc tới tận đây. Chú đừng mách mẹ nhé!", 30.0)

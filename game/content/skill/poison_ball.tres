@@ -1,0 +1,61 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_22g56"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/cast.wav" id="2_uuapu"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_45a5t"]
+[ext_resource type="Script" path="res://system/damage/resource_damage.gd" id="4_ch804"]
+[ext_resource type="Script" path="res://system/skill/step_strike.gd" id="5_14bhm"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/poison_explosion.png" id="6_f6fkt"]
+[ext_resource type="Script" path="res://system/skill/step_projectile.gd" id="7_t0c42"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/PoisonBall.png" id="8_81vkw"]
+
+[sub_resource type="Resource" id="Resource_017ig"]
+script = ExtResource("4_ch804")
+push_force = 40
+
+[sub_resource type="Resource" id="Resource_kfb7b"]
+script = ExtResource("4_ch804")
+amount = 2
+push_force = 50
+status = 2
+status_sec = 5.0
+
+[sub_resource type="Resource" id="Resource_fj0ac"]
+script = ExtResource("5_14bhm")
+texture = ExtResource("6_f6fkt")
+hframes = 9
+start_frame = 2
+forward = 0.0
+radius = 26.0
+damage = SubResource("Resource_kfb7b")
+fx_scale = 1.2
+rotate_with_dir = false
+hit_from = 3
+hit_to = 6
+shockwave = true
+smoke = true
+fx_tint = Color(0.6, 1, 0.5, 1)
+
+[sub_resource type="Resource" id="Resource_e01ia"]
+script = ExtResource("7_t0c42")
+texture = ExtResource("8_81vkw")
+hframes = 4
+speed = 120.0
+travel = 180.0
+damage = SubResource("Resource_017ig")
+hit_radius = 5.0
+trail = Color(0.4, 1, 0.3, 0.7)
+embers = Color(0.6, 1, 0.3, 1)
+impact = SubResource("Resource_fj0ac")
+
+[resource]
+script = ExtResource("1_22g56")
+id = &"poison_ball"
+display_name = "Cầu độc"
+kind = 2
+cost = 22.0
+cooldown = 0.7
+lock_sec = 0.35
+anim = 6
+sound = ExtResource("2_uuapu")
+steps = Array[ExtResource("3_45a5t")]([SubResource("Resource_e01ia")])

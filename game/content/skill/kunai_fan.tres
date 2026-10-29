@@ -1,0 +1,32 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_mpv58"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/throw.wav" id="2_avs0y"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_gqb0p"]
+[ext_resource type="Script" path="res://system/damage/resource_damage.gd" id="4_h5tfh"]
+[ext_resource type="Script" path="res://system/skill/step_projectile.gd" id="5_5gl1q"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/Kunai.png" id="6_4gout"]
+
+[sub_resource type="Resource" id="Resource_ywpcq"]
+script = ExtResource("4_h5tfh")
+push_force = 40
+
+[sub_resource type="Resource" id="Resource_1ne42"]
+script = ExtResource("5_5gl1q")
+texture = ExtResource("6_4gout")
+speed = 280.0
+travel = 150.0
+count = 3
+spread_deg = 18.0
+damage = SubResource("Resource_ywpcq")
+face_dir = true
+trail = Color(1, 1, 1, 0.45)
+
+[resource]
+script = ExtResource("1_mpv58")
+id = &"kunai_fan"
+display_name = "Kunai quạt"
+kind = 1
+cooldown = 0.8
+sound = ExtResource("2_avs0y")
+steps = Array[ExtResource("3_gqb0p")]([SubResource("Resource_1ne42")])

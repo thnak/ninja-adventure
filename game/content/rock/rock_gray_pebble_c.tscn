@@ -1,0 +1,8 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://system/skill/boulder.gd" id="1_script"]
+[ext_resource type="Texture2D" path="res://content/rock/rock_gray_pebble_c.png" id="2_tex"]
+
+[node name="Rock" type="CharacterBody2D"]
+script = ExtResource("1_script")
+slab_texture = ExtResource("2_tex")

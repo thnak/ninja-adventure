@@ -1,0 +1,47 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_2yfra"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/cast.wav" id="2_b8cgj"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_7ko0g"]
+[ext_resource type="Script" path="res://system/damage/resource_damage.gd" id="4_7lvgg"]
+[ext_resource type="Script" path="res://system/skill/step_strike.gd" id="5_h23ts"]
+[ext_resource type="Texture2D" path="res://content/skill/fx/explosion.png" id="6_0uieg"]
+
+[sub_resource type="Resource" id="Resource_k77vm"]
+script = ExtResource("4_7lvgg")
+amount = 3
+push_force = 180
+status = 3
+status_sec = 1.5
+launch_sec = 0.8
+launch_height = 26.0
+
+[sub_resource type="Resource" id="Resource_swlh5"]
+script = ExtResource("5_h23ts")
+texture = ExtResource("6_0uieg")
+hframes = 9
+fps = 10.0
+start_frame = 2
+forward = 0.0
+radius = 60.0
+damage = SubResource("Resource_k77vm")
+fx_scale = 3.2
+rotate_with_dir = false
+hit_from = 3
+hit_to = 5
+windup = 0.6
+shockwave = true
+smoke = true
+debris = true
+
+[resource]
+script = ExtResource("1_2yfra")
+id = &"quake"
+display_name = "Địa chấn"
+kind = 3
+cost = 70.0
+cooldown = 20.0
+lock_sec = 0.9
+anim = 6
+sound = ExtResource("2_b8cgj")
+steps = Array[ExtResource("3_7ko0g")]([SubResource("Resource_swlh5")])
