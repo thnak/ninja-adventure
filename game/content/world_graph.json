@@ -1,10 +1,19 @@
 {
 	"start": {"scene": "village", "spawn": "start"},
 	"regions": {
-		"valley": {"name": "Thung lũng", "special": false, "map_pos": [640, 360]}
+		"valley": {"name": "Thung lũng", "special": false, "map_pos": [330, 360]},
+		"forest": {"name": "Rừng Sương", "special": false, "map_pos": [640, 360]},
+		"cave": {"name": "Hang mỏ", "special": true, "map_pos": [950, 360]}
 	},
 	"areas": {
-		"village": {"path": "res://content/map/village.tscn", "region": "valley", "name": "Làng", "map_pos": [640, 360]}
+		"village": {"path": "res://content/map/village.tscn", "region": "valley", "name": "Làng", "map_pos": [420, 400]},
+		"dojo": {"path": "res://content/map/dojo.tscn", "region": "valley", "name": "Đạo quán", "map_pos": [840, 280]},
+		"forest": {"path": "res://content/map/forest.tscn", "region": "forest", "name": "Rừng Sương", "map_pos": [640, 360]},
+		"cave": {"path": "res://content/map/cave.tscn", "region": "cave", "name": "Hang mỏ", "map_pos": [640, 360]}
 	},
-	"links": []
+	"links": [
+		["village", "dojo"],
+		["village", "forest"],
+		["forest", "cave"]
+	]
 }

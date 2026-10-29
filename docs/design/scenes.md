@@ -95,7 +95,7 @@ Tương tác giữa vật thể: tín hiệu và `@export` trỏ node trong cùn
 4b. **Bản đồ lớn** (**xong**: `MapScreen`, hai cấp thế giới/vùng, che khu chưa đến, `links` trong world_graph được `check_world` kiểm) và tách nút điều khiển (**xong**) (mục 9, 10). Chưa có đi nhanh.
 4c. **Tự lưu theo timer** (**xong**: `SaveGame`, `Autosave`, kiểm chứng bằng `tools	est_interact.ps1 -Test save`; mục 11). Save ở `user://save.json`.
 5. **Dựng khu thật** từ `map_village.tscn`: làng, nhà trong, đường ra ngoài, rồi các khu khác theo bảng asset.
-   - **Khu làng đã dựng thử** (`content/map/village.tscn`, sinh bởi `tools/make_village.gd`): 8 công trình, đường có viền tự động, cây, cổng torii, quảng trường. Chưa có nội thất bên trong, chưa có NPC, cổng ra đông chưa mở. Xem `docs/maps/README.md`.
+   - **Đã dựng:** làng, đạo quán, Rừng Sương, hang mỏ (vùng đặc biệt), nối bằng cổng; có NPC (`Npc`, đi lang thang, nói chuyện). Xem `docs/maps/README.md`. Còn thiếu: nội thất các nhà khác, hàng rào, nhiệm vụ, nhạc theo khu.
 6. Thêm `NPC`, `Switch` khi có khu cần đến.
 
 ## 8. Quyết định đã chốt

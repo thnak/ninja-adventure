@@ -1,9 +1,15 @@
-# Tạo content/map/tileset_village.tres = tileset.tres của pack + TilesetHouse (nguồn 6) + TilesetNature (nguồn 7).
+# Tạo content/map/tileset_village.tres = tileset.tres của pack + TilesetHouse (6), TilesetNature (7),
+# TilesetElement (8, nội thất) và TilesetReliefDetail (9, cửa hang).
 # Mỗi ô không trong suốt thành một tile (không có va chạm; va chạm do trình dựng map thêm theo công trình).
 # Chạy: godot --headless --path game --script ../tools/build_village_tileset.gd
 extends SceneTree
 
-const SOURCES = {6: "res://content/map/tileset_house.png", 7: "res://content/map/tileset_nature.png"}
+const SOURCES = {
+	6: "res://content/map/tileset_house.png",
+	7: "res://content/map/tileset_nature.png",
+	8: "res://content/map/tileset_element.png",
+	9: "res://content/map/tileset_relief_detail.png",
+}
 
 
 func _initialize() -> void:

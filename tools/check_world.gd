@@ -2,6 +2,10 @@
 # Chạy: tools\check_world.ps1   (thoát mã 0 nếu sạch, 1 nếu có lỗi)
 extends SceneTree
 
+# Chỉ để kiểm tra điểm xuất hiện không nằm trong vùng cổng: scene_id -> [{name, rect}] và scene_id -> {tên spawn: vị trí}.
+var rects := {}
+var spawn_points := {}
+
 
 func _initialize() -> void:
 	# Đồ thị chọn qua biến môi trường WORLD_GRAPH (PowerShell nuốt dấu "--" nên không truyền bằng đối số).
@@ -29,8 +33,17 @@ func _initialize() -> void:
 			errors.append("%s: unknown region '%s'" % [id, WorldGraph.region_of(id)])
 		portals[id] = []
 		spawns[id] = []
+		rects[id] = []
+		spawn_points[id] = {}
 		_collect(root, id, portals, spawns, errors)
 		root.free()
+
+	# Điểm xuất hiện nằm trong (hoặc sát) vùng cổng sẽ đẩy người chơi ngược lại ngay sau khi đến (cổng tự thử lại).
+	for id in rects:
+		for sp_name in spawn_points[id]:
+			for portal in rects[id]:
+				if portal.rect.grow(10.0).has_point(spawn_points[id][sp_name]):
+					errors.append("%s: spawn '%s' is inside/too close to portal '%s'" % [id, sp_name, portal.name])
 
 	for id in portals:
 		for p in portals[id]:
@@ -102,7 +115,13 @@ func _collect(node: Node, id: String, portals: Dictionary, spawns: Dictionary, e
 		if spawns[id].has(key):
 			errors.append("%s: duplicate interactable name '%s' (state key would collide)" % [id, node.name])
 		spawns[id].append(key)
+	if node.is_in_group("portal"):
+		for child in node.get_children():
+			if child is CollisionShape2D and child.shape is RectangleShape2D:
+				var center: Vector2 = node.position + child.position
+				rects[id].append({"name": String(node.name), "rect": Rect2(center - child.shape.size / 2.0, child.shape.size)})
 	if node.is_in_group("spawn_point"):
+		spawn_points[id][String(node.name)] = node.position
 		if spawns[id].has(String(node.name)):
 			errors.append("%s: duplicate spawn '%s'" % [id, node.name])
 		spawns[id].append(String(node.name))

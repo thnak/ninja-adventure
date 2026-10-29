@@ -20,7 +20,8 @@ signal teleported
 			await ready
 		if actor:
 			actor.queue_free()
-		actor = actor_scene.instantiate()
+		# Nhân vật không dùng actor_scene (ví dụ Npc) để trống: không có gì để tạo.
+		actor = actor_scene.instantiate() if actor_scene else null
 
 @export var team:ResourceDamageTeam:
 	set(v):

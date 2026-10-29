@@ -70,14 +70,20 @@ func on_camera_animation_finished():
 	pivot.position = camera_grid.global_position
 
 
-## Đổi khu: fade tối, thay map, đặt người chơi tại SpawnPoint, fade sáng.
-func travel(scene_id:StringName,spawn_id:StringName) -> void:
+## Bắt đầu đổi khu nếu được. Trả về false khi chưa thể (đang đổi khu hoặc vừa mới đến): người gọi nên thử lại.
+## Quá trình đổi khu chạy nền (fade tối, thay map, đặt người chơi tại SpawnPoint, fade sáng).
+func travel(scene_id:StringName,spawn_id:StringName) -> bool:
 	if travelling or Time.get_ticks_msec() - arrived_at_ms < PORTAL_COOLDOWN_MS:
-		return
+		return false
 	if !WorldGraph.has_area(scene_id):
 		push_error("World.travel: unknown area '%s'" % scene_id)
-		return
+		return true
 	travelling = true
+	run_travel(scene_id,spawn_id)
+	return true
+
+
+func run_travel(scene_id:StringName,spawn_id:StringName) -> void:
 	player.move_vector = Vector2.ZERO
 	player.process_mode = Node.PROCESS_MODE_DISABLED
 	var fx:Transition = get_tree().get_first_node_in_group("transition")

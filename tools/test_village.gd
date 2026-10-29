@@ -29,7 +29,7 @@ func frames(n: int) -> void:
 
 
 func tile_center(tx: int, ty: int) -> Vector2:
-	return Vector2(tx * 16 + 32, ty * 16 + 32)
+	return Vector2(tx * 16 + 16, ty * 16 + 16)
 
 
 func walk(world: World, action: StringName, n: int) -> void:
@@ -63,17 +63,25 @@ func run(world: World) -> void:
 	check(world.player.global_position.distance_to(tile_center(-1, 8)) < 2.0, "player starts at the plaza spawn")
 	await shot("v2_start")
 
+	# Làng phải khít lưới camera (màn hình (cx, cy) ở (320cx+24, 176cy+16)): 3x2 màn hình = x [-456,504], y [-72,280].
+	var tilemap := world.map.get_node("Tilemap") as TileMap
+	var used := tilemap.get_used_rect()
+	var origin := tilemap.global_position
+	var top_left := Vector2(used.position) * 16.0 + origin
+	var bottom_right := Vector2(used.end) * 16.0 + origin
+	check(top_left == Vector2(-456, -72) and bottom_right == Vector2(504, 280), "tiles exactly fill the camera grid: %s to %s" % [top_left, bottom_right])
+
 	# Tường nhà bà Lan (x -27..-24, y -3..-1, cửa ở x=-26): đứng dưới phần tường bên phải cửa, đi lên.
 	world.player.global_position = tile_center(-24, 0)
 	await frames(5)
 	await walk(world, &"move_up", 60)
-	check(world.player.global_position.y > 22.0, "house wall blocks the player (y=%.1f)" % world.player.global_position.y)
+	check(world.player.global_position.y > 6.0, "house wall blocks the player (y=%.1f)" % world.player.global_position.y)
 
 	# Cửa: đi lên đến được ô cửa.
 	world.player.global_position = tile_center(-26, 0)
 	await frames(5)
 	await walk(world, &"move_up", 60)
-	check(world.player.global_position.y < 20.0, "the doorway is walkable (y=%.1f)" % world.player.global_position.y)
+	check(world.player.global_position.y < 4.0, "the doorway is walkable (y=%.1f)" % world.player.global_position.y)
 
 	# Đọc biển cửa.
 	world.player.global_position = tile_center(-26, 0)
@@ -94,7 +102,7 @@ func run(world: World) -> void:
 	check(world.player.global_position.y < 280.0, "bottom tree line stops the player (y=%.1f)" % world.player.global_position.y)
 
 	# Biên: đi sang trái hết cỡ từ đường chính.
-	world.player.global_position = tile_center(0, 5)
+	world.player.global_position = tile_center(0, 1)
 	await frames(5)
 	await walk(world, &"move_left", 420)
 	check(world.player.global_position.x >= -456.0, "left edge keeps the player in (x=%.1f)" % world.player.global_position.x)
