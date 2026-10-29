@@ -1,0 +1,27 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://system/interact/chest.gd" id="1_chest"]
+[ext_resource type="Texture2D" path="res://content/interactable/LittleTreasureChest.png" id="2_tex"]
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_range"]
+radius = 20.0
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_body"]
+size = Vector2(12, 8)
+
+[node name="Chest" type="Area2D"]
+script = ExtResource("1_chest")
+
+[node name="Sprite" type="Sprite2D" parent="."]
+texture = ExtResource("2_tex")
+hframes = 2
+
+[node name="Range" type="CollisionShape2D" parent="."]
+shape = SubResource("CircleShape2D_range")
+
+[node name="Blocker" type="StaticBody2D" parent="."]
+collision_mask = 0
+
+[node name="Shape" type="CollisionShape2D" parent="Blocker"]
+position = Vector2(0, 3)
+shape = SubResource("RectangleShape2D_body")

@@ -1,0 +1,54 @@
+[gd_scene load_steps=5 format=3 uid="uid://ck4ncv1wxtff5"]
+
+[ext_resource type="TileSet" uid="uid://tir0rfjtiwma" path="res://content/map/tileset.tres" id="1_3llky"]
+[ext_resource type="Script" path="res://system/map/map.gd" id="1_kj2hq"]
+[ext_resource type="Texture2D" uid="uid://dwtpv76elqabc" path="res://system/map/map_size_bg.png" id="2_63ctl"]
+[ext_resource type="Script" path="res://system/environment/environment_area.gd" id="9_chgur"]
+
+[node name="Map" type="Node2D"]
+script = ExtResource("1_kj2hq")
+
+[node name="ScreenGridRef" type="TextureRect" parent="."]
+auto_translate_mode = 1
+modulate = Color(1, 1, 1, 0.0745098)
+z_index = 3
+offset_left = -1416.0
+offset_top = -950.0
+offset_right = -19.0
+offset_bottom = 196.0
+scale = Vector2(2, 2)
+mouse_filter = 2
+texture = ExtResource("2_63ctl")
+stretch_mode = 1
+
+[node name="Tilemap" type="TileMap" parent="."]
+y_sort_enabled = true
+position = Vector2(8, 8)
+tile_set = ExtResource("1_3llky")
+format = 2
+layer_0/name = "Wall"
+layer_0/y_sort_enabled = true
+layer_0/y_sort_origin = -5
+layer_0/navigation_enabled = false
+layer_1/name = "Wall2"
+layer_1/y_sort_enabled = true
+layer_1/y_sort_origin = -5
+layer_1/tile_data = PackedInt32Array()
+layer_2/name = "FloorDetail"
+layer_2/y_sort_enabled = true
+layer_2/z_index = -1
+layer_2/navigation_enabled = false
+layer_2/tile_data = PackedInt32Array()
+layer_3/name = "Floor"
+layer_3/z_index = -2
+layer_3/navigation_enabled = false
+layer_3/tile_data = PackedInt32Array()
+
+[node name="EnvironmentArea" type="Area2D" parent="."]
+unique_name_in_owner = true
+visible = false
+collision_layer = 0
+collision_mask = 16
+monitorable = false
+script = ExtResource("9_chgur")
+metadata/_edit_lock_ = true

@@ -1,0 +1,16 @@
+{
+	"start": {"scene": "test_a", "spawn": "start"},
+	"regions": {
+		"test": {"name": "Khu thử", "special": false, "map_pos": [380, 340]},
+		"cave": {"name": "Hang thử", "special": true, "map_pos": [900, 340]}
+	},
+	"areas": {
+		"test_a": {"path": "res://content/map/test_a.tscn", "region": "test", "name": "Khu A", "map_pos": [320, 360]},
+		"test_b": {"path": "res://content/map/test_b.tscn", "region": "test", "name": "Khu B", "map_pos": [760, 360]},
+		"test_c": {"path": "res://content/map/test_c.tscn", "region": "cave", "name": "Hang C", "map_pos": [900, 360]}
+	},
+	"links": [
+		["test_a", "test_b"],
+		["test_b", "test_c"]
+	]
+}

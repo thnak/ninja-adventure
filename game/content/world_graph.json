@@ -1,0 +1,10 @@
+{
+	"start": {"scene": "village", "spawn": "start"},
+	"regions": {
+		"valley": {"name": "Thung lũng", "special": false, "map_pos": [640, 360]}
+	},
+	"areas": {
+		"village": {"path": "res://content/map/village.tscn", "region": "valley", "name": "Làng", "map_pos": [640, 360]}
+	},
+	"links": []
+}
