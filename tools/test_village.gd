@@ -65,7 +65,8 @@ func run(world: World) -> void:
 
 	# Làng phải khít lưới camera (màn hình (cx, cy) ở (320cx+24, 176cy+16)): 3x2 màn hình = x [-456,504], y [-72,280].
 	var tilemap := world.map.get_node("Tilemap") as TileMap
-	var used := tilemap.get_used_rect()
+	# Nền cỏ nở ra quanh khu (rìa 2 ô nhìn thấy) (để rìa không lộ khoảng trống); phần còn lại phải khít lưới.
+	var used := tilemap.get_used_rect().grow(-2)
 	var origin := tilemap.global_position
 	var top_left := Vector2(used.position) * 16.0 + origin
 	var bottom_right := Vector2(used.end) * 16.0 + origin
