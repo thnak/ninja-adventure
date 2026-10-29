@@ -81,7 +81,7 @@ func run(world: World) -> void:
 		for n in player.get_children():
 			if n is SkillCaster:
 				caster = n
-	check(caster != null and caster.known.size() == 26, "caster knows the 26 starter skills")
+	check(caster != null and caster.known.size() == 28, "caster knows the 28 starter skills")
 	check(caster.current[&"attack"].id == &"slash" and caster.current[&"use_tool"].id == &"shuriken" and caster.current[&"cast"].id == &"fireball", "default slots: slash / shuriken / fireball")
 	var base := player.global_position
 	player.sprite.direction = Vector2.RIGHT

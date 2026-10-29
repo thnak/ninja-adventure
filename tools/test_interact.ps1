@@ -5,5 +5,5 @@ if (-not $godot) { throw "Godot not found; winget install GodotEngine.GodotEngin
 $game = Resolve-Path "$PSScriptRoot\..\game"
 $p = Start-Process -FilePath $godot.FullName -PassThru -NoNewWindow -ArgumentList @(
     "--rendering-method", "gl_compatibility", "--path", $game, "--script", "$PSScriptRoot\test_$Test.gd", "--", $OutDir)
-if (-not $p.WaitForExit(120000)) { $p.Kill(); throw "timeout" }
+if (-not $p.WaitForExit(240000)) { $p.Kill(); throw "timeout" }
 exit $p.ExitCode

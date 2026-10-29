@@ -16,6 +16,7 @@ var player:Character
 var travelling := false
 var arrived_at_ms := 0
 var play_time := 0.0
+var death_screen:DeathScreen
 
 @onready var rain: GPUParticles2D = %Rain
 @onready var snow: GPUParticles2D = %Snow
@@ -44,6 +45,11 @@ func _ready():
 	player_ui.add_child(skill_bar)
 	skill_bar.position = Vector2(3, 22)
 	skill_bar.bind(caster)
+	player_ui.resource_life = player.life
+	death_screen = DeathScreen.new()
+	add_child(death_screen)
+	player.died.connect(on_player_died)
+	death_screen.respawn_requested.connect(respawn)
 	add_child(Dialog.new())
 	add_child(MapScreen.new())
 	if !(use_save and load_saved()):
@@ -58,6 +64,17 @@ func _ready():
 
 func _process(delta:float) -> void:
 	play_time += delta
+
+
+func on_player_died(cause:StringName) -> void:
+	death_screen.open(cause)
+
+
+## Hồi sinh ở điểm xuất phát với đầy máu; mọi thứ khác (đồ, tiến trình) giữ nguyên.
+func respawn() -> void:
+	death_screen.close()
+	player.revive()
+	load_area(WorldGraph.start_scene(),WorldGraph.start_spawn())
 
 
 ## Nạp save nếu có và khu đã lưu còn tồn tại. Trả về false thì World bắt đầu từ đầu.

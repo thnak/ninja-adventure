@@ -101,7 +101,7 @@ func run(world: World) -> void:
 	for n in player.get_children():
 		if n is SkillCaster:
 			caster = n
-	check(caster.known.size() == 26, "26 skills known (%d)" % caster.known.size())
+	check(caster.known.size() == 28, "28 skills known (%d)" % caster.known.size())
 	check(caster.current.has(&"ultimate") and caster.current[&"ultimate"].id == &"blade_storm", "the ultimate slot starts on blade storm")
 	var base := player.global_position
 	player.sprite.direction = Vector2.RIGHT

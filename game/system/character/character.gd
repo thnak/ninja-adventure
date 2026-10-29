@@ -8,6 +8,13 @@ enum State{IDLE}
 
 signal teleported
 signal died(cause)
+signal hurt(amount)
+signal shield_changed
+## Khiên vừa hấp thụ một đòn đánh tới từ vị trí `from` (để vẽ vòng cung chắn đúng hướng).
+signal shield_absorbed(from)
+
+@export_category("vitals")
+@export var max_hp := 12.0
 
 @export_category("physics")
 @export var speed = 100.0
@@ -45,6 +52,14 @@ var status_left := {}
 var dead := false
 ## Lá chắn: chặn mọi đòn thường (trạng thái, đẩy lùi). Không chặn được đòn chí mạng hay bị đè.
 var guard := false
+var life := ResourceLife.new()
+## Khiên: điểm hấp thụ còn lại và số giây khiên còn tồn tại. Hấp thụ sát thương trước khi trừ máu;
+## không đỡ được đòn chí mạng hay bị đè (die() bỏ qua cả khiên lẫn máu).
+var shield := 0.0
+var shield_max := 0.0
+var shield_left := 0.0
+## Khiên có kèm thế thủ (guard) hay không: khi hết khiên thì thế thủ cũng hết.
+var shield_guards := false
 
 const STATUS_TINT := {
 	ResourceDamage.Status.ROOT: Color(0.85, 0.65, 0.45),
@@ -67,6 +82,8 @@ var slide_left := 0.0
 
 
 func _ready() -> void:
+	life.max_life = max_hp
+	life.life = max_hp
 	# Hitbox dựng sẵn trong character.tscn có đội riêng; đồng bộ để đòn của chính mình không trúng mình.
 	if team:
 		hitbox.team = team
@@ -80,6 +97,7 @@ func _physics_process(delta: float) -> void:
 		sprite.anim = SpriteCharacter.Anim.DEAD
 		return
 	tick_status(delta)
+	tick_shield(delta)
 	match state:
 		State.IDLE:
 			if air_left > 0.0:
@@ -119,6 +137,7 @@ func die(cause:StringName = &""):
 	air_left = 0.0
 	collision_layer = 0
 	hitbox.disable()
+	break_shield()
 	sprite.position.y = 0.0
 	sprite.anim = SpriteCharacter.Anim.DEAD
 	if cause == &"crushed":
@@ -165,10 +184,76 @@ func update_status_tint():
 	sprite.self_modulate = tint
 
 
+## Dựng khiên: thay khiên cũ nếu khiên mới dày hơn hoặc lâu hơn.
+func add_shield(points:float,seconds:float,guarding := false):
+	if dead or points <= 0.0 or seconds <= 0.0:
+		return
+	shield = maxf(shield, points)
+	shield_max = maxf(shield_max, shield)
+	shield_left = maxf(shield_left, seconds)
+	if guarding:
+		shield_guards = true
+		guard = true
+	shield_changed.emit()
+
+
+func break_shield():
+	var had := shield > 0.0 or shield_left > 0.0
+	shield = 0.0
+	shield_max = 0.0
+	shield_left = 0.0
+	if shield_guards:
+		shield_guards = false
+		guard = false
+	if had:
+		shield_changed.emit()
+
+
+func tick_shield(delta:float):
+	if shield_left <= 0.0:
+		return
+	shield_left -= delta
+	if shield_left <= 0.0:
+		break_shield()
+
+
+## Hồi sinh với đầy máu, không khiên, không khống chế.
+func revive():
+	if !dead:
+		return
+	dead = false
+	collision_layer = 1
+	hitbox.monitorable = true
+	sprite.scale = Vector2.ONE
+	sprite.offset = Vector2.ZERO
+	status_left.clear()
+	update_status_tint()
+	break_shield()
+	life.life = max_hp
+
+
 func on_hit(damage:ResourceDamage,at_pos):
+	if dead:
+		return
 	if damage.lethal:
 		die(&"lethal")
 		return
+	var dealt := float(damage.amount)
+	if shield > 0.0:
+		var soaked := minf(shield, dealt)
+		shield_absorbed.emit(at_pos)
+		shield -= soaked
+		dealt -= soaked
+		if shield <= 0.0:
+			break_shield()
+		else:
+			shield_changed.emit()
+	if dealt > 0.0:
+		life.damage(dealt)
+		hurt.emit(dealt)
+		if !life.is_alive():
+			die(&"slain")
+			return
 	if guard:
 		return
 	apply_status(damage.status, damage.status_sec)

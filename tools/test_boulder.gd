@@ -84,7 +84,7 @@ func run(world: World) -> void:
 	for n in player.get_children():
 		if n is SkillCaster:
 			caster = n
-	check(caster.known.size() == 26, "26 skills known (%d)" % caster.known.size())
+	check(caster.known.size() == 28, "28 skills known (%d)" % caster.known.size())
 	var base := player.global_position
 	var enemy: ResourceDamageTeam = load("res://content/team/enemy_team.tres")
 	var good: ResourceDamageTeam = player.team

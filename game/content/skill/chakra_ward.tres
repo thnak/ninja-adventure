@@ -1,0 +1,25 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_oivdm"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/cast.wav" id="2_x148l"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_kdik3"]
+[ext_resource type="Script" path="res://system/skill/step_shield.gd" id="4_rrfal"]
+
+[sub_resource type="Resource" id="Resource_1in1w"]
+script = ExtResource("4_rrfal")
+points = 5.0
+
+[resource]
+script = ExtResource("1_oivdm")
+id = &"chakra_ward"
+display_name = "Hộ thể"
+kind = 2
+cost = 25.0
+cooldown = 6.0
+lock_sec = 0.35
+anim = 6
+sound = ExtResource("2_x148l")
+steps = Array[ExtResource("3_kdik3")]([SubResource("Resource_1in1w")])
+ai_role = 1
+ai_min = 0.0
+ai_max = 400.0

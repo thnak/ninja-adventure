@@ -1,0 +1,28 @@
+[gd_resource type="Resource" script_class="ResourceSkill" format=3]
+
+[ext_resource type="Script" path="res://system/skill/resource_skill.gd" id="1_cc5ix"]
+[ext_resource type="AudioStream" path="res://content/skill/sfx/cast.wav" id="2_2bqjj"]
+[ext_resource type="Script" path="res://system/skill/skill_step.gd" id="3_sxr5o"]
+[ext_resource type="Script" path="res://system/skill/step_shield.gd" id="4_flh68"]
+
+[sub_resource type="Resource" id="Resource_rob8a"]
+script = ExtResource("4_flh68")
+points = 12.0
+seconds = 10.0
+guarding = true
+tint = Color(1, 0.85, 0.4, 1)
+
+[resource]
+script = ExtResource("1_cc5ix")
+id = &"golden_bell"
+display_name = "Kim chung"
+kind = 3
+cost = 60.0
+cooldown = 18.0
+lock_sec = 0.5
+anim = 6
+sound = ExtResource("2_2bqjj")
+steps = Array[ExtResource("3_sxr5o")]([SubResource("Resource_rob8a")])
+ai_role = 1
+ai_min = 0.0
+ai_max = 400.0

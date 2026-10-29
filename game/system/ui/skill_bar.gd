@@ -12,6 +12,8 @@ func bind(skill_caster: SkillCaster) -> void:
 	caster = skill_caster
 	caster.chakra_changed.connect(queue_redraw)
 	caster.slots_changed.connect(queue_redraw)
+	# caster.character chỉ có sau khi caster vào cây, nên lấy từ cha.
+	(caster.get_parent() as Character).shield_changed.connect(queue_redraw)
 	custom_minimum_size = Vector2(140, 50)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 
@@ -26,6 +28,12 @@ func _draw() -> void:
 		return
 	draw_rect(Rect2(Vector2.ZERO, BAR + Vector2(2, 2)), Color(0, 0, 0, 0.6))
 	draw_rect(Rect2(Vector2.ONE, Vector2(BAR.x * caster.chakra / caster.max_chakra, BAR.y)), Color(0.3, 0.6, 1.0))
+	# Thanh khiên (vàng khi có thế thủ) nằm ngay dưới thanh chakra.
+	var who := caster.character
+	if who.shield > 0.0 and who.shield_max > 0.0:
+		var tint := Color(1.0, 0.85, 0.4) if who.shield_guards else Color(0.45, 0.8, 1.0)
+		draw_rect(Rect2(Vector2(0, 7), Vector2(BAR.x + 2, 3)), Color(0, 0, 0, 0.6))
+		draw_rect(Rect2(Vector2(1, 8), Vector2(BAR.x * who.shield / who.shield_max, 1)), tint)
 	var font := ThemeDB.fallback_font
 	var y := 16.0
 	for slot in KEYS:

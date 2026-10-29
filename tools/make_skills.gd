@@ -126,6 +126,7 @@ func _initialize() -> void:
 	save(skill("quake", "Địa chấn", ResourceSkill.Kind.ULTIMATE, 70.0, 20.0, 0.9, SpriteCharacter.Anim.ABILITY, "cast", [quake]))
 	make_variants()
 	make_boss_skills()
+	make_shield_skills()
 	quit()
 
 
@@ -240,6 +241,20 @@ func make_boss_skills() -> void:
 	save(skill("roll_boulder", "Lăn đá", ResourceSkill.Kind.ULTIMATE, 0.0, 8.0, 0.8, SpriteCharacter.Anim.ABILITY, "cast", [StepBoulder.new()]))
 
 
+## Khiên cá nhân: hấp thụ sát thương rồi vỡ. Kim chung còn thêm thế thủ (không bị đẩy lùi hay khống chế).
+func make_shield_skills() -> void:
+	var ward := StepShield.new()
+	ward.points = 5.0
+	ward.seconds = 8.0
+	save(skill("chakra_ward", "Hộ thể", ResourceSkill.Kind.CAST, 25.0, 6.0, 0.35, SpriteCharacter.Anim.ABILITY, "cast", [ward]))
+	var bell := StepShield.new()
+	bell.points = 12.0
+	bell.seconds = 10.0
+	bell.guarding = true
+	bell.tint = Color(1.0, 0.85, 0.4)
+	save(skill("golden_bell", "Kim chung", ResourceSkill.Kind.ULTIMATE, 60.0, 18.0, 0.5, SpriteCharacter.Anim.ABILITY, "cast", [bell]))
+
+
 func skill(id: String, display: String, kind: ResourceSkill.Kind, cost: float, cooldown: float, lock: float, anim: SpriteCharacter.Anim, sound: String, steps: Array) -> ResourceSkill:
 	var s := ResourceSkill.new()
 	s.id = StringName(id)
@@ -303,6 +318,27 @@ func kunai_bolt() -> StepProjectile:
 	return s
 
 
+# Gợi ý cho AI theo id: [vai trò, tầm tối thiểu, tầm tối đa]. Kỹ năng không có ở đây dùng mặc định theo nhóm.
+const AI_HINTS := {
+	"ice_wall": [ResourceSkill.AiRole.DEFEND, 30.0, 150.0],
+	"rock_bastion": [ResourceSkill.AiRole.DEFEND, 40.0, 220.0],
+	"chakra_ward": [ResourceSkill.AiRole.DEFEND, 0.0, 400.0],
+	"golden_bell": [ResourceSkill.AiRole.DEFEND, 0.0, 400.0],
+	"rock_spikes": [ResourceSkill.AiRole.ATTACK, 30.0, 110.0],
+	"earth_prison": [ResourceSkill.AiRole.ATTACK, 20.0, 100.0],
+	"ice_spikes": [ResourceSkill.AiRole.ATTACK, 30.0, 110.0],
+	"quake": [ResourceSkill.AiRole.ATTACK, 0.0, 70.0],
+	"spin": [ResourceSkill.AiRole.ATTACK, 0.0, 28.0],
+	"roll_boulder": [ResourceSkill.AiRole.SPECIAL, 90.0, 260.0],
+	"shove_rock": [ResourceSkill.AiRole.SPECIAL, 20.0, 220.0],
+}
+
+
 func save(s: ResourceSkill) -> void:
+	if AI_HINTS.has(String(s.id)):
+		var hint: Array = AI_HINTS[String(s.id)]
+		s.ai_role = hint[0]
+		s.ai_min = hint[1]
+		s.ai_max = hint[2]
 	var err := ResourceSaver.save(s, "res://content/skill/%s.tres" % s.id)
 	print(s.id, " -> ", error_string(err))

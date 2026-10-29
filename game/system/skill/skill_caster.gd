@@ -4,10 +4,12 @@ extends Node
 
 signal chakra_changed
 signal slots_changed
+## Vừa dùng xong một kỹ năng (người chơi hay AI); dùng cho AI theo dõi và cho bài kiểm tra.
+signal used(skill)
 
 const SLOTS := {&"attack": ResourceSkill.Kind.MELEE, &"use_tool": ResourceSkill.Kind.THROW, &"cast": ResourceSkill.Kind.CAST, &"ultimate": ResourceSkill.Kind.ULTIMATE}
 const STARTING := ["slash", "spin", "shuriken", "kunai_fan", "fireball", "ice_wall", "thunder", "rock_spikes", "earth_prison", "frost_nova", "water_pillar", "tide", "blade_storm", "meteor_rain", "thunder_storm", "quake",
-	"ice_spikes", "frost_ball", "poison_ball", "violet_thunder", "ice_shuriken", "fire_kunai", "blizzard", "rock_bastion", "roll_boulder", "shove_rock"]
+	"ice_spikes", "frost_ball", "poison_ball", "violet_thunder", "ice_shuriken", "fire_kunai", "blizzard", "rock_bastion", "roll_boulder", "shove_rock", "chakra_ward", "golden_bell"]
 
 @export var max_chakra := 100.0
 @export var chakra_regen := 8.0
@@ -83,6 +85,7 @@ func try_use(slot: StringName) -> bool:
 			run_later(step, ctx)
 		else:
 			step.run(ctx)
+	used.emit(skill)
 	return true
 
 

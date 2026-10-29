@@ -17,3 +17,6 @@ cooldown = 6.0
 lock_sec = 0.7
 sound = ExtResource("2_2d01k")
 steps = Array[ExtResource("3_00id3")]([SubResource("Resource_h24lx")])
+ai_role = 2
+ai_min = 20.0
+ai_max = 220.0

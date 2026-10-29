@@ -50,3 +50,5 @@ lock_sec = 0.4
 anim = 6
 sound = ExtResource("2_wq57s")
 steps = Array[ExtResource("3_mtmtq")]([SubResource("Resource_ybiha")])
+ai_min = 30.0
+ai_max = 110.0

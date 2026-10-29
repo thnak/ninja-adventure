@@ -30,3 +30,5 @@ cooldown = 1.2
 lock_sec = 0.3
 sound = ExtResource("2_kjc1i")
 steps = Array[ExtResource("3_3jdxw")]([SubResource("Resource_iysi7")])
+ai_min = 0.0
+ai_max = 28.0
