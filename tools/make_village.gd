@@ -77,8 +77,9 @@ func _initialize() -> void:
 	people()
 	check_reachable()
 	kit.edge_decor(dirt, 21, 0.16)
+	print("trampleable grass: ", kit.trample_grass(area, 31, 0.5))
 	kit.borders(X0, Y0, X1, Y1)
-	kit.add_env(Vector2(24, 104), Vector2(960, 352))
+	kit.add_env(Vector2(24, 104), Vector2(960, 352), load("res://content/environment/leafy/environment.tres"))
 	kit.add_spawn("start", kit.center(-1, 8))
 	kit.save("res://content/map/village.tscn")
 	quit()
@@ -185,6 +186,9 @@ func fences_and_props() -> void:
 	kit.stamp(Kit.WALL, Kit.ELEMENT, 12, 4, 1, 2, -21, 9)
 	kit.collide_rect(Rect2(kit.corner(-21, 10) + Vector2(1, 4), Vector2(14, 10)))
 	kit.reserve(-21, 9, 1, 2)
+	# Hai thùng đẩy được ở rìa đông quảng trường.
+	kit.add_push_crate("PushCrate1", 7, 10)
+	kit.add_push_crate("PushCrate2", 8, 11)
 
 
 # ---------- cây ----------

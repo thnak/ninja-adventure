@@ -85,6 +85,7 @@ func _initialize() -> void:
 	kit.fill_small(wood, 5)
 	kit.edge_decor(dirt, 11, 0.2)
 	glade_decor()
+	print("trampleable grass: ", kit.trample_grass(Kit.grow_cells(open, 1), 31, 0.6))
 
 	var blocked := blocked_mask(own)
 	var rects := kit.collide_mask(blocked)
@@ -92,7 +93,7 @@ func _initialize() -> void:
 	check_reachable(blocked)
 
 	kit.borders(TX0, TY0, TX1, TY1)
-	kit.add_env(Vector2(504, 104), Vector2(1280, 352))
+	kit.add_env(Vector2(504, 104), Vector2(1280, 352), load("res://content/environment/misty/environment.tres"))
 	kit.save("res://content/map/forest.tscn")
 	quit()
 
@@ -181,6 +182,7 @@ func features() -> void:
 	kit.add_chest("Chest_nook", kit.center(14, -2), &"herb", 2)
 	kit.add_sign("Sign_nook", kit.center(12, -1), "Ai đó từng nghỉ chân ở đây.\nGhi bên dưới: 'Đừng báo cho trưởng làng'.", true)
 	kit.add_chest("Chest_glade", kit.center(21, 9), &"coin", 15)
+	kit.add_push_crate("PushCrate1", 27, 10)
 
 	# Người trong rừng.
 	kit.add_npc("Girl", "child", kit.center(-1, 2), "Cô bé", "Tớ đuổi theo con bướm mà lạc tới tận đây. Chú đừng mách mẹ nhé!", 30.0)

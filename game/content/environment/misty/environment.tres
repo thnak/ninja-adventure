@@ -1,0 +1,9 @@
+[gd_resource type="Resource" script_class="ResourceEnvironment" load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://system/environment/resource_environment.gd" id="1_env"]
+[ext_resource type="GradientTexture1D" path="res://system/color_correction/gradient_neutral.tres" id="2_grad"]
+
+[resource]
+script = ExtResource("1_env")
+color_gradient = ExtResource("2_grad")
+meteo_list = Array[int]([2, 4])

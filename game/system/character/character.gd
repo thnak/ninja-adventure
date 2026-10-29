@@ -52,6 +52,11 @@ func _physics_process(delta: float) -> void:
 				sprite.anim = SpriteCharacter.Anim.IDLE
 				velocity = velocity.move_toward(Vector2.ZERO,deceleration*delta)
 	move_and_slide()
+	if move_vector.length():
+		for i in get_slide_collision_count():
+			var block := get_slide_collision(i).get_collider() as PushBlock
+			if block and move_vector.normalized().dot(-get_slide_collision(i).get_normal()) > 0.7:
+				block.nudge(-get_slide_collision(i).get_normal(), delta)
 
 
 func teleport(target_teleporter:Teleporter,offset_position:Vector2):

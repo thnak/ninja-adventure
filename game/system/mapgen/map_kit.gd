@@ -13,6 +13,8 @@ const CHEST = preload("res://content/interactable/chest.tscn")
 const NPC = preload("res://content/character/npc.tscn")
 const ENV_SHAPE = preload("res://system/environment/environment_shape.gd")
 const ENV_NEUTRAL = preload("res://content/environment/neutral/environment.tres")
+const TRAMPLE_GRASS = preload("res://content/destroyable/trampleable_grass.tscn")
+const PUSH_CRATE = preload("res://content/destroyable/push_crate.tscn")
 const TILESET = preload("res://content/map/tileset_village.tres")
 
 const WALL = 0       # lớp có y-sort: công trình, cây, đồ vật
@@ -327,6 +329,21 @@ func fill_small(area:Dictionary, seed_value:int) -> void:
 		tilemap.set_cell(WALL2, c, NATURE, atlas)
 
 
+## Đổi một phần cụm cỏ (ô WALL2 hàng 10 của tileset thiên nhiên) trong `cells` thành vật thể giẫm được, mọc lại sau khi giẫm.
+## Trả số cụm đã đổi. Chỉ nên gọi cho vùng người chơi đi tới được.
+func trample_grass(cells:Dictionary, seed_value:int, share := 0.5) -> int:
+	var count := 0
+	for c in cells:
+		if tilemap.get_cell_source_id(WALL2, c) != NATURE or tilemap.get_cell_atlas_coords(WALL2, c).y != 10:
+			continue
+		if hash01(c.x, c.y, seed_value) >= share:
+			continue
+		tilemap.erase_cell(WALL2, c)
+		add_scene(TRAMPLE_GRASS, "Grass_%d_%d" % [c.x, c.y], center(c.x, c.y))
+		count += 1
+	return count
+
+
 ## Hoa (lớp FLOOR_DETAIL) và bụi (WALL2) ở ô cỏ kề trên/dưới/hai bên ô đất; không va chạm.
 func edge_decor(dirt:Dictionary, seed_value:int, chance := 0.12) -> void:
 	for d in dirt:
@@ -447,12 +464,12 @@ func add(parent:Node, child:Node) -> void:
 	child.owner = map
 
 
-func add_env(center_point:Vector2, size:Vector2) -> void:
+func add_env(center_point:Vector2, size:Vector2, environment:ResourceEnvironment = ENV_NEUTRAL) -> void:
 	var shape := ENV_SHAPE.new() as CollisionShape2D
 	shape.shape = RectangleShape2D.new()
 	shape.shape.size = size
 	shape.position = center_point
-	shape.resource_environment = ENV_NEUTRAL
+	shape.resource_environment = environment
 	add(map.get_node("EnvironmentArea"), shape)
 
 
@@ -498,6 +515,12 @@ func add_chest(chest_name:String, point:Vector2, item_id:StringName, amount := 1
 	node.set("item_id", item_id)
 	node.set("amount", amount)
 	add(tilemap, node)
+
+
+## Thùng đẩy được đặt ở tâm ô (tx, ty), giữ ô đó cho cây khỏi mọc đè.
+func add_push_crate(crate_name:String, tx:int, ty:int) -> void:
+	add_scene(PUSH_CRATE, crate_name, center(tx, ty))
+	reserve(tx, ty, 1, 1)
 
 
 func add_scene(scene:PackedScene, node_name:String, point:Vector2) -> Node2D:
